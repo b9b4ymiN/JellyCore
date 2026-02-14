@@ -1,25 +1,45 @@
 /**
- * Inline Handler — Template responses for trivial messages
+ * Inline Handler — Template responses for trivial messages & slash commands
  *
  * No container spawn, no API call. <50ms response time.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+import { execSync } from 'child_process';
+import { ASSISTANT_NAME, GROUPS_DIR } from './config.js';
+
+// ─── Telegram Slash Commands ─────────────────────────────────────────
+
+/** Commands registered with Telegram's autocomplete menu */
+export const TELEGRAM_COMMANDS = [
+  { command: 'start', description: 'เริ่มต้นใช้งาน' },
+  { command: 'help', description: 'คำสั่งที่ใช้ได้' },
+  { command: 'status', description: 'สถานะระบบ' },
+  { command: 'soul', description: 'ดูบุคลิกของ AI' },
+  { command: 'me', description: 'ข้อมูลที่ AI รู้เกี่ยวกับคุณ' },
+  { command: 'reset', description: 'ล้างข้อมูลผู้ใช้ (USER.md)' },
+];
+
+// ─── Inline Responses ────────────────────────────────────────────────
+
 const responses: Record<string, string[]> = {
   greeting: [
-    'สวัสดีครับ! มีอะไรให้ช่วยไหม? 🤖',
-    'หวัดดีครับ! พร้อมช่วยเสมอ',
-    'สวัสดีครับ!',
+    'หวัดดี! 👋',
+    'สวัสดีค่ะ',
+    'Hey! 🌧️',
   ],
   thanks: [
-    'ยินดีครับ! 😊',
-    'ยินดีช่วยเสมอครับ',
-    'ไม่เป็นไรครับ',
+    'ยินดีค่ะ 😊',
+    'ไม่เป็นไรค่ะ',
+    '💙',
   ],
   ack: [
-    'รับทราบครับ ✅',
+    'รับทราบค่ะ ✅',
     '👍',
+    'โอเคค่ะ',
   ],
-  'admin-cmd': [], // handled separately
+  'admin-cmd': [], // handled by handleCommand()
 };
 
 function randomPick(arr: string[]): string {
@@ -27,20 +47,167 @@ function randomPick(arr: string[]): string {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-export function handleInline(reason: string, message: string): string {
-  // Admin commands
+// ─── Command Handlers ────────────────────────────────────────────────
+
+function cmdStart(): string {
+  return [
+    `สวัสดีค่ะ! ฝนเป็น AI ส่วนตัวของคุณ 🌧️`,
+    '',
+    'พิมพ์อะไรก็ได้เลย ฝนพร้อมช่วยค่ะ',
+    'ดูคำสั่งทั้งหมด → /help',
+  ].join('\n');
+}
+
+function cmdHelp(): string {
+  const lines = TELEGRAM_COMMANDS.map(c => `/${c.command} — ${c.description}`);
+  return [
+    '*คำสั่ง*',
+    '',
+    ...lines,
+    '',
+    'หรือพิมพ์อะไรก็ได้ ฝนจะตอบให้ค่ะ',
+  ].join('\n');
+}
+
+function cmdStatus(): string {
+  // Count running agent containers
+  let containerCount = 0;
+  try {
+    const output = execSync(
+      'docker ps --filter name=nanoclaw- --format {{.Names}} 2>/dev/null',
+      { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    containerCount = output.trim().split('\n').filter(Boolean).length;
+  } catch { /* docker not accessible or no containers */ }
+
+  const uptime = process.uptime();
+  const hours = Math.floor(uptime / 3600);
+  const mins = Math.floor((uptime % 3600) / 60);
+  const uptimeStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+
+  return [
+    '🟢 *ระบบทำงานปกติ*',
+    '',
+    `⏱ Uptime: ${uptimeStr}`,
+    `📦 Agent containers: ${containerCount}`,
+    `💾 Memory: ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB`,
+  ].join('\n');
+}
+
+function cmdSoul(): string {
+  const soulPath = path.join(GROUPS_DIR, 'global', 'SOUL.md');
+  try {
+    const content = fs.readFileSync(soulPath, 'utf-8');
+    // Extract just the "Who You Are" section for a concise view
+    const nameMatch = content.match(/- Name:\s*(.+)/);
+    const personalityMatch = content.match(/- Personality:\s*(.+)/);
+    const toneMatch = content.match(/- Tone:\s*(.+)/);
+    const emojiMatch = content.match(/- Emoji:\s*(.+)/);
+
+    const lines: string[] = ['🌧️ *SOUL*', ''];
+    if (nameMatch) lines.push(`ชื่อ: ${nameMatch[1].trim()}`);
+    if (personalityMatch) lines.push(`บุคลิก: ${personalityMatch[1].trim()}`);
+    if (toneMatch) lines.push(`Tone: ${toneMatch[1].trim()}`);
+    if (emojiMatch) lines.push(`Emoji: ${emojiMatch[1].trim()}`);
+    lines.push('', 'แก้ไขได้ที่ `/workspace/global/SOUL.md`');
+    return lines.join('\n');
+  } catch {
+    return 'ยังไม่มี SOUL.md — ฝนยังไม่มีตัวตนที่กำหนดค่ะ';
+  }
+}
+
+function cmdMe(chatJid: string, groupFolder?: string): string {
+  const folder = groupFolder || 'main';
+  const userPath = path.join(GROUPS_DIR, folder, 'USER.md');
+  try {
+    const content = fs.readFileSync(userPath, 'utf-8');
+    // Check if it's still the template (no real data)
+    if (content.includes('(เรียนรู้จากการสนทนา)') && !content.match(/- Name:\s*.+[^\s(]/)) {
+      return 'ฝนยังไม่รู้จักคุณเลย — ลองคุยกันก่อนนะคะ แล้วฝนจะจดจำเองค่ะ';
+    }
+    // Extract key info
+    const nameMatch = content.match(/- Name:\s*(.+)/);
+    const nickMatch = content.match(/- Nickname:\s*(.+)/);
+
+    const lines: string[] = ['👤 *ข้อมูลของคุณ*', ''];
+    if (nameMatch && !nameMatch[1].includes('เรียนรู้จากการสนทนา')) {
+      lines.push(`ชื่อ: ${nameMatch[1].trim()}`);
+    }
+    if (nickMatch && nickMatch[1].trim()) {
+      lines.push(`ชื่อเล่น: ${nickMatch[1].trim()}`);
+    }
+
+    // Extract preferences (non-empty lines under ## Preferences)
+    const prefsMatch = content.match(/## Preferences\n([\s\S]*?)(?=\n## |\n*$)/);
+    if (prefsMatch) {
+      const prefs = prefsMatch[1].trim().split('\n').filter(l => l.trim() && !l.includes('สะสมจากการสนทนา'));
+      if (prefs.length > 0) {
+        lines.push('', '*ความชอบ:*');
+        prefs.slice(0, 5).forEach(p => lines.push(p));
+      }
+    }
+
+    lines.push('', 'ล้างข้อมูล → /reset');
+    return lines.join('\n');
+  } catch {
+    return 'ยังไม่มีข้อมูลของคุณค่ะ — ลองคุยกันก่อนนะคะ';
+  }
+}
+
+function cmdReset(groupFolder?: string): string {
+  const folder = groupFolder || 'main';
+  const userPath = path.join(GROUPS_DIR, folder, 'USER.md');
+
+  const template = `# User
+
+ข้อมูลเกี่ยวกับผู้ใช้ — ฝนอัปเดตไฟล์นี้เองเมื่อเรียนรู้สิ่งใหม่
+
+## Basic Info
+
+- Name: (เรียนรู้จากการสนทนา)
+- Nickname: (ชื่อเล่นที่ชอบให้เรียก)
+- Language: ไทย (mix English ได้)
+- Timezone: Asia/Bangkok (UTC+7)
+
+## Preferences
+
+(สะสมจากการสนทนา — สิ่งที่ชอบ, ไม่ชอบ, style การทำงาน)
+
+## Projects
+
+(โปรเจคที่กำลังทำอยู่ — อัปเดตเมื่อมีข้อมูลใหม่)
+
+## Notes
+
+(บันทึกอื่นๆ ที่เป็นประโยชน์)
+`;
+
+  try {
+    fs.writeFileSync(userPath, template, 'utf-8');
+    return 'ล้างข้อมูลแล้วค่ะ 🗑️ เริ่มต้นใหม่สะอาดเลย';
+  } catch {
+    return 'ไม่สามารถล้างข้อมูลได้ค่ะ';
+  }
+}
+
+// ─── Main Handler ────────────────────────────────────────────────────
+
+export function handleInline(
+  reason: string,
+  message: string,
+  chatJid?: string,
+  groupFolder?: string,
+): string {
   if (reason === 'admin-cmd') {
     const cmd = message.trim().split(/\s+/)[0].toLowerCase();
     switch (cmd) {
-      case '/status': return '🟢 System running';
-      case '/health': return '🟢 All services healthy';
-      case '/help': return [
-        '📋 Available commands:',
-        '/status — System status',
-        '/health — Health check',
-        '/help — This help message',
-      ].join('\n');
-      default: return `Unknown command: ${cmd}`;
+      case '/start': return cmdStart();
+      case '/help': return cmdHelp();
+      case '/status': return cmdStatus();
+      case '/soul': return cmdSoul();
+      case '/me': return cmdMe(chatJid || '', groupFolder);
+      case '/reset': return cmdReset(groupFolder);
+      default: return `ไม่รู้จักคำสั่ง ${cmd} — ลอง /help ดูนะคะ`;
     }
   }
 

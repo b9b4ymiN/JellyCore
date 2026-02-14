@@ -179,7 +179,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Tier 1: Inline — template response, no container/API
   if (classification.tier === 'inline') {
-    const reply = handleInline(classification.reason, lastMsg.content);
+    const reply = handleInline(classification.reason, lastMsg.content, chatJid, group.name);
     const ch = channelFor(chatJid);
     await sendToChannel(chatJid, formatOutbound(ch, reply));
     lastAgentTimestamp[chatJid] = lastMsg.timestamp;

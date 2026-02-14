@@ -111,6 +111,15 @@ export class TelegramChannel implements Channel {
       'Telegram bot initialized',
     );
 
+    // Register slash commands in Telegram's menu
+    try {
+      const { TELEGRAM_COMMANDS } = await import('../inline-handler.js');
+      await this.bot.api.setMyCommands(TELEGRAM_COMMANDS);
+      logger.info({ count: TELEGRAM_COMMANDS.length }, 'Telegram commands registered');
+    } catch (err) {
+      logger.warn({ err }, 'Failed to register Telegram commands');
+    }
+
     // Start long-polling (non-blocking)
     this.bot.start({
       onStart: () => {
