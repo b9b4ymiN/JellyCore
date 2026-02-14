@@ -1,7 +1,7 @@
 # JellyCore
 
 <p align="center">
-  <strong>Self-hosted Personal AI Platform</strong><br>
+  <strong>🪼 Self-hosted Personal AI Platform</strong><br>
   Autonomous AI assistant running in Docker containers with persistent memory, knowledge retrieval, and Telegram integration.
 </p>
 
@@ -66,7 +66,7 @@ JellyCore is a production-ready personal AI platform that combines three core se
 ### 1. Clone
 
 ```bash
-git clone https://github.com/<your-org>/jellycore.git
+git clone https://github.com/JellyCore/jellycore.git
 cd jellycore
 ```
 

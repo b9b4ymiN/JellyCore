@@ -4,7 +4,10 @@
       "Bash(curl:*)",
       "mcp__web-reader__webReader",
       "mcp__web-search-prime__webSearchPrime",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(git -C \"c:/Programing/PersonalAI/jellycore\" diff --stat HEAD~5..HEAD)",
+      "Bash(git -C \"c:/Programing/PersonalAI/jellycore\" log --oneline -10)",
+      "Bash(git -C \"c:/Programing/PersonalAI/jellycore\" diff HEAD --name-only)"
     ]
   }
 }
