@@ -128,29 +128,32 @@ export class TelegramChannel implements Channel {
       return;
     }
 
-    // Convert to MarkdownV2 format
-    const formatted = toTelegramMarkdownV2(text);
+    // Split the original text first (before formatting), then format each chunk.
+    // This avoids splitting in the middle of MarkdownV2 formatting tokens.
+    const rawChunks = this.splitMessage(text);
 
-    // Split long messages
-    const chunks = this.splitMessage(formatted);
-    for (const chunk of chunks) {
+    for (const raw of rawChunks) {
+      let sent = false;
+
+      // Try MarkdownV2
       try {
-        // Try MarkdownV2 first
-        await this.bot.api.sendMessage(chatId, chunk, { parse_mode: 'MarkdownV2' });
+        const formatted = toTelegramMarkdownV2(raw);
+        await this.bot.api.sendMessage(chatId, formatted, { parse_mode: 'MarkdownV2' });
+        sent = true;
       } catch (err: any) {
-        // If MarkdownV2 parsing fails, fall back to plain text
         const errMsg = err?.message || err?.description || '';
         if (errMsg.includes("can't parse") || errMsg.includes('Bad Request')) {
           logger.warn({ jid }, 'MarkdownV2 parse failed, falling back to plain text');
-          const plain = stripMarkdown(text);
-          const plainChunks = this.splitMessage(plain);
-          for (const pc of plainChunks) {
-            await this.bot.api.sendMessage(chatId, pc);
-          }
-          return; // Already sent all content as plain text
+        } else {
+          logger.error({ jid, err }, 'Failed to send Telegram message');
+          throw err;
         }
-        logger.error({ jid, err }, 'Failed to send Telegram message');
-        throw err;
+      }
+
+      // Fallback: plain text (strip all markdown)
+      if (!sent) {
+        const plain = stripMarkdown(raw);
+        await this.bot.api.sendMessage(chatId, plain);
       }
     }
   }

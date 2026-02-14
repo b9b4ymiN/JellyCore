@@ -10,104 +10,100 @@
  * - *bold*, _italic_, ~strikethrough~, ||spoiler||, `code`, ```pre```
  * - [text](url), [text](tg://user?id=123)
  *
+ * Strategy: "hold" approach — convert each formatted segment into its final
+ * MarkdownV2 form immediately, store it in a slot, and leave a safe Unicode
+ * placeholder in the text. After escaping the remaining plain text, restore
+ * all held slots.
+ *
  * @see https://core.telegram.org/bots/api#markdownv2-style
  */
 
-// Characters that need escaping in MarkdownV2 (outside of code/formatting)
-const SPECIAL_CHARS = /([_\[\]()~>#+\-=|{}.!\\])/g;
+// All characters that need escaping in MarkdownV2 (per Telegram docs)
+const SPECIAL_CHARS = /([_*\[\]()~`>#+\-=|{}.!\\])/g;
 
 /**
- * Escape special characters for MarkdownV2 (outside code blocks)
+ * Escape special characters for MarkdownV2 (outside code/formatting blocks)
  */
-function escapeMarkdownV2(text: string): string {
+export function escapeMarkdownV2(text: string): string {
   return text.replace(SPECIAL_CHARS, '\\$1');
 }
 
 /**
  * Convert standard markdown / AI output to Telegram MarkdownV2.
- *
- * Strategy:
- * 1. Extract code blocks and inline code (protect from escaping)
- * 2. Convert **bold** → *bold* (Telegram uses single asterisks)
- * 3. Leave *bold* as-is (already Telegram-compatible)
- * 4. Leave _italic_ as-is
- * 5. Convert ## headings → *bold* text
- * 6. Escape remaining special chars
- * 7. Re-insert code blocks
  */
 export function toTelegramMarkdownV2(input: string): string {
   if (!input) return '';
 
-  // Step 1: Extract code blocks and inline code to protect them
-  const codeBlocks: string[] = [];
+  // Slot array — each entry is a fully-formatted MarkdownV2 segment
+  const slots: string[] = [];
+
+  /** Store a pre-formatted segment and return a safe placeholder */
+  function hold(formatted: string): string {
+    const i = slots.length;
+    slots.push(formatted);
+    // Use Unicode Interlinear Annotation anchors as delimiters — they are
+    // never in SPECIAL_CHARS and virtually never appear in real text.
+    return `\uFFF9${i}\uFFFB`;
+  }
+
   let text = input;
 
-  // Extract fenced code blocks (```...```)
-  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, lang, code) => {
-    const placeholder = `\x00CB${codeBlocks.length}\x00`;
-    // In MarkdownV2, code blocks use ```lang\ncode``` — no escaping inside
-    const langTag = lang ? `${lang}\n` : '';
-    codeBlocks.push(`\`\`\`${langTag}${code.trimEnd()}\`\`\``);
-    return placeholder;
-  });
+  // ── Phase 1: Protect code (no escaping inside) ──────────────────────
 
-  // Extract inline code (`...`)
-  text = text.replace(/`([^`\n]+)`/g, (_match, code) => {
-    const placeholder = `\x00CB${codeBlocks.length}\x00`;
-    codeBlocks.push(`\`${code}\``);
-    return placeholder;
-  });
+  // Fenced code blocks  ```lang\ncode```
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, lang: string, code: string) =>
+    hold(`\`\`\`${lang ? lang + '\n' : ''}${code.trimEnd()}\`\`\``),
+  );
 
-  // Step 2: Convert markdown headings to bold
-  // ## Heading → *Heading*
-  text = text.replace(/^#{1,6}\s+(.+)$/gm, (_match, heading) => {
-    return `\x00BOLD_START\x00${heading.trim()}\x00BOLD_END\x00`;
-  });
+  // Inline code `code`
+  text = text.replace(/`([^`\n]+)`/g, (_m, code: string) => hold(`\`${code}\``));
 
-  // Step 3: Convert **double asterisks** to Telegram bold markers
-  // Must happen before escaping
-  text = text.replace(/\*\*(.+?)\*\*/g, (_match, content) => {
-    return `\x00BOLD_START\x00${content}\x00BOLD_END\x00`;
-  });
+  // ── Phase 2: Protect links ──────────────────────────────────────────
 
-  // Step 4: Protect existing *single bold* markers
-  text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, (_match, content) => {
-    return `\x00BOLD_START\x00${content}\x00BOLD_END\x00`;
-  });
+  // [text](url) — escape the visible text but not the URL
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, t: string, url: string) =>
+    hold(`[${escapeMarkdownV2(t)}](${url})`),
+  );
 
-  // Step 5: Protect _italic_ markers
-  text = text.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, (_match, content) => {
-    return `\x00ITALIC_START\x00${content}\x00ITALIC_END\x00`;
-  });
+  // ── Phase 3: Convert markdown formatting → MarkdownV2 ──────────────
 
-  // Step 6: Protect ~strikethrough~ markers
-  text = text.replace(/~(.+?)~/g, (_match, content) => {
-    return `\x00STRIKE_START\x00${content}\x00STRIKE_END\x00`;
-  });
+  // ## Headings → *bold*
+  text = text.replace(/^#{1,6}\s+(.+)$/gm, (_m, h: string) =>
+    hold(`*${escapeMarkdownV2(h.trim())}*`),
+  );
 
-  // Step 7: Protect [text](url) links
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, linkText, url) => {
-    const placeholder = `\x00CB${codeBlocks.length}\x00`;
-    // Escape text part but not URL
-    codeBlocks.push(`[${escapeMarkdownV2(linkText)}](${url})`);
-    return placeholder;
-  });
+  // ***bold italic*** or ___bold italic___
+  text = text.replace(/\*{3}(.+?)\*{3}/g, (_m, c: string) =>
+    hold(`*_${escapeMarkdownV2(c)}_*`),
+  );
 
-  // Step 8: Escape all remaining special characters
+  // **bold**
+  text = text.replace(/\*\*(.+?)\*\*/g, (_m, c: string) =>
+    hold(`*${escapeMarkdownV2(c)}*`),
+  );
+
+  // *text* (single-asterisk bold — only if not already held)
+  text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, (_m, c: string) =>
+    hold(`*${escapeMarkdownV2(c)}*`),
+  );
+
+  // _italic_
+  text = text.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, (_m, c: string) =>
+    hold(`_${escapeMarkdownV2(c)}_`),
+  );
+
+  // ~strikethrough~
+  text = text.replace(/~(.+?)~/g, (_m, c: string) =>
+    hold(`~${escapeMarkdownV2(c)}~`),
+  );
+
+  // ── Phase 4: Escape all remaining plain text ───────────────────────
+
   text = escapeMarkdownV2(text);
 
-  // Step 9: Restore formatting markers (after escaping)
-  text = text.replace(/\x00BOLD_START\x00/g, '*');
-  text = text.replace(/\x00BOLD_END\x00/g, '*');
-  text = text.replace(/\x00ITALIC_START\x00/g, '_');
-  text = text.replace(/\x00ITALIC_END\x00/g, '_');
-  text = text.replace(/\x00STRIKE_START\x00/g, '~');
-  text = text.replace(/\x00STRIKE_END\x00/g, '~');
+  // ── Phase 5: Restore held segments ─────────────────────────────────
 
-  // Step 10: Restore code blocks
-  text = text.replace(/\x00CB(\d+)\x00/g, (_match, idx) => {
-    return codeBlocks[parseInt(idx)];
-  });
+  text = text.replace(/\uFFF9(\d+)\uFFFB/g, (_m, i: string) => slots[parseInt(i)]);
 
   return text;
 }
@@ -118,13 +114,14 @@ export function toTelegramMarkdownV2(input: string): string {
  */
 export function stripMarkdown(text: string): string {
   return text
-    .replace(/```\w*\n?([\s\S]*?)```/g, '$1')  // Code blocks → just content
-    .replace(/`([^`]+)`/g, '$1')                 // Inline code → just content
-    .replace(/\*\*(.+?)\*\*/g, '$1')             // **bold** → plain
-    .replace(/\*(.+?)\*/g, '$1')                 // *bold* → plain
-    .replace(/_(.+?)_/g, '$1')                   // _italic_ → plain
-    .replace(/~(.+?)~/g, '$1')                   // ~strike~ → plain
-    .replace(/\|\|(.+?)\|\|/g, '$1')             // ||spoiler|| → plain
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')     // [text](url) → text
-    .replace(/^#{1,6}\s+/gm, '');                // # headings → plain
+    .replace(/```\w*\n?([\s\S]*?)```/g, '$1') // Code blocks → just content
+    .replace(/`([^`]+)`/g, '$1')               // Inline code → just content
+    .replace(/\*{3}(.+?)\*{3}/g, '$1')         // ***bold italic*** → plain
+    .replace(/\*\*(.+?)\*\*/g, '$1')           // **bold** → plain
+    .replace(/\*(.+?)\*/g, '$1')               // *bold* → plain
+    .replace(/_(.+?)_/g, '$1')                 // _italic_ → plain
+    .replace(/~(.+?)~/g, '$1')                 // ~strike~ → plain
+    .replace(/\|\|(.+?)\|\|/g, '$1')           // ||spoiler|| → plain
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')   // [text](url) → text
+    .replace(/^#{1,6}\s+/gm, '');              // # headings → plain
 }
