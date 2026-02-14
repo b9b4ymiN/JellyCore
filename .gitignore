@@ -1,35 +1,39 @@
-
-
-# Environment
+# ── Environment ──────────────────────────────
 .env
 .env.local
 .env.*.local
 
-# Runtime data
+# ── Runtime data ─────────────────────────────
 data/
 *.db
 *.db-wal
 *.db-shm
 
-# Dependencies
+# ── Dependencies ─────────────────────────────
 node_modules/
 bun.lockb
 
-# Build output
+# ── Build output ─────────────────────────────
 dist/
 *.tsbuildinfo
 
-# OS files
+# ── Logs ─────────────────────────────────────
+*.log
+logs/
+groups/*/logs/
+
+# ── OS files ─────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Logs
-*.log
-logs/
-
-# IDE
+# ── IDE ──────────────────────────────────────
 .idea/
+.vscode/
 *.swp
 *.swo
 *~
+
+# ── Test / Coverage ──────────────────────────
+coverage/
+.nyc_output/

@@ -1,8 +1,16 @@
 # JellyCore
 
-**Self-hosted Personal AI Platform** — An autonomous AI assistant that runs in Docker containers with persistent memory, knowledge retrieval, and multi-channel messaging.
+<p align="center">
+  <strong>Self-hosted Personal AI Platform</strong><br>
+  Autonomous AI assistant running in Docker containers with persistent memory, knowledge retrieval, and Telegram integration.
+</p>
 
----
+<p align="center">
+  <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node.js 22+">
+  <img src="https://img.shields.io/badge/bun-%3E%3D1.2-orange" alt="Bun 1.2+">
+  <img src="https://img.shields.io/badge/docker-compose%20v2-blue" alt="Docker Compose v2">
+  <img src="https://img.shields.io/badge/license-private-lightgrey" alt="Private">
+</p>
 
 ## Overview
 
@@ -58,7 +66,7 @@ JellyCore is a production-ready personal AI platform that combines three core se
 ### 1. Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/<your-org>/jellycore.git
+git clone https://github.com/<your-org>/jellycore.git
 cd jellycore
 ```
 
@@ -119,28 +127,40 @@ docker compose logs -f nanoclaw
 
 ```
 jellycore/
-├── nanoclaw/                  # AI orchestrator (Git submodule)
-│   └── src/
-│       ├── channels/          # Telegram, WhatsApp adapters
-│       ├── core/              # Queue, container runner, scheduler
-│       └── container/         # Agent container Dockerfile & config
-├── oracle-v2/                 # Knowledge engine (Git submodule)
-│   └── src/
-│       ├── server.ts          # HTTP API server
-│       ├── indexer.ts         # Batch document indexer
-│       ├── chroma-http.ts     # ChromaDB client with client-side embeddings
-│       └── ψ/memory/          # Knowledge base (learnings, resonance, retrospectives)
-├── groups/                    # Agent group workspaces
-│   ├── global/CLAUDE.md       # Shared system prompt
-│   └── main/CLAUDE.md         # Default group prompt
-├── MASTER_PLAN/               # Architecture & implementation roadmap
-├── docker-compose.yml         # Development stack
-├── docker-compose.production.yml  # Production stack
-├── Dockerfile.nanoclaw        # NanoClaw multi-stage build
-├── ecosystem.config.js        # PM2 config (alternative to Docker)
-├── .env.example               # Environment variable template
-├── QUICKSTART.md              # Local development guide
-└── DEPLOYMENT.md              # Linux VPS deployment guide
+├── nanoclaw/                       # AI orchestrator
+│   ├── src/
+│   │   ├── index.ts                #   Main entry — state, message loop
+│   │   ├── channels/               #   Telegram & WhatsApp adapters
+│   │   ├── container-runner.ts     #   Docker-in-Docker agent spawner
+│   │   ├── group-queue.ts          #   Per-group message queue
+│   │   ├── task-scheduler.ts       #   Cron-based scheduling
+│   │   └── ipc.ts                  #   IPC watcher & signing
+│   └── container/                  #   Agent container image
+│       ├── Dockerfile              #     Multi-stage: Node + Chromium + Claude Code
+│       └── agent-runner/           #     Agent entrypoint & MCP bridges
+├── oracle-v2/                      # Knowledge engine
+│   ├── src/
+│   │   ├── server.ts               #   HTTP API (Hono)
+│   │   ├── indexer.ts              #   Batch document indexer
+│   │   ├── chroma-http.ts          #   ChromaDB client (client-side embeddings)
+│   │   ├── db/                     #   Drizzle ORM schema & migrations
+│   │   └── server/                 #   Handlers, dashboard, logging
+│   ├── frontend/                   #   React dashboard (Vite)
+│   └── ψ/memory/                   #   Knowledge base (learnings, resonance, retrospectives)
+├── groups/                         # Agent group workspaces (bind-mounted)
+│   ├── global/CLAUDE.md            #   Shared system prompt for all agents
+│   └── main/CLAUDE.md              #   Default group prompt & config
+├── docs/                           # Documentation
+│   ├── DEPLOYMENT.md               #   Linux VPS deployment guide
+│   ├── QUICKSTART.md               #   Local development guide
+│   └── MASTER_PLAN/                #   Phased architecture roadmap
+├── .claude/skills/                 # Claude Code skill definitions
+├── docker-compose.yml              # Development stack
+├── docker-compose.production.yml   # Production stack
+├── Dockerfile.nanoclaw             # NanoClaw multi-stage build
+├── ecosystem.config.js             # PM2 config (alternative to Docker)
+├── .env.example                    # Environment variable template
+└── README.md
 ```
 
 ## Architecture Details
@@ -232,7 +252,7 @@ pm2 save
 pm2 startup
 ```
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for full Linux VPS deployment instructions.
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full Linux VPS deployment instructions.
 
 ## Development
 
@@ -258,11 +278,11 @@ node dist/index.js
 curl -X POST http://localhost:47778/api/index
 ```
 
-See [QUICKSTART.md](QUICKSTART.md) for the full local development guide.
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full local development guide.
 
 ## Roadmap
 
-The [MASTER_PLAN/](MASTER_PLAN/) directory contains the phased implementation roadmap:
+The [docs/MASTER_PLAN/](docs/MASTER_PLAN/) directory contains the phased implementation roadmap:
 
 | Phase | Focus | Status |
 |-------|-------|--------|
