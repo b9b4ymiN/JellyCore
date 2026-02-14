@@ -1,0 +1,35 @@
+
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Dependencies
+node_modules/
+bun.lockb
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~

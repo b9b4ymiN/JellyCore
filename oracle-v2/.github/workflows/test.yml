@@ -1,0 +1,58 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun test:unit --coverage
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: mkdir -p ~/.oracle-v2
+      - run: bun run db:push
+      - run: bun test:integration:db
+      - run: bun test:integration:mcp
+      - run: bun test:seed
+      - run: bun test:integration:http
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: integration
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bunx playwright install --with-deps chromium
+      - run: mkdir -p ~/.oracle-v2
+      - run: bun run db:push
+      - run: bun test:seed
+      - run: bun test:e2e

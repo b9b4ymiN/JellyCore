@@ -1,0 +1,1159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title id="page-title">Oracle v2 - Knowledge Base Viewer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #333;
+    }
+    h1 { font-size: 2rem; color: #8b5cf6; }
+    .stats {
+      display: flex;
+      gap: 15px;
+      margin-left: auto;
+    }
+    .stat {
+      background: #1a1a2e;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+    .stat-value { color: #8b5cf6; font-weight: bold; }
+
+    .search-box {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 30px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 12px 16px;
+      font-size: 1rem;
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 8px;
+      color: #fff;
+    }
+    input:focus { outline: none; border-color: #8b5cf6; }
+    button {
+      padding: 12px 24px;
+      font-size: 1rem;
+      background: #8b5cf6;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: #7c3aed; }
+    .btn-secondary { background: #333; }
+    .btn-secondary:hover { background: #444; }
+    .btn-secondary.active { background: #8b5cf6; }
+    .btn-small { padding: 8px 16px; font-size: 0.85rem; }
+    .btn-small:disabled { background: #333; cursor: not-allowed; opacity: 0.5; }
+
+    .pagination {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 15px;
+      margin-top: 20px;
+      padding-top: 15px;
+      border-top: 1px solid #333;
+    }
+    .page-info {
+      color: #9ca3af;
+      font-size: 0.9rem;
+    }
+
+    .stale-warning {
+      background: #7f1d1d;
+      border-color: #dc2626;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .tab {
+      padding: 8px 16px;
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .tab.active { background: #8b5cf6; border-color: #8b5cf6; }
+
+    .results {
+      display: grid;
+      gap: 15px;
+    }
+    .result-card {
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 20px;
+      transition: border-color 0.2s;
+    }
+    .result-card:hover { border-color: #8b5cf6; }
+    .result-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .result-type {
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: bold;
+      text-transform: uppercase;
+    }
+    .type-principle { background: #7c3aed; }
+    .type-learning { background: #059669; }
+    .type-retro { background: #d97706; }
+
+    /* Search source badges */
+    .source-badge {
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: bold;
+      text-transform: uppercase;
+      margin-left: 8px;
+    }
+    .source-fts { background: #374151; color: #9ca3af; }
+    .source-vector { background: #1e40af; color: #93c5fd; }
+    .source-hybrid { background: #7c3aed; color: #c4b5fd; }
+    .result-source {
+      color: #666;
+      font-size: 0.85rem;
+      margin-left: auto;
+    }
+    .result-content {
+      color: #ccc;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .concepts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+    }
+    .concept {
+      padding: 3px 8px;
+      background: #333;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      color: #8b5cf6;
+    }
+
+    .guidance-box {
+      background: #1a1a2e;
+      border: 2px solid #8b5cf6;
+      border-radius: 12px;
+      padding: 20px;
+      margin-top: 20px;
+    }
+    .guidance-title {
+      color: #8b5cf6;
+      margin-bottom: 15px;
+      font-size: 1.1rem;
+    }
+    .guidance-content {
+      white-space: pre-wrap;
+      line-height: 1.8;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+    .error {
+      background: #7f1d1d;
+      border: 1px solid #dc2626;
+      padding: 15px;
+      border-radius: 8px;
+      color: #fca5a5;
+    }
+
+    footer {
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid #333;
+      text-align: center;
+      color: #666;
+      font-size: 0.85rem;
+    }
+    #footer-text { transition: opacity 0.2s; }
+
+    /* Graph styles */
+    .graph-container {
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 20px;
+      margin-top: 20px;
+    }
+    .graph-canvas {
+      width: 100%;
+      height: 600px;
+      border-radius: 8px;
+      background: #0a0a0a;
+    }
+    .graph-controls {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+      align-items: center;
+    }
+    .graph-legend {
+      display: flex;
+      gap: 15px;
+      margin-top: 10px;
+      font-size: 0.85rem;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .graph-details {
+      margin-top: 15px;
+      padding: 15px;
+      background: #0a0a0a;
+      border-radius: 8px;
+      display: none;
+    }
+    .graph-details.active { display: block; }
+
+    /* Learn Modal */
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.8);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal.active { display: flex; }
+    .modal-content {
+      background: #1a1a2e;
+      border: 1px solid #8b5cf6;
+      border-radius: 12px;
+      padding: 30px;
+      max-width: 600px;
+      width: 90%;
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .modal-title {
+      font-size: 1.5rem;
+      color: #8b5cf6;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      color: #666;
+      font-size: 1.5rem;
+      cursor: pointer;
+      padding: 0;
+      width: 30px;
+      height: 30px;
+    }
+    .modal-close:hover { color: #fff; }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    .form-label {
+      display: block;
+      margin-bottom: 8px;
+      color: #ccc;
+      font-size: 0.9rem;
+    }
+    textarea {
+      width: 100%;
+      padding: 12px;
+      font-size: 1rem;
+      background: #0a0a0a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      color: #fff;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 120px;
+    }
+    textarea:focus { outline: none; border-color: #8b5cf6; }
+    .form-actions {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+    .success-message {
+      background: #059669;
+      color: #fff;
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 15px;
+      display: none;
+    }
+    .success-message.active { display: block; }
+
+    /* Persona Toggle */
+    .persona-toggle {
+      position: relative;
+      cursor: pointer;
+      opacity: 0.3;
+      transition: opacity 0.2s;
+      font-size: 0.7rem;
+      color: #666;
+      padding: 2px 6px;
+      border-radius: 4px;
+      user-select: none;
+    }
+    .persona-toggle:hover { opacity: 0.8; background: #222; }
+
+    /* Navigation link to Arthur */
+    .nav-link {
+      padding: 8px 16px;
+      background: rgba(0, 195, 255, 0.1);
+      border: 1px solid rgba(0, 195, 255, 0.3);
+      border-radius: 20px;
+      color: rgba(0, 195, 255, 0.9);
+      text-decoration: none;
+      font-size: 0.85rem;
+      transition: all 0.3s ease;
+    }
+    .nav-link:hover {
+      background: rgba(0, 195, 255, 0.2);
+      border-color: rgba(0, 195, 255, 0.5);
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1 id="persona-title">Oracle v2</h1>
+      <span class="persona-toggle" id="persona-toggle" onclick="togglePersona()" title="Toggle persona">switch</span>
+      <a href="/" class="nav-link">Arthur AI</a>
+      <div class="stats" id="stats">
+        <div class="stat">Loading...</div>
+      </div>
+    </header>
+
+    <div class="search-box">
+      <input type="text" id="query" placeholder="Search Oracle knowledge..." autofocus>
+      <button id="btn-search" onclick="window.location.hash='';search()">Search</button>
+      <button id="btn-browse" class="btn-secondary" onclick="window.location.hash='';browseList()">Browse</button>
+      <button id="btn-consult" class="btn-secondary" onclick="window.location.hash='';consult()">Consult</button>
+      <button id="btn-reflect" class="btn-secondary" onclick="window.location.hash='';reflect()">Reflect</button>
+      <button id="btn-graph" class="btn-secondary" onclick="window.location.hash='graph';showGraph()">Graph</button>
+      <button id="btn-learn" class="btn-secondary" onclick="showLearnModal()">Learn</button>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-type="all" onclick="setType('all')">All</div>
+      <div class="tab" data-type="principle" onclick="setType('principle')">Principles</div>
+      <div class="tab" data-type="learning" onclick="setType('learning')">Learnings</div>
+      <div class="tab" data-type="retro" onclick="setType('retro')">Retrospectives</div>
+    </div>
+
+    <div id="results" class="results">
+      <div class="loading">Enter a query to search Oracle knowledge</div>
+    </div>
+
+    <footer>
+      <span id="footer-text">Oracle v2 - "The Oracle Keeps the Human Human"</span>
+    </footer>
+  </div>
+
+  <!-- Learn Modal -->
+  <div id="learnModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Add Pattern to Oracle</div>
+        <button class="modal-close" onclick="closeLearnModal()">&times;</button>
+      </div>
+
+      <div id="successMessage" class="success-message"></div>
+
+      <form id="learnForm" onsubmit="submitLearn(event)">
+        <div class="form-group">
+          <label class="form-label" for="pattern">Pattern / Learning *</label>
+          <textarea id="pattern" required placeholder="Describe the pattern you've learned..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="source">Source (optional)</label>
+          <input type="text" id="source" placeholder="e.g., Session retrospective, Git workflow">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="concepts">Concepts (optional, comma-separated)</label>
+          <input type="text" id="concepts" placeholder="e.g., git, safety, trust">
+        </div>
+
+        <div class="form-actions">
+          <button type="button" class="btn-secondary" onclick="closeLearnModal()">Cancel</button>
+          <button type="submit">Add to Oracle</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- File Viewer Modal -->
+  <div id="fileModal" class="modal">
+    <div class="modal-content" style="max-width: 900px; max-height: 80vh; overflow: auto;">
+      <div class="modal-header">
+        <div class="modal-title" id="fileModalTitle">File Viewer</div>
+        <button class="modal-close" onclick="closeFileModal()">&times;</button>
+      </div>
+      <pre id="fileContent" style="white-space: pre-wrap; font-family: monospace; font-size: 0.9rem; line-height: 1.6; color: #ccc;"></pre>
+    </div>
+  </div>
+
+  <script>
+    const API = 'http://localhost:47778/api';
+    let currentType = 'all';
+    let currentOffset = 0;
+    let currentMode = 'browse'; // 'browse' or 'search'
+    const PAGE_SIZE = 20;
+
+    // Persona toggle (Arthur/Oracle)
+    let currentPersona = localStorage.getItem('persona') || 'oracle';
+
+    function togglePersona() {
+      currentPersona = currentPersona === 'oracle' ? 'arthur' : 'oracle';
+      localStorage.setItem('persona', currentPersona);
+      applyPersona();
+    }
+
+    function applyPersona() {
+      const isArthur = currentPersona === 'arthur';
+      const title = isArthur ? 'Arthur v2' : 'Oracle v2';
+      const tagline = isArthur ? 'Arthur v2 - "The Shadow Knows"' : 'Oracle v2 - "The Oracle Keeps the Human Human"';
+
+      document.getElementById('persona-title').textContent = title;
+      document.getElementById('page-title').textContent = title + ' - Knowledge Base Viewer';
+      document.getElementById('footer-text').textContent = tagline;
+    }
+
+    // Apply persona on load
+    applyPersona();
+
+    function setActiveButton(btnId) {
+      ['btn-search', 'btn-browse', 'btn-consult', 'btn-reflect', 'btn-graph'].forEach(id => {
+        document.getElementById(id)?.classList.remove('active');
+      });
+      document.getElementById(btnId)?.classList.add('active');
+    }
+
+    // Load stats on page load
+    async function loadStats() {
+      try {
+        const res = await fetch(`${API}/stats`);
+        const data = await res.json();
+
+        // Staleness warning
+        const staleWarning = data.is_stale ? `
+          <div class="stat stale-warning" title="Index is ${data.index_age_hours || 'unknown'} hours old">
+            <span class="stat-value">⚠️</span> Stale
+          </div>
+        ` : '';
+
+        document.getElementById('stats').innerHTML = `
+          ${staleWarning}
+          <div class="stat"><span class="stat-value">${data.total}</span> total</div>
+          <div class="stat"><span class="stat-value">${data.by_type.principle || 0}</span> principles</div>
+          <div class="stat"><span class="stat-value">${data.by_type.learning || 0}</span> learnings</div>
+          <div class="stat"><span class="stat-value">${data.by_type.retro || 0}</span> retros</div>
+        `;
+      } catch (e) {
+        document.getElementById('stats').innerHTML = '<div class="stat">Offline</div>';
+      }
+    }
+
+    function setType(type) {
+      currentType = type;
+      currentOffset = 0; // Reset pagination when type changes
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelector(`[data-type="${type}"]`).classList.add('active');
+      // Use current mode - browse or search
+      if (currentMode === 'browse') {
+        browseList();
+      } else {
+        search();
+      }
+    }
+
+    async function search(resetOffset = true) {
+      const query = document.getElementById('query').value;
+      if (!query) return;
+
+      currentMode = 'search';
+      setActiveButton('btn-search');
+      if (resetOffset) currentOffset = 0;
+
+      document.getElementById('results').innerHTML = '<div class="loading">Searching...</div>';
+
+      try {
+        const url = `${API}/search?q=${encodeURIComponent(query)}&type=${currentType}&limit=${PAGE_SIZE}&offset=${currentOffset}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.results.length === 0) {
+          document.getElementById('results').innerHTML = '<div class="loading">No results found</div>';
+          return;
+        }
+
+        const resultsHtml = data.results.map(r => `
+          <div class="result-card" onclick="viewFile('${r.source_file}')" style="cursor:pointer;">
+            <div class="result-header">
+              <span class="result-type type-${r.type}">${r.type}</span>
+              ${r.source ? `<span class="source-badge source-${r.source}">${r.source}</span>` : ''}
+              <span class="result-source">${r.source_file}</span>
+            </div>
+            <div class="result-content">${escapeHtml(r.content)}</div>
+            ${r.concepts && r.concepts.length ? `
+              <div class="concepts">
+                ${r.concepts.map(c => `<span class="concept">${c}</span>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `).join('');
+
+        // Pagination controls
+        const totalPages = Math.ceil(data.total / PAGE_SIZE);
+        const currentPage = Math.floor(currentOffset / PAGE_SIZE) + 1;
+        const hasPrev = currentOffset > 0;
+        const hasNext = currentOffset + PAGE_SIZE < data.total;
+
+        const paginationHtml = data.total > PAGE_SIZE ? `
+          <div class="pagination">
+            <button onclick="prevPage()" ${!hasPrev ? 'disabled' : ''} class="btn btn-small">← Prev</button>
+            <span class="page-info">Page ${currentPage} of ${totalPages} (${data.total} results)</span>
+            <button onclick="nextPage()" ${!hasNext ? 'disabled' : ''} class="btn btn-small">Next →</button>
+          </div>
+        ` : `<div class="page-info" style="text-align:center;margin-top:15px;color:#6b7280;">${data.total} results</div>`;
+
+        document.getElementById('results').innerHTML = resultsHtml + paginationHtml;
+        updateURL();
+      } catch (e) {
+        document.getElementById('results').innerHTML = `<div class="error">Error: ${e.message}</div>`;
+      }
+    }
+
+    function prevPage() {
+      currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
+      search(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function nextPage() {
+      currentOffset += PAGE_SIZE;
+      search(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    async function consult() {
+      const query = document.getElementById('query').value;
+      if (!query) return;
+
+      setActiveButton('btn-consult');
+      document.getElementById('results').innerHTML = '<div class="loading">Consulting Oracle...</div>';
+
+      try {
+        const res = await fetch(`${API}/consult?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+
+        let html = '';
+
+        if (data.principles.length) {
+          html += '<h3 style="color:#8b5cf6;margin-bottom:15px;">Relevant Principles</h3>';
+          html += data.principles.map(p => `
+            <div class="result-card">
+              <div class="result-header">
+                <span class="result-type type-principle">principle</span>
+                <span class="result-source">${p.source}</span>
+              </div>
+              <div class="result-content">${escapeHtml(p.content)}</div>
+            </div>
+          `).join('');
+        }
+
+        if (data.patterns.length) {
+          html += '<h3 style="color:#059669;margin:20px 0 15px;">Relevant Patterns</h3>';
+          html += data.patterns.map(p => `
+            <div class="result-card">
+              <div class="result-header">
+                <span class="result-type type-learning">pattern</span>
+                <span class="result-source">${p.source}</span>
+              </div>
+              <div class="result-content">${escapeHtml(p.content)}</div>
+            </div>
+          `).join('');
+        }
+
+        html += `
+          <div class="guidance-box">
+            <div class="guidance-title">Oracle Guidance</div>
+            <div class="guidance-content">${escapeHtml(data.guidance)}</div>
+          </div>
+        `;
+
+        document.getElementById('results').innerHTML = html;
+      } catch (e) {
+        document.getElementById('results').innerHTML = `<div class="error">Error: ${e.message}</div>`;
+      }
+    }
+
+    async function reflect() {
+      setActiveButton('btn-reflect');
+      document.getElementById('results').innerHTML = '<div class="loading">Reflecting...</div>';
+
+      try {
+        const res = await fetch(`${API}/reflect`);
+        const r = await res.json();
+
+        document.getElementById('results').innerHTML = `
+          <div class="result-card" style="border-color:#8b5cf6;">
+            <div class="result-header">
+              <span class="result-type type-${r.type}">${r.type}</span>
+              <span class="result-source">${r.source_file}</span>
+            </div>
+            <div class="result-content">${escapeHtml(r.content)}</div>
+            ${r.concepts.length ? `
+              <div class="concepts">
+                ${r.concepts.map(c => `<span class="concept">${c}</span>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `;
+      } catch (e) {
+        document.getElementById('results').innerHTML = `<div class="error">Error: ${e.message}</div>`;
+      }
+    }
+
+    async function browseList(resetOffset = true) {
+      currentMode = 'browse';
+      setActiveButton('btn-browse');
+      if (resetOffset) currentOffset = 0;
+
+      document.getElementById('results').innerHTML = '<div class="loading">Loading documents...</div>';
+
+      try {
+        const url = `${API}/list?type=${currentType}&limit=${PAGE_SIZE}&offset=${currentOffset}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.error) {
+          document.getElementById('results').innerHTML = `<div class="error">Error: ${data.error}</div>`;
+          return;
+        }
+
+        if (!data.results || data.results.length === 0) {
+          document.getElementById('results').innerHTML = '<div class="loading">No documents found</div>';
+          return;
+        }
+
+        const resultsHtml = data.results.map(r => {
+          const concepts = r.concepts || [];
+          return `
+          <div class="result-card" onclick="viewFile('${r.source_file || ''}')" style="cursor:pointer;">
+            <div class="result-header">
+              <span class="result-type type-${r.type}">${r.type}</span>
+              <span class="result-source">${r.source_file || ''}</span>
+              ${r.indexed_at ? `<span style="color:#666;font-size:0.8rem;margin-left:auto;">${new Date(r.indexed_at).toLocaleDateString()}</span>` : ''}
+            </div>
+            <div class="result-content">${escapeHtml(r.content || '')}</div>
+            ${concepts.length ? `
+              <div class="concepts">
+                ${concepts.map(c => `<span class="concept">${c}</span>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `}).join('');
+
+        // Pagination controls
+        const totalPages = Math.ceil(data.total / PAGE_SIZE);
+        const currentPage = Math.floor(currentOffset / PAGE_SIZE) + 1;
+        const hasPrev = currentOffset > 0;
+        const hasNext = currentOffset + PAGE_SIZE < data.total;
+
+        const paginationHtml = data.total > PAGE_SIZE ? `
+          <div class="pagination">
+            <button onclick="browseListPrev()" ${!hasPrev ? 'disabled' : ''} class="btn btn-small">← Prev</button>
+            <span class="page-info">Page ${currentPage} of ${totalPages} (${data.total} documents)</span>
+            <button onclick="browseListNext()" ${!hasNext ? 'disabled' : ''} class="btn btn-small">Next →</button>
+          </div>
+        ` : `<div class="page-info" style="text-align:center;margin-top:15px;color:#6b7280;">${data.total} documents</div>`;
+
+        document.getElementById('results').innerHTML = resultsHtml + paginationHtml;
+        updateURL();
+      } catch (e) {
+        document.getElementById('results').innerHTML = `<div class="error">Error: ${e.message}</div>`;
+      }
+    }
+
+    function browseListPrev() {
+      currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
+      browseList(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function browseListNext() {
+      currentOffset += PAGE_SIZE;
+      browseList(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Enter key triggers search
+    document.getElementById('query').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') search();
+    });
+
+    // Knowledge Graph
+    let graphData = null;
+    let graphCanvas = null;
+    let graphCtx = null;
+    let nodes = [];
+    let links = [];
+    let selectedNode = null;
+
+    async function showGraph() {
+      setActiveButton('btn-graph');
+      document.getElementById('results').innerHTML = '<div class="loading">Loading graph...</div>';
+
+      try {
+        const res = await fetch(`${API}/graph`);
+        graphData = await res.json();
+
+        // Initialize physics
+        const width = 1160;
+        const height = 600;
+        const centerX = width / 2;
+        const centerY = height / 2;
+
+        // Position nodes in circle initially
+        nodes = graphData.nodes.map((node, i) => {
+          const angle = (i / graphData.nodes.length) * Math.PI * 2;
+          const radius = Math.min(width, height) * 0.3;
+          return {
+            ...node,
+            x: centerX + Math.cos(angle) * radius,
+            y: centerY + Math.sin(angle) * radius,
+            vx: 0,
+            vy: 0,
+            radius: 8
+          };
+        });
+
+        links = graphData.links;
+
+        // Create canvas
+        document.getElementById('results').innerHTML = `
+          <div class="graph-container">
+            <canvas id="graph" class="graph-canvas" width="1160" height="600"></canvas>
+            <div class="graph-controls">
+              <button class="btn-secondary" onclick="resetGraph()">Reset</button>
+              <span style="color:#666;margin-left:10px;">${nodes.length} nodes, ${links.length} connections</span>
+            </div>
+            <div class="graph-legend">
+              <div class="legend-item">
+                <div class="legend-dot" style="background:#7c3aed;"></div>
+                <span>Principle</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-dot" style="background:#059669;"></div>
+                <span>Learning</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-dot" style="background:#d97706;"></div>
+                <span>Retro</span>
+              </div>
+            </div>
+            <div id="graphDetails" class="graph-details"></div>
+          </div>
+        `;
+
+        graphCanvas = document.getElementById('graph');
+        graphCtx = graphCanvas.getContext('2d');
+
+        // Mouse events
+        graphCanvas.addEventListener('click', onGraphClick);
+        graphCanvas.addEventListener('mousemove', onGraphMove);
+
+        // Start animation
+        animate();
+      } catch (e) {
+        document.getElementById('results').innerHTML = `<div class="error">Error: ${e.message}</div>`;
+      }
+    }
+
+    function resetGraph() {
+      selectedNode = null;
+      document.getElementById('graphDetails').classList.remove('active');
+    }
+
+    function animate() {
+      if (!graphCanvas) return;
+
+      // Simple force-directed layout
+      const repulsion = 800;
+      const attraction = 0.02;
+      const damping = 0.85;
+
+      // Apply forces
+      for (let i = 0; i < nodes.length; i++) {
+        const nodeA = nodes[i];
+
+        // Repulsion from all nodes
+        for (let j = 0; j < nodes.length; j++) {
+          if (i === j) continue;
+          const nodeB = nodes[j];
+          const dx = nodeA.x - nodeB.x;
+          const dy = nodeA.y - nodeB.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const force = repulsion / (dist * dist);
+          nodeA.vx += (dx / dist) * force;
+          nodeA.vy += (dy / dist) * force;
+        }
+
+        // Attraction from connected nodes
+        links.forEach(link => {
+          let other = null;
+          if (link.source === nodeA.id) {
+            other = nodes.find(n => n.id === link.target);
+          } else if (link.target === nodeA.id) {
+            other = nodes.find(n => n.id === link.source);
+          }
+
+          if (other) {
+            const dx = other.x - nodeA.x;
+            const dy = other.y - nodeA.y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const force = dist * attraction * link.weight;
+            nodeA.vx += dx * force;
+            nodeA.vy += dy * force;
+          }
+        });
+
+        // Center gravity (stronger to prevent edge flying)
+        const dx = 580 - nodeA.x;
+        const dy = 300 - nodeA.y;
+        nodeA.vx += dx * 0.008;
+        nodeA.vy += dy * 0.008;
+
+        // Apply velocity
+        nodeA.x += nodeA.vx;
+        nodeA.y += nodeA.vy;
+        nodeA.vx *= damping;
+        nodeA.vy *= damping;
+
+        // Bounds
+        nodeA.x = Math.max(20, Math.min(1140, nodeA.x));
+        nodeA.y = Math.max(20, Math.min(580, nodeA.y));
+      }
+
+      // Draw
+      graphCtx.clearRect(0, 0, 1160, 600);
+
+      // Draw links
+      graphCtx.strokeStyle = '#555';
+      graphCtx.lineWidth = 0.5;
+      links.forEach(link => {
+        const source = nodes.find(n => n.id === link.source);
+        const target = nodes.find(n => n.id === link.target);
+        if (source && target) {
+          graphCtx.globalAlpha = 0.15 + (link.weight * 0.05);
+          graphCtx.beginPath();
+          graphCtx.moveTo(source.x, source.y);
+          graphCtx.lineTo(target.x, target.y);
+          graphCtx.stroke();
+        }
+      });
+
+      // Draw nodes
+      graphCtx.globalAlpha = 1;
+      nodes.forEach(node => {
+        const colors = {
+          principle: '#7c3aed',
+          learning: '#059669',
+          retro: '#d97706'
+        };
+
+        graphCtx.fillStyle = colors[node.type] || '#666';
+        graphCtx.beginPath();
+        graphCtx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+        graphCtx.fill();
+
+        if (node === selectedNode) {
+          graphCtx.strokeStyle = '#fff';
+          graphCtx.lineWidth = 2;
+          graphCtx.stroke();
+        }
+      });
+
+      requestAnimationFrame(animate);
+    }
+
+    function onGraphClick(e) {
+      const rect = graphCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      selectedNode = null;
+      for (const node of nodes) {
+        const dx = x - node.x;
+        const dy = y - node.y;
+        if (dx * dx + dy * dy < node.radius * node.radius) {
+          selectedNode = node;
+          break;
+        }
+      }
+
+      if (selectedNode) {
+        const details = document.getElementById('graphDetails');
+        details.innerHTML = `
+          <div class="result-header">
+            <span class="result-type type-${selectedNode.type}">${selectedNode.type}</span>
+            <span class="result-source">${selectedNode.source_file}</span>
+          </div>
+          <div class="concepts" style="margin-top:10px;">
+            ${selectedNode.concepts.map(c => `<span class="concept">${c}</span>`).join('')}
+          </div>
+        `;
+        details.classList.add('active');
+      } else {
+        document.getElementById('graphDetails').classList.remove('active');
+      }
+    }
+
+    function onGraphMove(e) {
+      const rect = graphCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      let hoverNode = null;
+      for (const node of nodes) {
+        const dx = x - node.x;
+        const dy = y - node.y;
+        if (dx * dx + dy * dy < node.radius * node.radius) {
+          hoverNode = node;
+          break;
+        }
+      }
+
+      graphCanvas.style.cursor = hoverNode ? 'pointer' : 'default';
+
+      // Show hover details
+      const details = document.getElementById('graphDetails');
+      if (hoverNode && !selectedNode) {
+        details.innerHTML = `
+          <div class="result-header">
+            <span class="result-type type-${hoverNode.type}">${hoverNode.type}</span>
+            <span class="result-source">${hoverNode.source_file}</span>
+          </div>
+          <div class="concepts" style="margin-top:8px;">
+            ${hoverNode.concepts.map(c => `<span class="concept">${c}</span>`).join('')}
+          </div>
+        `;
+        details.classList.add('active');
+      } else if (!selectedNode) {
+        details.classList.remove('active');
+      }
+    }
+
+    // URL State Management
+    function updateURL() {
+      const params = new URLSearchParams();
+      params.set('mode', currentMode);
+      params.set('type', currentType);
+      params.set('offset', currentOffset.toString());
+      const query = document.getElementById('query').value;
+      if (query) params.set('q', query);
+      window.history.replaceState({}, '', '?' + params.toString() + window.location.hash);
+    }
+
+    function loadFromURL() {
+      const params = new URLSearchParams(window.location.search);
+      const mode = params.get('mode');
+      const type = params.get('type');
+      const offset = params.get('offset');
+      const query = params.get('q');
+
+      if (type && ['all', 'principle', 'learning', 'retro'].includes(type)) {
+        currentType = type;
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelector(`[data-type="${type}"]`)?.classList.add('active');
+      }
+
+      if (offset) currentOffset = parseInt(offset) || 0;
+      if (query) document.getElementById('query').value = query;
+
+      // Load content based on mode
+      if (mode === 'search' && query) {
+        currentMode = 'search';
+        search(false);
+      } else if (mode === 'browse' || !mode) {
+        currentMode = 'browse';
+        browseList(false);
+      }
+    }
+
+    // Load stats on page load
+    loadStats();
+
+    // Check URL hash on load - show graph if #graph
+    if (window.location.hash === '#graph') {
+      showGraph();
+    } else {
+      // Load state from URL
+      loadFromURL();
+    }
+
+    // Learn Modal Functions
+    function showLearnModal() {
+      document.getElementById('learnModal').classList.add('active');
+      document.getElementById('pattern').focus();
+    }
+
+    function closeLearnModal() {
+      document.getElementById('learnModal').classList.remove('active');
+      document.getElementById('learnForm').reset();
+      document.getElementById('successMessage').classList.remove('active');
+    }
+
+    async function submitLearn(event) {
+      event.preventDefault();
+
+      const pattern = document.getElementById('pattern').value;
+      const source = document.getElementById('source').value;
+      const conceptsStr = document.getElementById('concepts').value;
+      const concepts = conceptsStr ? conceptsStr.split(',').map(c => c.trim()).filter(c => c) : [];
+
+      try {
+        const res = await fetch(`${API}/learn`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pattern, source, concepts })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          const msg = document.getElementById('successMessage');
+          msg.textContent = `Pattern added successfully! File: ${data.file}`;
+          msg.classList.add('active');
+
+          // Clear form
+          document.getElementById('learnForm').reset();
+
+          // Reload stats
+          loadStats();
+
+          // Auto-close after 2 seconds
+          setTimeout(() => {
+            closeLearnModal();
+          }, 2000);
+        } else {
+          alert(`Error: ${data.error || 'Unknown error'}`);
+        }
+      } catch (e) {
+        alert(`Error: ${e.message}`);
+      }
+    }
+
+    // Close modal when clicking outside
+    document.getElementById('learnModal').addEventListener('click', (e) => {
+      if (e.target.id === 'learnModal') {
+        closeLearnModal();
+      }
+    });
+
+    // ESC key closes modal
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeLearnModal();
+        closeFileModal();
+      }
+    });
+
+    // File Viewer Modal Functions
+    async function viewFile(filePath) {
+      document.getElementById('fileModalTitle').textContent = filePath;
+      document.getElementById('fileContent').textContent = 'Loading...';
+      document.getElementById('fileModal').classList.add('active');
+
+      try {
+        const res = await fetch(`${API}/file?path=${encodeURIComponent(filePath)}`);
+        const data = await res.json();
+
+        if (data.error) {
+          document.getElementById('fileContent').textContent = `Error: ${data.error}`;
+        } else {
+          document.getElementById('fileContent').textContent = data.content;
+        }
+      } catch (e) {
+        document.getElementById('fileContent').textContent = `Error: ${e.message}`;
+      }
+    }
+
+    function closeFileModal() {
+      document.getElementById('fileModal').classList.remove('active');
+    }
+
+    // Close file modal when clicking outside
+    document.getElementById('fileModal').addEventListener('click', (e) => {
+      if (e.target.id === 'fileModal') {
+        closeFileModal();
+      }
+    });
+  </script>
+</body>
+</html>

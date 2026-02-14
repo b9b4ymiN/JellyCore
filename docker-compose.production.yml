@@ -1,0 +1,183 @@
+# JellyCore Production Docker Compose
+# Oracle V2 + ChromaDB + NanoClaw (AI orchestrator)
+#
+# Prerequisites:
+#   1. Build the agent container image:
+#      docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/container
+#   2. Create .env file with required variables (see below)
+#   3. Run:  docker compose -f docker-compose.production.yml up -d
+#
+# Required .env variables:
+#   ANTHROPIC_API_KEY          - Z.AI API key (used as ANTHROPIC_AUTH_TOKEN)
+#   TELEGRAM_BOT_TOKEN         - Telegram bot token
+#   CHROMA_AUTH_TOKEN           - ChromaDB authentication token
+#   ORACLE_AUTH_TOKEN           - Oracle API authentication token
+#   JELLYCORE_AUTH_PASSPHRASE   - WhatsApp auth encryption key
+#   JELLYCORE_IPC_SECRET        - IPC integrity signing secret
+
+services:
+  # ========================================
+  # ChromaDB - Vector Database for Semantic Search
+  # ========================================
+  # ChromaDB 0.4.24: REST API. Oracle computes embeddings client-side
+  # using @chroma-core/default-embed (all-MiniLM-L6-v2, 384-dim)
+  chromadb:
+    image: chromadb/chroma:0.4.24
+    container_name: jellycore-chromadb
+    restart: unless-stopped
+    # Internal only — no port mapping (accessible via jellycore-internal network)
+    volumes:
+      - chromadb-data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
+      - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_AUTH_TOKEN}
+      - CHROMA_AUTH_TOKEN_TRANSPORT_HEADER=Authorization
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=False
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':1F40 ' /proc/net/tcp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - jellycore-internal
+
+  # ========================================
+  # Oracle V2 - Knowledge Engine
+  # ========================================
+  oracle:
+    build:
+      context: ./oracle-v2
+      dockerfile: Dockerfile
+    container_name: jellycore-oracle
+    restart: unless-stopped
+    # Oracle port exposed only on loopback for local debugging
+    ports:
+      - "127.0.0.1:47778:47778"
+    volumes:
+      - oracle-data:/data/oracle
+      # Mount full ψ/memory so indexer + handleLearn can access ψ/memory/learnings, resonance, retrospectives
+      - ./oracle-v2/ψ/memory:/data/knowledge/ψ/memory
+      - oracle-knowledge-private:/data/knowledge/private
+    environment:
+      - ORACLE_PORT=47778
+      - ORACLE_REPO_ROOT=/data/knowledge
+      - ORACLE_DATA_DIR=/data/oracle
+      - CHROMA_URL=http://chromadb:8000
+      - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
+      - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
+      - NODE_ENV=production
+    depends_on:
+      chromadb:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G  # Need 1G+ for ONNX embedding model (all-MiniLM-L6-v2)
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://localhost:47778/api/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - jellycore-internal
+
+  # ========================================
+  # NanoClaw - AI Orchestrator (spawns agent containers)
+  # ========================================
+  nanoclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile.nanoclaw
+    container_name: jellycore-nanoclaw
+    restart: unless-stopped
+    volumes:
+      # Docker socket — NanoClaw spawns agent containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent state (sessions, database, auth)
+      - nanoclaw-store:/app/nanoclaw/store
+      - nanoclaw-data:/app/nanoclaw/data
+      # Group workspaces (shared with agent containers via DinD resolveHostPath)
+      - ./groups:/app/nanoclaw/groups
+    environment:
+      # Telegram
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      # Z.AI GLM Coding Plan — native Anthropic-compatible endpoint
+      # https://docs.z.ai/devpack/tool/claude#manual-configuration
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=GLM-4.7
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=GLM-4.5-Air
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=GLM-4.7
+      - API_TIMEOUT_MS=3000000
+      # Oracle (containers on jellycore-internal network use DNS name)
+      - ORACLE_API_URL=http://oracle:47778
+      - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
+      # Security
+      - JELLYCORE_AUTH_PASSPHRASE=${JELLYCORE_AUTH_PASSPHRASE}
+      - JELLYCORE_IPC_SECRET=${JELLYCORE_IPC_SECRET}
+      # Misc
+      - TZ=${TZ:-Asia/Bangkok}
+      - ASSISTANT_NAME=${ASSISTANT_NAME:-Andy}
+      - CONTAINER_IMAGE=${CONTAINER_IMAGE:-nanoclaw-agent:latest}
+      - NODE_ENV=production
+      # Docker network for agent containers to join
+      - DOCKER_NETWORK=jellycore_jellycore-internal
+    depends_on:
+      oracle:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - jellycore-internal
+
+# ========================================
+# Volumes
+# ========================================
+volumes:
+  chromadb-data:
+    driver: local
+  oracle-data:
+    driver: local
+  oracle-knowledge-private:
+    driver: local
+  nanoclaw-store:
+    driver: local
+  nanoclaw-data:
+    driver: local
+
+# ========================================
+# Networks
+# ========================================
+networks:
+  jellycore-internal:
+    driver: bridge

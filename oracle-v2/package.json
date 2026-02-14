@@ -1,0 +1,75 @@
+{
+  "name": "@laris-co/oracle-v2",
+  "version": "0.3.0-nightly",
+  "description": "Oracle v2 - MCP Memory Layer with semantic search, philosophy, and knowledge management",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "oracle-v2": "./src/index.ts"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/laris-co/oracle-v2.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "server": "bun src/server.ts",
+    "server:ensure": "bun src/ensure-server.ts",
+    "server:status": "bun src/ensure-server.ts --status",
+    "server:legacy": "bun src/server-legacy.ts",
+    "serve": "bun dist/server.js",
+    "index": "bun src/indexer.ts",
+    "build": "tsc",
+    "start": "bun dist/index.js",
+    "test": "bun run test:unit && bun run test:integration && bun run test:e2e",
+    "test:unit": "bun test src/oracle-core.test.ts",
+    "test:integration": "bun test src/integration/",
+    "test:integration:db": "bun test src/integration/database.test.ts",
+    "test:integration:mcp": "bun test src/integration/mcp.test.ts",
+    "test:integration:http": "bun test src/integration/http.test.ts",
+    "test:seed": "bun scripts/seed-test-data.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:coverage": "bun test --coverage",
+    "db:generate": "bunx drizzle-kit generate",
+    "db:migrate": "bunx drizzle-kit migrate",
+    "db:push": "bunx drizzle-kit push",
+    "db:pull": "bunx drizzle-kit pull",
+    "db:studio": "bunx drizzle-kit studio",
+    "setup": "./scripts/setup.sh",
+    "frontend:build": "cd frontend && bun install && bun run build",
+    "frontend:dev": "cd frontend && bun run dev"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.31.0",
+    "@chroma-core/default-embed": "^0.1.9",
+    "@modelcontextprotocol/sdk": "^0.5.0",
+    "chromadb": "^3.2.0",
+    "drizzle-orm": "^0.45.1",
+    "hono": "^4.11.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.17.9",
+    "better-sqlite3": "^12.6.0",
+    "bun-types": "^1.3.6",
+    "drizzle-kit": "^0.31.8",
+    "typescript": "^5.7.2"
+  },
+  "keywords": [
+    "oracle",
+    "mcp",
+    "memory",
+    "knowledge-base",
+    "semantic-search"
+  ],
+  "author": "Nat's Agents",
+  "license": "MIT"
+}

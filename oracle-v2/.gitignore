@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Chroma storage
+chroma/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+tmp/
+.tmp/
+
+# Test coverage
+coverage/
+
+# Test artifacts
+playwright-report/
+test-results/
+*.pid
+
+# Private knowledge base (encrypted volume only — contains personal data)
+\u03C8/memory/private/
