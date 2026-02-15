@@ -53,6 +53,7 @@ services:
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
       - THAI_NLP_URL=http://thai-nlp:8000
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
       - NODE_ENV=production
     networks:
       - jellycore-internal

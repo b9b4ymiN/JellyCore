@@ -2,19 +2,21 @@
  * ChromaDB HTTP Client with Client-Side Embeddings
  *
  * Direct HTTP client for ChromaDB with token authentication.
- * Uses @chroma-core/default-embed (all-MiniLM-L6-v2, 384-dim) to compute
- * embeddings client-side before sending to the ChromaDB REST API.
+ * Uses pluggable Embedder interface (v0.6.0) for client-side embedding.
+ * Default: all-MiniLM-L6-v2 (384-dim). Switchable to multilingual-e5-small
+ * via EMBEDDING_MODEL env var.
  *
  * The ChromaDB REST API does NOT support server-side embedding — it always
  * requires pre-computed embeddings (query_embeddings, not query_texts).
  * This client transparently handles that by computing embeddings locally.
  *
  * Environment variables:
- *   CHROMA_URL     - ChromaDB server URL (default: http://chromadb:8000)
- *   CHROMA_AUTH_TOKEN - Bearer token for authentication (required in production)
+ *   CHROMA_URL        - ChromaDB server URL (default: http://chromadb:8000)
+ *   CHROMA_AUTH_TOKEN  - Bearer token for authentication (required in production)
+ *   EMBEDDING_MODEL    - Model name (default: all-MiniLM-L6-v2)
  */
 
-import { DefaultEmbeddingFunction } from '@chroma-core/default-embed';
+import { type Embedder, createEmbedder } from './embedder.js';
 
 interface ChromaDocument {
   id: string;
@@ -27,27 +29,13 @@ export class ChromaHttpClient {
   private authToken?: string;
   private collectionName: string;
   private collectionId?: string;
-  private embedder: DefaultEmbeddingFunction;
-  private embedderReady = false;
+  private embedder: Embedder;
 
-  constructor(collectionName: string, baseUrl?: string, authToken?: string) {
+  constructor(collectionName: string, baseUrl?: string, authToken?: string, embedder?: Embedder) {
     this.collectionName = collectionName;
     this.baseUrl = baseUrl || process.env.CHROMA_URL || 'http://chromadb:8000';
     this.authToken = authToken || process.env.CHROMA_AUTH_TOKEN;
-    this.embedder = new DefaultEmbeddingFunction();
-  }
-
-  /**
-   * Compute embeddings for an array of texts.
-   * Lazy-initializes the ONNX model on first call.
-   */
-  private async embed(texts: string[]): Promise<number[][]> {
-    if (!this.embedderReady) {
-      // Warm up the model (first call loads ONNX weights)
-      await this.embedder.generate(['warmup']);
-      this.embedderReady = true;
-    }
-    return this.embedder.generate(texts);
+    this.embedder = embedder || createEmbedder();
   }
 
   private get headers(): Record<string, string> {
@@ -121,12 +109,13 @@ export class ChromaHttpClient {
     await this.ensureCollection();
     if (!this.collectionId) throw new Error('Collection not initialized');
 
-    // Sub-batch embeddings to avoid OOM (ONNX model + 384-dim vectors)
+    // Sub-batch embeddings to avoid OOM
     const SUB_BATCH = 10;
     for (let i = 0; i < documents.length; i += SUB_BATCH) {
       const batch = documents.slice(i, i + SUB_BATCH);
       const texts = batch.map(d => d.document);
-      const embeddings = await this.embed(texts);
+      // Use embedDocuments() for proper model prefix (E5: "passage: ...")
+      const embeddings = await this.embedder.embedDocuments(texts);
 
       await this.request('POST', `/api/v1/collections/${this.collectionId}/add`, {
         ids: batch.map(d => d.id),
@@ -150,8 +139,9 @@ export class ChromaHttpClient {
     await this.ensureCollection();
     if (!this.collectionId) throw new Error('Collection not initialized');
 
-    // Compute query embedding client-side
-    const queryEmbeddings = await this.embed([queryText]);
+    // Use embedQuery() for proper model prefix (E5: "query: ...")
+    const queryEmbedding = await this.embedder.embedQuery(queryText);
+    const queryEmbeddings = [queryEmbedding];
 
     const body: any = {
       query_embeddings: queryEmbeddings,

@@ -29,6 +29,10 @@ export const oracleDocuments = sqliteTable('oracle_documents', {
   embeddingModel: text('embedding_model').default('all-MiniLM-L6-v2'),
   embeddingVersion: integer('embedding_version').default(1),
   embeddingHash: text('embedding_hash'),     // SHA-256 of content at embed time (skip re-embed if unchanged)
+  // Chunking metadata (v0.6.0) — tracks which chunk this is within a parent document
+  chunkIndex: integer('chunk_index'),          // Chunk number within parent (0-indexed)
+  totalChunks: integer('total_chunks'),        // Total chunks parent was split into
+  parentId: text('parent_id'),                 // ID of the parent document (before chunking)
 }, (table) => [
   index('idx_source').on(table.sourceFile),
   index('idx_type').on(table.type),
@@ -36,6 +40,7 @@ export const oracleDocuments = sqliteTable('oracle_documents', {
   index('idx_origin').on(table.origin),
   index('idx_project').on(table.project),
   index('idx_embedding_model').on(table.embeddingModel),
+  index('idx_parent_id').on(table.parentId),
 ]);
 
 // Indexing status tracking

@@ -45,7 +45,8 @@
     "setup": "./scripts/setup.sh",
     "frontend:build": "cd frontend && bun install && bun run build",
     "frontend:dev": "cd frontend && bun run dev",
-    "reindex:thai-nlp": "bun scripts/reindex-with-thai-nlp.ts"
+    "reindex:thai-nlp": "bun scripts/reindex-with-thai-nlp.ts",
+    "re-embed": "bun scripts/re-embed.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.31.0",

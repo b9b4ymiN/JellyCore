@@ -53,6 +53,10 @@ export function ensureSchema() {
     ['embedding_model', "ALTER TABLE oracle_documents ADD COLUMN embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2'"],
     ['embedding_version', 'ALTER TABLE oracle_documents ADD COLUMN embedding_version INTEGER DEFAULT 1'],
     ['embedding_hash', 'ALTER TABLE oracle_documents ADD COLUMN embedding_hash TEXT'],
+    // v0.6.0: Chunking metadata
+    ['chunk_index', 'ALTER TABLE oracle_documents ADD COLUMN chunk_index INTEGER'],
+    ['total_chunks', 'ALTER TABLE oracle_documents ADD COLUMN total_chunks INTEGER'],
+    ['parent_id', 'ALTER TABLE oracle_documents ADD COLUMN parent_id TEXT'],
   ];
 
   for (const [col, ddl] of migrations) {
@@ -64,6 +68,17 @@ export function ensureSchema() {
 
   // Ensure indexes for embedding versioning
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_embedding_model ON oracle_documents(embedding_model)');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_parent_id ON oracle_documents(parent_id)');
+
+  // Ensure search_log has results column
+  const searchLogCols = sqlite.prepare("PRAGMA table_info('search_log')").all() as { name: string }[];
+  const searchLogExisting = new Set(searchLogCols.map(c => c.name));
+  if (!searchLogExisting.has('results')) {
+    try {
+      sqlite.exec('ALTER TABLE search_log ADD COLUMN results TEXT');
+      console.log('[Schema] Added missing column: search_log.results');
+    } catch { /* table might not exist yet */ }
+  }
 }
 
 /**

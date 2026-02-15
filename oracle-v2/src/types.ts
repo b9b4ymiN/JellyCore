@@ -19,6 +19,10 @@ export interface OracleDocument {
   updated_at: number;   // Unix timestamp
   project?: string;     // Source project (from frontmatter or repo detection)
   is_private?: boolean; // true=private layer (not in git), false/undefined=public
+  // Chunk metadata (v0.6.0 Part C)
+  chunk_index?: number;   // Chunk number within parent (0-indexed)
+  total_chunks?: number;  // Total chunks parent was split into
+  parent_id?: string;     // ID of the parent document (before chunking)
 }
 
 /**

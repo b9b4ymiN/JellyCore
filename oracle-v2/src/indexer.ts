@@ -22,6 +22,8 @@ import * as schema from './db/schema.js';
 import { oracleDocuments, indexingStatus } from './db/schema.js';
 import { ChromaHttpClient } from './chroma-http.js';
 import { detectProject } from './server/project-detect.js';
+import { SmartChunker } from './chunker.js';
+import { getThaiNlpClient } from './thai-nlp-client.js';
 import type { OracleDocument, OracleMetadata, IndexerConfig } from './types.js';
 
 export class OracleIndexer {
@@ -273,13 +275,70 @@ export class OracleIndexer {
     documents.push(...await this.indexLearnings());
     documents.push(...await this.indexRetrospectives());
 
+    // Smart chunking: split large documents into overlapping chunks (v0.6.0 Part C)
+    const chunkedDocuments = await this.applySmartChunking(documents);
+    const chunkDelta = chunkedDocuments.length - documents.length;
+    if (chunkDelta > 0) {
+      console.log(`[Chunker] ${documents.length} docs → ${chunkedDocuments.length} chunks (+${chunkDelta} from splitting)`);
+    }
+
     // Store in SQLite + Chroma
-    await this.storeDocuments(documents);
+    await this.storeDocuments(chunkedDocuments);
 
     // Mark indexing complete
-    this.setIndexingStatus(false, documents.length, documents.length);
-    console.log(`Indexed ${documents.length} documents`);
+    this.setIndexingStatus(false, chunkedDocuments.length, chunkedDocuments.length);
+    console.log(`Indexed ${chunkedDocuments.length} documents`);
     console.log('Indexing complete!');
+  }
+
+  /**
+   * Apply smart chunking to documents that exceed maxTokens.
+   * Uses bilingual SmartChunker (Thai via sidecar, English via regex).
+   * Documents below maxTokens are passed through unchanged.
+   */
+  private async applySmartChunking(documents: OracleDocument[]): Promise<OracleDocument[]> {
+    let thaiNlp = null;
+    try {
+      thaiNlp = getThaiNlpClient();
+      const available = await thaiNlp.isAvailable();
+      if (!available) {
+        console.log('[Chunker] Thai NLP sidecar not available — using English-style fallback for Thai text');
+        thaiNlp = null;
+      }
+    } catch {
+      thaiNlp = null;
+    }
+
+    const chunker = new SmartChunker(
+      { maxTokens: 400, overlap: 80, minChunkSize: 50, preserveCodeBlocks: true },
+      thaiNlp,
+    );
+
+    const result: OracleDocument[] = [];
+
+    for (const doc of documents) {
+      const chunks = await chunker.chunk(doc.content);
+
+      if (chunks.length <= 1) {
+        // No chunking needed — pass through unchanged
+        result.push(doc);
+        continue;
+      }
+
+      // Explode into multiple chunk documents
+      for (const chunk of chunks) {
+        result.push({
+          ...doc,
+          id: `${doc.id}_chunk_${chunk.index}`,
+          content: chunk.text,
+          chunk_index: chunk.index,
+          total_chunks: chunk.totalChunks,
+          parent_id: doc.id,
+        });
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -661,6 +720,10 @@ export class OracleIndexer {
           project: docProject,
           createdBy: 'indexer',  // Mark as indexer-created
           isPrivate: doc.is_private ? 1 : 0,
+          // Chunk metadata (v0.6.0 Part C)
+          chunkIndex: doc.chunk_index ?? null,
+          totalChunks: doc.total_chunks ?? null,
+          parentId: doc.parent_id ?? null,
         })
         .onConflictDoUpdate({
           target: oracleDocuments.id,
@@ -672,7 +735,9 @@ export class OracleIndexer {
             indexedAt: now,
             project: docProject,
             isPrivate: doc.is_private ? 1 : 0,
-            // Don't update createdBy - preserve original
+            chunkIndex: doc.chunk_index ?? null,
+            totalChunks: doc.total_chunks ?? null,
+            parentId: doc.parent_id ?? null,
           }
         })
         .run();
