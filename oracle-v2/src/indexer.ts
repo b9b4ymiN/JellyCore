@@ -24,6 +24,7 @@ import { ChromaHttpClient } from './chroma-http.js';
 import { detectProject } from './server/project-detect.js';
 import { SmartChunker } from './chunker.js';
 import { getThaiNlpClient } from './thai-nlp-client.js';
+import { getEmbeddingCache, EmbeddingCache } from './embedding-cache.js';
 import type { OracleDocument, OracleMetadata, IndexerConfig } from './types.js';
 
 export class OracleIndexer {
@@ -688,9 +689,35 @@ export class OracleIndexer {
   /**
    * Store documents in SQLite + Chroma
    * Uses Drizzle for type-safe inserts and sets createdBy: 'indexer'
+   * v0.6.0 Part D: Thai NLP segmentation for FTS5 + Embedding Cache
    */
   private async storeDocuments(documents: OracleDocument[]): Promise<void> {
     const now = Date.now();
+
+    // v0.6.0 Part D.1: Thai NLP segmentation for FTS5 consistency
+    // All paths into FTS5 must segment Thai text the same way:
+    //   handleSearch() → preprocessQuery()   ✅ Phase 0
+    //   handleLearn()  → normalizeAndTokenize() ✅ Phase 0
+    //   indexer        → normalizeAndTokenize() ✅ Phase 1 (this)
+    let thaiNlp: Awaited<ReturnType<typeof getThaiNlpClient>> | null = null;
+    try {
+      thaiNlp = getThaiNlpClient();
+      const available = await thaiNlp.isAvailable();
+      if (!available) {
+        console.log('[Indexer] Thai NLP sidecar not available — FTS5 will use raw text');
+        thaiNlp = null;
+      }
+    } catch {
+      thaiNlp = null;
+    }
+
+    // v0.6.0 Part D.3: Embedding Cache for skip-if-unchanged
+    let embeddingCache: EmbeddingCache | null = null;
+    try {
+      embeddingCache = getEmbeddingCache();
+    } catch {
+      // EmbeddingCache requires db — may not be available in all contexts
+    }
 
     // Prepare FTS statement (raw SQL required for FTS5)
     const insertFts = this.sqlite.prepare(`
@@ -702,6 +729,8 @@ export class OracleIndexer {
     const ids: string[] = [];
     const contents: string[] = [];
     const metadatas: any[] = [];
+    let skipCount = 0;
+    let processed = 0;
 
     for (const doc of documents) {
       // SQLite metadata - use doc.project if available, fall back to repo project
@@ -742,12 +771,33 @@ export class OracleIndexer {
         })
         .run();
 
+      // v0.6.0 Part D.1: Segment Thai text for FTS5
+      // Same pipeline as handleLearn() + handleSearch() for consistency
+      let ftsContent = doc.content;
+      if (thaiNlp) {
+        try {
+          const { segmented } = await thaiNlp.normalizeAndTokenize(doc.content);
+          ftsContent = segmented;
+        } catch {
+          // Fallback to raw content if Thai NLP fails for this doc
+        }
+      }
+
       // SQLite FTS (raw SQL required for FTS5)
       insertFts.run(
         doc.id,
-        doc.content,
+        ftsContent,
         doc.concepts.join(' ')
       );
+
+      // v0.6.0 Part D.3: Skip ChromaDB re-embed if content unchanged
+      const contentHash = EmbeddingCache.contentHash(doc.content);
+      if (embeddingCache && embeddingCache.hasCurrentEmbedding(doc.id, contentHash)) {
+        skipCount++;
+        processed++;
+        this.setIndexingStatus(true, processed, documents.length);
+        continue; // Skip Chroma — embedding is still valid
+      }
 
       // Chroma vector (metadata must be primitives, not arrays)
       ids.push(doc.id);
@@ -757,11 +807,24 @@ export class OracleIndexer {
         source_file: doc.source_file,
         concepts: doc.concepts.join(',')  // Convert array to string for ChromaDB
       });
+
+      // Record embedding after Chroma store (will be done per-batch below)
+      processed++;
+      this.setIndexingStatus(true, processed, documents.length);
     }
 
-    // Batch insert to Chroma in chunks of 100 (skip if no client)
+    if (skipCount > 0) {
+      console.log(`[EmbeddingCache] Skipped ${skipCount}/${documents.length} docs (embeddings unchanged)`);
+    }
+
+    // Batch insert to Chroma (skip if no client)
     if (!this.chromaClient) {
       console.log('Skipping Chroma indexing (SQLite-only mode)');
+      return;
+    }
+
+    if (ids.length === 0) {
+      console.log('All embeddings up-to-date — no Chroma inserts needed');
       return;
     }
 
@@ -781,6 +844,16 @@ export class OracleIndexer {
           metadata: batchMetadatas[idx]
         }));
         await this.chromaClient.addDocuments(chromaDocs);
+
+        // Record embeddings in cache after successful Chroma store
+        if (embeddingCache) {
+          for (const id of batchIds) {
+            const docIdx = ids.indexOf(id);
+            const hash = EmbeddingCache.contentHash(contents[docIdx]);
+            embeddingCache.recordEmbedding(id, hash);
+          }
+        }
+
         console.log(`Chroma batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(ids.length / BATCH_SIZE)} stored`);
       } catch (error) {
         console.error(`Chroma batch failed:`, error);
@@ -788,6 +861,9 @@ export class OracleIndexer {
       }
     }
 
+    if (thaiNlp) {
+      console.log(`[Indexer] FTS5 content segmented via Thai NLP (${documents.length} docs)`);
+    }
     console.log(`Stored in SQLite${chromaSuccess ? ' + Chroma' : ' (Chroma failed)'}`);
   }
 
