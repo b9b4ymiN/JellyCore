@@ -10,6 +10,7 @@ export interface SearchResult {
   concepts: string[];
   source?: 'fts' | 'vector' | 'hybrid';
   score?: number;
+  createdAt?: number; // epoch ms — used for recency boost
 }
 
 export interface SearchResponse {

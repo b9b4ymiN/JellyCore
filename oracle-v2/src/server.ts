@@ -40,7 +40,8 @@ import {
   consultLog,
   learnLog,
   supersedeLog,
-  indexingStatus
+  indexingStatus,
+  ensureSchema
 } from './db/index.js';
 
 import {
@@ -92,6 +93,7 @@ const FRONTEND_DIST = path.join(import.meta.dirname || __dirname, '..', 'fronten
 // Initialize logging tables on startup
 try {
   initLoggingTables();
+  ensureSchema();
 } catch (e) {
   console.error('Failed to initialize logging tables:', e);
 }
@@ -841,7 +843,7 @@ app.post('/api/learn', async (c) => {
     if (!data.pattern) {
       return c.json({ error: 'Missing required field: pattern' }, 400);
     }
-    const result = handleLearn(
+    const result = await handleLearn(
       data.pattern,
       data.source,
       data.concepts,

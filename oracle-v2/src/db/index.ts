@@ -40,6 +40,26 @@ export function initFts5() {
 }
 
 /**
+ * Ensure schema columns exist (Drizzle push doesn't auto-migrate)
+ * Adds any missing columns that were added to schema.ts after initial creation.
+ */
+export function ensureSchema() {
+  const columns = sqlite.prepare("PRAGMA table_info('oracle_documents')").all() as { name: string }[];
+  const existing = new Set(columns.map(c => c.name));
+
+  const migrations: [string, string][] = [
+    ['is_private', 'ALTER TABLE oracle_documents ADD COLUMN is_private INTEGER DEFAULT 0'],
+  ];
+
+  for (const [col, ddl] of migrations) {
+    if (!existing.has(col)) {
+      sqlite.exec(ddl);
+      console.log(`[Schema] Added missing column: ${col}`);
+    }
+  }
+}
+
+/**
  * Rebuild FTS5 table with Porter stemmer
  * Required when upgrading from non-stemmed to stemmed FTS
  */

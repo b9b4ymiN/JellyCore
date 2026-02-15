@@ -82,7 +82,7 @@ export async function handleSearch(
       ftsTotal = (countStmt.get(safeQuery, ...projectParams) as { total: number }).total;
 
       const stmt = sqlite.prepare(`
-        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, rank as score
+        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, rank as score
         FROM oracle_fts f
         JOIN oracle_documents d ON f.id = d.id
         WHERE oracle_fts MATCH ? AND ${projectFilter}
@@ -96,6 +96,7 @@ export async function handleSearch(
         source_file: row.source_file,
         concepts: JSON.parse(row.concepts || '[]'),
         project: row.project,
+        createdAt: row.created_at || undefined,
         source: 'fts' as const,
         score: normalizeRank(row.score)
       }));
@@ -109,7 +110,7 @@ export async function handleSearch(
       ftsTotal = (countStmt.get(safeQuery, type, ...projectParams) as { total: number }).total;
 
       const stmt = sqlite.prepare(`
-        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, rank as score
+        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, rank as score
         FROM oracle_fts f
         JOIN oracle_documents d ON f.id = d.id
         WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}
@@ -123,6 +124,7 @@ export async function handleSearch(
         source_file: row.source_file,
         concepts: JSON.parse(row.concepts || '[]'),
         project: row.project,
+        createdAt: row.created_at || undefined,
         source: 'fts' as const,
         score: normalizeRank(row.score)
       }));
@@ -224,35 +226,73 @@ function normalizeRank(rank: number): number {
 }
 
 /**
- * Combine FTS and vector results with hybrid scoring
+ * Combine FTS and vector results using Reciprocal Rank Fusion (RRF)
+ * with a recency boost.
+ *
+ * RRF formula: score(d) = 1/(k + rank_fts(d)) + 1/(k + rank_vector(d))
+ * - k=60 (standard, Cormack et al. 2009)
+ * - Documents in both lists naturally score higher
+ * - No need to normalize scores across different retrieval systems
+ *
+ * Recency boost: +0.05 × max(0, 1 - days_old/365)
+ * - New docs (<1 year) get a small boost (max 0.05)
+ * - Old docs (>1 year) get no boost
+ * - Small enough to not override relevance
  */
 function combineSearchResults(fts: SearchResult[], vector: SearchResult[]): SearchResult[] {
-  const seen = new Map<string, SearchResult>();
+  const K = 60; // RRF constant
+  const now = Date.now();
+  const MS_PER_DAY = 86_400_000;
+  const RECENCY_MAX_BOOST = 0.05;
+  const RECENCY_WINDOW_DAYS = 365;
 
-  // Add FTS results first
-  for (const r of fts) {
-    seen.set(r.id, r);
-  }
+  // Build rank maps (1-indexed position in each result list)
+  const ftsRank = new Map<string, number>();
+  fts.forEach((r, i) => ftsRank.set(r.id, i + 1));
 
-  // Merge vector results (boost score if found in both)
+  const vectorRank = new Map<string, number>();
+  vector.forEach((r, i) => vectorRank.set(r.id, i + 1));
+
+  // Collect all unique documents, preferring FTS version (has full metadata)
+  const docs = new Map<string, SearchResult>();
+  for (const r of fts) docs.set(r.id, r);
   for (const r of vector) {
-    if (seen.has(r.id)) {
-      const existing = seen.get(r.id)!;
-      // Use max score + bonus for appearing in both (hybrid boost)
-      const maxScore = Math.max(existing.score || 0, r.score || 0);
-      const bonus = 0.1; // Bonus for appearing in both FTS and vector
-      seen.set(r.id, {
-        ...existing,
-        score: Math.min(1, maxScore + bonus), // Cap at 1.0
-        source: 'hybrid' as const
-      });
-    } else {
-      seen.set(r.id, r);
-    }
+    if (!docs.has(r.id)) docs.set(r.id, r);
   }
 
-  // Sort by score descending
-  return Array.from(seen.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
+  // Score each document
+  const scored: { result: SearchResult; score: number }[] = [];
+
+  for (const [id, result] of docs) {
+    // RRF score: sum of reciprocal ranks across lists
+    let rrfScore = 0;
+    const inFts = ftsRank.has(id);
+    const inVector = vectorRank.has(id);
+
+    if (inFts) rrfScore += 1 / (K + ftsRank.get(id)!);
+    if (inVector) rrfScore += 1 / (K + vectorRank.get(id)!);
+
+    // Recency boost (only if createdAt is available)
+    if (result.createdAt) {
+      const daysOld = (now - result.createdAt) / MS_PER_DAY;
+      const recency = Math.max(0, 1 - daysOld / RECENCY_WINDOW_DAYS);
+      rrfScore += RECENCY_MAX_BOOST * recency;
+    }
+
+    // Tag source
+    const source = inFts && inVector ? 'hybrid' as const
+      : inFts ? 'fts' as const
+      : 'vector' as const;
+
+    scored.push({
+      result: { ...result, source, score: rrfScore },
+      score: rrfScore,
+    });
+  }
+
+  // Sort by RRF score descending
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(s => s.result);
 }
 
 /**
@@ -749,7 +789,7 @@ export function handleGraph() {
  * @param project - ghq-style project path (null = universal)
  * @param cwd - Auto-detect project from cwd if project not specified
  */
-export function handleLearn(
+export async function handleLearn(
   pattern: string,
   source?: string,
   concepts?: string[],
@@ -831,6 +871,23 @@ export function handleLearn(
     content,
     conceptsList.join(' ')
   );
+
+  // Index into ChromaDB for vector search (FTS5 alone misses semantic matches)
+  try {
+    const client = getChromaClient();
+    await client.addDocuments([{
+      id,
+      document: content,
+      metadata: {
+        type: 'learning',
+        source_file: `ψ/memory/learnings/${filename}`,
+        concepts: conceptsList.join(', '),
+      },
+    }]);
+  } catch (err) {
+    // ChromaDB failure should not block learning — FTS5 still works
+    console.warn('[oracle_learn] ChromaDB indexing failed (FTS5 still indexed):', err instanceof Error ? err.message : String(err));
+  }
 
   // Log the learning
   logLearning(id, pattern, source || 'Oracle Learn', conceptsList);

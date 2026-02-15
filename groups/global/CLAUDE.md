@@ -57,6 +57,17 @@ When you learn something important:
 - Split files larger than 500 lines into folders
 - Keep an index in your memory for the files you create
 
+## Proactive Learning
+
+Use `mcp__oracle__oracle_learn` to save reusable knowledge to Oracle:
+- เมื่อ user สอนข้อมูลใหม่ที่มีคุณค่า → learn ทันที
+- เมื่อแก้ bug สำเร็จ → learn pattern/solution ที่ค้นพบ
+- เมื่อ user แสดง preference ชัดเจน → learn preference
+- เมื่อค้นพบ workflow หรือ architecture decision สำคัญ → learn decision + rationale
+
+ไม่ต้อง learn ทุกอย่าง — เฉพาะ reusable knowledge ที่จะเป็นประโยชน์ในอนาคต
+ไม่ต้องขออนุญาต — ถ้าเห็นว่าควร learn ก็ทำเลย
+
 ## Message Formatting
 
 Your messages are sent to Telegram with MarkdownV2 parsing. Use Telegram-compatible formatting:

@@ -276,8 +276,14 @@ const server = http.createServer(async (req, res) => {
             res.end(JSON.stringify({ error: 'Missing required field: pattern' }));
             return;
           }
-          const result = handleLearn(data.pattern, data.source, data.concepts);
-          res.end(JSON.stringify(result, null, 2));
+          handleLearn(data.pattern, data.source, data.concepts).then(result => {
+            res.end(JSON.stringify(result, null, 2));
+          }).catch(error => {
+            res.statusCode = 500;
+            res.end(JSON.stringify({
+              error: error instanceof Error ? error.message : 'Unknown error'
+            }));
+          });
         } catch (error) {
           res.statusCode = 500;
           res.end(JSON.stringify({
