@@ -80,9 +80,12 @@ services:
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
+      - THAI_NLP_URL=http://thai-nlp:8000
       - NODE_ENV=production
     depends_on:
       chromadb:
+        condition: service_healthy
+      thai-nlp:
         condition: service_healthy
     deploy:
       resources:
@@ -160,6 +163,37 @@ services:
     networks:
       - jellycore-internal
 
+  # ========================================
+  # Thai NLP Sidecar - PyThaiNLP wrapper
+  # ========================================
+  thai-nlp:
+    build: ./thai-nlp-sidecar
+    container_name: jellycore-thai-nlp
+    restart: unless-stopped
+    # Internal only — no port mapping
+    environment:
+      - PYTHAINLP_DATA_DIR=/data/pythainlp
+    volumes:
+      - thai-nlp-data:/data/pythainlp
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - jellycore-internal
+
 # ========================================
 # Volumes
 # ========================================
@@ -173,6 +207,8 @@ volumes:
   nanoclaw-store:
     driver: local
   nanoclaw-data:
+    driver: local
+  thai-nlp-data:
     driver: local
 
 # ========================================

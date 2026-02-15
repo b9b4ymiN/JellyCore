@@ -1,6 +1,6 @@
 {
   "name": "@laris-co/oracle-v2",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Oracle v2 - MCP Memory Layer with semantic search, philosophy, and knowledge management",
   "type": "module",
   "main": "src/index.ts",
@@ -44,7 +44,8 @@
     "db:studio": "bunx drizzle-kit studio",
     "setup": "./scripts/setup.sh",
     "frontend:build": "cd frontend && bun install && bun run build",
-    "frontend:dev": "cd frontend && bun run dev"
+    "frontend:dev": "cd frontend && bun run dev",
+    "reindex:thai-nlp": "bun scripts/reindex-with-thai-nlp.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.31.0",

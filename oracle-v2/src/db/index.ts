@@ -49,6 +49,10 @@ export function ensureSchema() {
 
   const migrations: [string, string][] = [
     ['is_private', 'ALTER TABLE oracle_documents ADD COLUMN is_private INTEGER DEFAULT 0'],
+    // Embedding versioning (v0.5.0)
+    ['embedding_model', "ALTER TABLE oracle_documents ADD COLUMN embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2'"],
+    ['embedding_version', 'ALTER TABLE oracle_documents ADD COLUMN embedding_version INTEGER DEFAULT 1'],
+    ['embedding_hash', 'ALTER TABLE oracle_documents ADD COLUMN embedding_hash TEXT'],
   ];
 
   for (const [col, ddl] of migrations) {
@@ -57,6 +61,9 @@ export function ensureSchema() {
       console.log(`[Schema] Added missing column: ${col}`);
     }
   }
+
+  // Ensure indexes for embedding versioning
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_embedding_model ON oracle_documents(embedding_model)');
 }
 
 /**

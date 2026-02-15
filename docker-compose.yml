@@ -52,11 +52,14 @@ services:
       - ORACLE_DATA_DIR=/data/oracle
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
+      - THAI_NLP_URL=http://thai-nlp:8000
       - NODE_ENV=production
     networks:
       - jellycore-internal
     depends_on:
       chromadb:
+        condition: service_healthy
+      thai-nlp:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "bun", "-e", "const r = await fetch('http://localhost:47778/api/health'); process.exit(r.ok ? 0 : 1)"]
@@ -109,6 +112,29 @@ services:
       oracle:
         condition: service_healthy
 
+  # Thai NLP Sidecar - PyThaiNLP wrapper for Thai text processing
+  thai-nlp:
+    build: ./thai-nlp-sidecar
+    container_name: jellycore-thai-nlp
+    restart: unless-stopped
+    mem_limit: 256m
+    # No port mapping in dev — only accessible within jellycore-internal network
+    # For local testing: uncomment the ports line below
+    # ports:
+    #   - "47780:8000"
+    environment:
+      - PYTHAINLP_DATA_DIR=/data/pythainlp
+    volumes:
+      - thai-nlp-data:/data/pythainlp
+    networks:
+      - jellycore-internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
 volumes:
   chromadb-data:
     driver: local
@@ -119,6 +145,8 @@ volumes:
   nanoclaw-store:
     driver: local
   nanoclaw-data:
+    driver: local
+  thai-nlp-data:
     driver: local
 
 networks:

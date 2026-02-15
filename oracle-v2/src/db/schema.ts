@@ -25,12 +25,17 @@ export const oracleDocuments = sqliteTable('oracle_documents', {
   project: text('project'),                 // ghq-style: 'github.com/laris-co/oracle-v2'
   createdBy: text('created_by'),            // 'indexer' | 'oracle_learn' | 'manual'
   isPrivate: integer('is_private').default(0), // 0=public (git-safe), 1=private (encrypted volume only)
+  // Embedding versioning (v0.5.0) — tracks which model embedded each document
+  embeddingModel: text('embedding_model').default('all-MiniLM-L6-v2'),
+  embeddingVersion: integer('embedding_version').default(1),
+  embeddingHash: text('embedding_hash'),     // SHA-256 of content at embed time (skip re-embed if unchanged)
 }, (table) => [
   index('idx_source').on(table.sourceFile),
   index('idx_type').on(table.type),
   index('idx_superseded').on(table.supersededBy),
   index('idx_origin').on(table.origin),
   index('idx_project').on(table.project),
+  index('idx_embedding_model').on(table.embeddingModel),
 ]);
 
 // Indexing status tracking

@@ -15,6 +15,7 @@ import type { SearchResult, SearchResponse } from './types.js';
 import { ChromaHttpClient } from '../chroma-http.js';
 import { detectProject } from './project-detect.js';
 import { searchCache, SearchCache } from '../cache.js';
+import { getThaiNlpClient } from '../thai-nlp-client.js';
 
 // Singleton ChromaDB HTTP client for vector search
 let chromaClient: ChromaHttpClient | null = null;
@@ -54,8 +55,13 @@ export async function handleSearch(
   }
 
   const startTime = Date.now();
+
+  // Thai NLP preprocessing (graceful — falls back if sidecar is down)
+  const thaiNlp = getThaiNlpClient();
+  const { segmented } = await thaiNlp.preprocessQuery(query);
+
   // Remove FTS5 special characters: ? * + - ( ) ^ ~ " ' : (colon is column prefix)
-  const safeQuery = query.replace(/[?*+\-()^~"':]/g, ' ').replace(/\s+/g, ' ').trim();
+  const safeQuery = segmented.replace(/[?*+\-()^~"':]/g, ' ').replace(/\s+/g, ' ').trim();
 
   let warning: string | undefined;
 
@@ -330,8 +336,13 @@ export function synthesizeGuidance(decision: string, principles: any[], patterns
  */
 export async function handleConsult(decision: string, context: string = '') {
   const query = context ? `${decision} ${context}` : decision;
+
+  // Thai NLP preprocessing (graceful — falls back if sidecar is down)
+  const thaiNlp = getThaiNlpClient();
+  const { segmented } = await thaiNlp.preprocessQuery(query);
+
   // Remove FTS5 special characters: ? * + - ( ) ^ ~ " ' : (colon is column prefix)
-  const safeQuery = query.replace(/[?*+\-()^~"':]/g, ' ').replace(/\s+/g, ' ').trim();
+  const safeQuery = segmented.replace(/[?*+\-()^~"':]/g, ' ').replace(/\s+/g, ' ').trim();
 
   // Run FTS search (must use raw SQL - Drizzle doesn't support FTS5)
   const principleStmt = sqlite.prepare(`
@@ -862,13 +873,18 @@ export async function handleLearn(
     createdBy: 'oracle_learn'
   }).run();
 
+  // Thai NLP: normalize + tokenize content for FTS5 (same engine as query time)
+  const thaiNlp = getThaiNlpClient();
+  const { segmented: segmentedContent } = await thaiNlp.normalizeAndTokenize(content);
+
   // Insert into FTS (must use raw SQL - Drizzle doesn't support virtual tables)
+  // Uses segmented text so FTS5 MATCH works correctly for Thai
   sqlite.prepare(`
     INSERT INTO oracle_fts (id, content, concepts)
     VALUES (?, ?, ?)
   `).run(
     id,
-    content,
+    segmentedContent,
     conceptsList.join(' ')
   );
 
