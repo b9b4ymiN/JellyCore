@@ -16,6 +16,7 @@ import { ChromaHttpClient } from '../chroma-http.js';
 import { detectProject } from './project-detect.js';
 import { searchCache, SearchCache } from '../cache.js';
 import { getThaiNlpClient } from '../thai-nlp-client.js';
+import { classifySearchQuery, applyQualityCorrection, type QueryProfile, type WeightedProfile } from '../query-classifier.js';
 
 // Singleton ChromaDB HTTP client for vector search
 let chromaClient: ChromaHttpClient | null = null;
@@ -56,6 +57,9 @@ export async function handleSearch(
 
   const startTime = Date.now();
 
+  // Phase 1: Classify query for adaptive search weights
+  const queryProfile = classifySearchQuery(query);
+
   // Thai NLP preprocessing (graceful — falls back if sidecar is down)
   const thaiNlp = getThaiNlpClient();
   const { segmented } = await thaiNlp.preprocessQuery(query);
@@ -95,7 +99,7 @@ export async function handleSearch(
         ORDER BY rank
         LIMIT ?
       `);
-      ftsResults = stmt.all(safeQuery, ...projectParams, limit * 2).map((row: any) => ({
+      ftsResults = stmt.all(safeQuery, ...projectParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
         id: row.id,
         type: row.type,
         content: row.content,
@@ -123,7 +127,7 @@ export async function handleSearch(
         ORDER BY rank
         LIMIT ?
       `);
-      ftsResults = stmt.all(safeQuery, type, ...projectParams, limit * 2).map((row: any) => ({
+      ftsResults = stmt.all(safeQuery, type, ...projectParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
         id: row.id,
         type: row.type,
         content: row.content,
@@ -145,7 +149,7 @@ export async function handleSearch(
       console.log(`[Hybrid] Starting vector search for: "${query.substring(0, 30)}..."`);
       const client = getChromaClient();
       const whereFilter = type !== 'all' ? { type } : undefined;
-      const chromaResults = await client.query(query, limit * 2, whereFilter);
+      const chromaResults = await client.query(query, limit * queryProfile.vectorCandidateMult, whereFilter);
 
       console.log(`[Hybrid] Vector returned ${chromaResults.ids?.length || 0} results`);
       console.log(`[Hybrid] First 3 distances: ${chromaResults.distances?.slice(0, 3)}`);
@@ -195,8 +199,15 @@ export async function handleSearch(
     }
   }
 
-  // Combine results using hybrid ranking
-  const combined = combineSearchResults(ftsResults, vectorResults);
+  // Phase 1: Quality-based posterior weight correction
+  const ftsScores = ftsResults.map(r => r.score ?? 0);
+  const vectorScores = vectorResults.map(r => r.score ?? 0);
+  const weightedProfile = applyQualityCorrection(queryProfile, ftsScores, vectorScores, limit);
+
+  // Combine results using weighted hybrid ranking
+  const ftsEndTime = Date.now();
+  const combined = combineSearchResults(ftsResults, vectorResults, weightedProfile);
+  const mergeEndTime = Date.now();
   const total = Math.max(ftsTotal, combined.length);
 
   // Apply pagination
@@ -213,6 +224,27 @@ export async function handleSearch(
     offset,
     limit,
     mode,
+    // Phase 1: Search intelligence metadata
+    queryProfile: {
+      type: weightedProfile.type,
+      priorFtsBoost: weightedProfile.ftsBoost,
+      priorVectorBoost: weightedProfile.vectorBoost,
+      finalFtsWeight: weightedProfile.finalFtsWeight,
+      finalVectorWeight: weightedProfile.finalVectorWeight,
+      reason: weightedProfile.reason,
+    },
+    quality: {
+      fts: weightedProfile.ftsQuality,
+      vector: weightedProfile.vectorQuality,
+    },
+    candidates: {
+      fts: ftsResults.length,
+      vector: vectorResults.length,
+      merged: combined.length,
+    },
+    timing: {
+      totalMs: searchTime,
+    },
     ...(warning && { warning })
   };
 
@@ -245,12 +277,20 @@ function normalizeRank(rank: number): number {
  * - Old docs (>1 year) get no boost
  * - Small enough to not override relevance
  */
-function combineSearchResults(fts: SearchResult[], vector: SearchResult[]): SearchResult[] {
+function combineSearchResults(
+  fts: SearchResult[],
+  vector: SearchResult[],
+  profile?: WeightedProfile,
+): SearchResult[] {
   const K = 60; // RRF constant
   const now = Date.now();
   const MS_PER_DAY = 86_400_000;
   const RECENCY_MAX_BOOST = 0.05;
   const RECENCY_WINDOW_DAYS = 365;
+
+  // Use posterior-corrected weights if available, else equal weights
+  const ftsWeight = profile?.finalFtsWeight ?? 0.5;
+  const vectorWeight = profile?.finalVectorWeight ?? 0.5;
 
   // Build rank maps (1-indexed position in each result list)
   const ftsRank = new Map<string, number>();
@@ -266,17 +306,17 @@ function combineSearchResults(fts: SearchResult[], vector: SearchResult[]): Sear
     if (!docs.has(r.id)) docs.set(r.id, r);
   }
 
-  // Score each document
+  // Score each document with weighted RRF
   const scored: { result: SearchResult; score: number }[] = [];
 
   for (const [id, result] of docs) {
-    // RRF score: sum of reciprocal ranks across lists
     let rrfScore = 0;
     const inFts = ftsRank.has(id);
     const inVector = vectorRank.has(id);
 
-    if (inFts) rrfScore += 1 / (K + ftsRank.get(id)!);
-    if (inVector) rrfScore += 1 / (K + vectorRank.get(id)!);
+    // Weighted RRF: multiply each source's reciprocal rank by its posterior weight
+    if (inFts) rrfScore += ftsWeight * (1 / (K + ftsRank.get(id)!));
+    if (inVector) rrfScore += vectorWeight * (1 / (K + vectorRank.get(id)!));
 
     // Recency boost (only if createdAt is available)
     if (result.createdAt) {
