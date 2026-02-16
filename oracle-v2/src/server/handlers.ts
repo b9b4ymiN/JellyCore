@@ -17,6 +17,11 @@ import { detectProject } from './project-detect.js';
 import { searchCache, SearchCache } from '../cache.js';
 import { getThaiNlpClient } from '../thai-nlp-client.js';
 import { classifySearchQuery, applyQualityCorrection, type QueryProfile, type WeightedProfile } from '../query-classifier.js';
+import { trackAccess, computeConfidence } from '../memory/decay.js';
+import { intToFloat, floatToInt, type MemoryLayer } from '../types.js';
+import { getUserModelStore } from '../memory/user-model.js';
+import { getProceduralStore } from '../memory/procedural.js';
+import { getEpisodicStore } from '../memory/episodic.js';
 
 // Singleton ChromaDB HTTP client for vector search
 let chromaClient: ChromaHttpClient | null = null;
@@ -43,13 +48,15 @@ export async function handleSearch(
   offset: number = 0,
   mode: 'hybrid' | 'fts' | 'vector' = 'hybrid',
   project?: string,  // If set: project + universal. If null/undefined: universal only
-  cwd?: string       // Auto-detect project from cwd if project not specified
+  cwd?: string,      // Auto-detect project from cwd if project not specified
+  layerFilter?: string[] // v0.7.0: filter by memory layers (e.g., ['semantic', 'procedural'])
 ): Promise<SearchResponse & { mode?: string; warning?: string }> {
   // Auto-detect project from cwd if not explicitly specified
   const resolvedProject = project ?? detectProject(cwd);
 
-  // Check cache first
-  const cacheKey = SearchCache.makeKey(query, mode, limit, type, resolvedProject ?? undefined);
+  // Check cache first (include layer in cache key)
+  const layerKey = layerFilter?.join(',') || '';
+  const cacheKey = SearchCache.makeKey(query, mode, limit, type, resolvedProject ?? undefined) + (layerKey ? `:layer=${layerKey}` : '');
   const cached = searchCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -80,6 +87,20 @@ export async function handleSearch(
     : 'd.project IS NULL';
   const projectParams = resolvedProject ? [resolvedProject] : [];
 
+  // v0.7.0: Layer filter — null treated as 'semantic' for legacy docs
+  let layerFilterSql = '';
+  let layerParams: string[] = [];
+  if (layerFilter && layerFilter.length > 0) {
+    const placeholders = layerFilter.map(() => '?').join(',');
+    // Include NULL as 'semantic' when semantic is in the filter
+    if (layerFilter.includes('semantic')) {
+      layerFilterSql = ` AND (d.memory_layer IN (${placeholders}) OR d.memory_layer IS NULL)`;
+    } else {
+      layerFilterSql = ` AND d.memory_layer IN (${placeholders})`;
+    }
+    layerParams = [...layerFilter];
+  }
+
   // FTS5 search must use raw SQL (Drizzle doesn't support virtual tables)
   if (mode !== 'vector') {
     if (type === 'all') {
@@ -87,19 +108,19 @@ export async function handleSearch(
         SELECT COUNT(*) as total
         FROM oracle_fts f
         JOIN oracle_documents d ON f.id = d.id
-        WHERE oracle_fts MATCH ? AND ${projectFilter}
+        WHERE oracle_fts MATCH ? AND ${projectFilter}${layerFilterSql}
       `);
-      ftsTotal = (countStmt.get(safeQuery, ...projectParams) as { total: number }).total;
+      ftsTotal = (countStmt.get(safeQuery, ...projectParams, ...layerParams) as { total: number }).total;
 
       const stmt = sqlite.prepare(`
-        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, rank as score
+        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, d.memory_layer, rank as score
         FROM oracle_fts f
         JOIN oracle_documents d ON f.id = d.id
-        WHERE oracle_fts MATCH ? AND ${projectFilter}
+        WHERE oracle_fts MATCH ? AND ${projectFilter}${layerFilterSql}
         ORDER BY rank
         LIMIT ?
       `);
-      ftsResults = stmt.all(safeQuery, ...projectParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
+      ftsResults = stmt.all(safeQuery, ...projectParams, ...layerParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
         id: row.id,
         type: row.type,
         content: row.content,
@@ -107,6 +128,7 @@ export async function handleSearch(
         concepts: JSON.parse(row.concepts || '[]'),
         project: row.project,
         createdAt: row.created_at || undefined,
+        memoryLayer: row.memory_layer || null,
         source: 'fts' as const,
         score: normalizeRank(row.score)
       }));
@@ -115,19 +137,19 @@ export async function handleSearch(
         SELECT COUNT(*) as total
         FROM oracle_fts f
         JOIN oracle_documents d ON f.id = d.id
-        WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}
+        WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}${layerFilterSql}
       `);
-      ftsTotal = (countStmt.get(safeQuery, type, ...projectParams) as { total: number }).total;
+      ftsTotal = (countStmt.get(safeQuery, type, ...projectParams, ...layerParams) as { total: number }).total;
 
       const stmt = sqlite.prepare(`
-        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, rank as score
+        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, d.memory_layer, rank as score
         FROM oracle_fts f
         JOIN oracle_documents d ON f.id = d.id
-        WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}
+        WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}${layerFilterSql}
         ORDER BY rank
         LIMIT ?
       `);
-      ftsResults = stmt.all(safeQuery, type, ...projectParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
+      ftsResults = stmt.all(safeQuery, type, ...projectParams, ...layerParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
         id: row.id,
         type: row.type,
         content: row.content,
@@ -135,6 +157,7 @@ export async function handleSearch(
         concepts: JSON.parse(row.concepts || '[]'),
         project: row.project,
         createdAt: row.created_at || undefined,
+        memoryLayer: row.memory_layer || null,
         source: 'fts' as const,
         score: normalizeRank(row.score)
       }));
@@ -218,6 +241,9 @@ export async function handleSearch(
   logSearch(query, type, mode, total, searchTime, results);
   results.forEach(r => logDocumentAccess(r.id, 'search'));
 
+  // Track access for search results (fire-and-forget)
+  trackAccess(results.map(r => r.id));
+
   const response = {
     results,
     total,
@@ -264,6 +290,25 @@ function normalizeRank(rank: number): number {
 }
 
 /**
+ * v0.7.0: Layer-based score boost
+ *
+ * Query type → preferred layers:
+ *   exact query       → boost semantic (facts) = 1.0
+ *   semantic (how-to) → boost procedural > semantic = 1.2
+ *   semantic (recall) → boost episodic > semantic = 1.1
+ *   user_model        → low boost (pulled from prompt builder, not search) = 0.5
+ */
+function getLayerBoost(layer: string | null, queryType?: string): number {
+  if (!layer || layer === 'semantic') return 1.0;
+  if (layer === 'procedural' && queryType === 'semantic') return 1.2;
+  if (layer === 'episodic' && queryType === 'semantic') return 1.1;
+  if (layer === 'procedural') return 1.1; // still slight boost for exact queries
+  if (layer === 'episodic') return 1.0;
+  if (layer === 'user_model') return 0.5; // retrieved via prompt builder, not ranked high in search
+  return 1.0;
+}
+
+/**
  * Combine FTS and vector results using Reciprocal Rank Fusion (RRF)
  * with a recency boost.
  *
@@ -306,6 +351,26 @@ function combineSearchResults(
     if (!docs.has(r.id)) docs.set(r.id, r);
   }
 
+  // Batch-fetch decay scores and memory layers from DB for all candidate docs
+  const allIds = Array.from(docs.keys());
+  const decayMap = new Map<string, number>();
+  const layerMap = new Map<string, string | null>();
+  if (allIds.length > 0) {
+    try {
+      const placeholders = allIds.map(() => '?').join(',');
+      const rows = sqlite.prepare(
+        `SELECT id, decay_score, memory_layer FROM oracle_documents WHERE id IN (${placeholders})`
+      ).all(...allIds) as { id: string; decay_score: number | null; memory_layer: string | null }[];
+      for (const row of rows) {
+        // decay_score is stored as 0-100 integer, convert to 0.0-1.0
+        decayMap.set(row.id, intToFloat(row.decay_score));
+        layerMap.set(row.id, row.memory_layer);
+      }
+    } catch {
+      // If fetch fails, all docs get 1.0 (no penalty)
+    }
+  }
+
   // Score each document with weighted RRF
   const scored: { result: SearchResult; score: number }[] = [];
 
@@ -324,6 +389,15 @@ function combineSearchResults(
       const recency = Math.max(0, 1 - daysOld / RECENCY_WINDOW_DAYS);
       rrfScore += RECENCY_MAX_BOOST * recency;
     }
+
+    // Apply decay factor from memory layer system (v0.7.0)
+    // decay_score 1.0 = fresh (no penalty), 0.0 = stale (full penalty)
+    const decayFactor = decayMap.get(id) ?? 1.0;
+    rrfScore *= decayFactor;
+
+    // v0.7.0: Layer-based score boosting
+    const docLayer = layerMap.get(id) || (result as any).memoryLayer || null;
+    rrfScore *= getLayerBoost(docLayer, profile?.type);
 
     // Tag source
     const source = inFts && inVector ? 'hybrid' as const
@@ -839,6 +913,7 @@ export function handleGraph() {
  * @param origin - 'mother' | 'arthur' | 'volt' | 'human' (null = universal)
  * @param project - ghq-style project path (null = universal)
  * @param cwd - Auto-detect project from cwd if project not specified
+ * @param layer - Memory layer target (null = auto-detect, default semantic)
  */
 export async function handleLearn(
   pattern: string,
@@ -846,8 +921,82 @@ export async function handleLearn(
   concepts?: string[],
   origin?: string,
   project?: string,
-  cwd?: string
+  cwd?: string,
+  layer?: MemoryLayer,
 ) {
+  // v0.7.0: Determine memory layer (explicit > auto-detect > default 'semantic')
+  const detectedLayer = layer || detectMemoryLayer(pattern, concepts);
+
+  // Route to specialized stores for non-semantic layers
+  if (detectedLayer === 'user_model') {
+    const store = getUserModelStore();
+    try {
+      const parsed = JSON.parse(pattern);
+      const userId = parsed.userId || 'default';
+      delete parsed.userId;
+      const model = await store.update(userId, parsed);
+      return {
+        success: true,
+        file: null,
+        id: `user_model_${userId}`,
+        layer: 'user_model' as const,
+        model,
+      };
+    } catch {
+      // If not valid JSON, store as note in user model
+      const store = getUserModelStore();
+      const model = await store.update('default', { notes: [pattern] });
+      return {
+        success: true,
+        file: null,
+        id: 'user_model_default',
+        layer: 'user_model' as const,
+        model,
+      };
+    }
+  }
+
+  if (detectedLayer === 'procedural') {
+    const store = getProceduralStore();
+    // Try to parse as procedure
+    const lines = pattern.split('\n').map(l => l.trim()).filter(Boolean);
+    const trigger = lines[0];
+    const procedure = lines.slice(1).map(l => l.replace(/^\d+\.\s*/, '').replace(/^[-*]\s*/, ''));
+    const id = await store.learn({
+      trigger,
+      procedure: procedure.length > 0 ? procedure : [trigger],
+      source: (source as 'correction' | 'repeated_pattern' | 'explicit') || 'explicit',
+    });
+    return {
+      success: true,
+      file: null,
+      id,
+      layer: 'procedural' as const,
+    };
+  }
+
+  if (detectedLayer === 'episodic') {
+    const store = getEpisodicStore();
+    const id = await store.record({
+      userId: origin || 'default',
+      groupId: project || 'default',
+      summary: pattern,
+      topics: concepts || [],
+      outcome: 'unknown',
+      durationMs: 0,
+    });
+    return {
+      success: true,
+      file: null,
+      id,
+      layer: 'episodic' as const,
+    };
+  }
+
+  // ================================================================
+  // Default: Semantic layer (existing behavior, backward compatible)
+  // ================================================================
+
   // Auto-detect project from cwd if not explicitly specified
   const resolvedProject = project ?? detectProject(cwd);
   const now = new Date();
@@ -900,6 +1049,8 @@ export async function handleLearn(
   const conceptsList = concepts || [];
 
   // Insert into database with provenance using Drizzle
+  // v0.7.0: add confidence score + semantic layer
+  const confidence = computeConfidence(origin, source);
   db.insert(oracleDocuments).values({
     id,
     type: 'learning',
@@ -910,7 +1061,10 @@ export async function handleLearn(
     indexedAt: now.getTime(),
     origin: origin || null,          // origin: null = universal/mother
     project: resolvedProject || null, // project: null = universal (auto-detected from cwd)
-    createdBy: 'oracle_learn'
+    createdBy: 'oracle_learn',
+    memoryLayer: 'semantic',
+    confidence: floatToInt(confidence),
+    decayScore: 100,                  // starts fresh
   }).run();
 
   // Thai NLP: normalize + tokenize content for FTS5 (same engine as query time)
@@ -945,6 +1099,22 @@ export async function handleLearn(
     console.warn('[oracle_learn] ChromaDB indexing failed (FTS5 still indexed):', err instanceof Error ? err.message : String(err));
   }
 
+  // v0.7.0: Contradiction detection (basic)
+  let warning: { type: string; existingId?: string; similarity?: number; message: string } | undefined;
+  try {
+    const contradiction = await searchForContradictions(pattern);
+    if (contradiction) {
+      warning = {
+        type: 'potential_contradiction',
+        existingId: contradiction.id,
+        similarity: contradiction.score,
+        message: `พบข้อมูลที่อาจขัดแย้ง (similarity=${contradiction.score.toFixed(2)})`,
+      };
+    }
+  } catch {
+    // Non-critical — don't fail the learn
+  }
+
   // Log the learning
   logLearning(id, pattern, source || 'Oracle Learn', conceptsList);
 
@@ -954,6 +1124,82 @@ export async function handleLearn(
   return {
     success: true,
     file: `ψ/memory/learnings/${filename}`,
-    id
+    id,
+    layer: 'semantic' as const,
+    ...(warning && { warning }),
   };
+}
+
+/**
+ * Auto-detect memory layer from content patterns
+ * ถ้าไม่ระบุ layer → ใช้ heuristics เพื่อ route อัตโนมัติ
+ */
+function detectMemoryLayer(pattern: string, concepts?: string[]): MemoryLayer {
+  // Check concepts first
+  if (concepts?.some(c => c.startsWith('memory:user_model'))) return 'user_model';
+  if (concepts?.some(c => c.startsWith('memory:procedural'))) return 'procedural';
+  if (concepts?.some(c => c.startsWith('memory:episodic'))) return 'episodic';
+
+  const lower = pattern.toLowerCase();
+
+  // User Model signals
+  if (/(?:user|ผู้ใช้)\s*(?:ชอบ|ไม่ชอบ|prefer|ต้องการ|expertise)/i.test(lower)) {
+    return 'user_model';
+  }
+
+  // Procedural signals
+  if (/(?:เมื่อ|when|ถ้า|if).*(?:→|ให้|then|ทำ|should)/i.test(lower)) {
+    return 'procedural';
+  }
+
+  // Default
+  return 'semantic';
+}
+
+/**
+ * Search for potentially contradicting existing documents
+ * High similarity (>0.85) but different content → potential contradiction
+ */
+async function searchForContradictions(newContent: string): Promise<{ id: string; score: number } | null> {
+  try {
+    const client = getChromaClient();
+    const results = await client.query(newContent, 3);
+
+    for (let i = 0; i < (results.ids?.length || 0); i++) {
+      const distance = results.distances?.[i] || 1;
+      const similarity = Math.max(0, 1 - distance / 2);
+
+      // High vector similarity (>0.85) → similar topic
+      if (similarity > 0.85) {
+        const existingContent = results.documents?.[i] || '';
+        // Check if content is actually different (not just similar phrasing)
+        const contentSimilarity = computeTextSimilarity(newContent, existingContent);
+        if (contentSimilarity < 0.7) {
+          return { id: results.ids[i], score: similarity };
+        }
+      }
+    }
+  } catch {
+    // ChromaDB unavailable — skip contradiction check
+  }
+  return null;
+}
+
+/**
+ * Simple text similarity using Jaccard over word sets
+ * 0.0 = completely different, 1.0 = identical
+ */
+function computeTextSimilarity(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+
+  let intersection = 0;
+  for (const word of wordsA) {
+    if (wordsB.has(word)) intersection++;
+  }
+
+  const union = wordsA.size + wordsB.size - intersection;
+  return union > 0 ? intersection / union : 0;
 }

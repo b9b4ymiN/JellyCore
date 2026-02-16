@@ -817,29 +817,38 @@ Quality Dashboard:
 ### Phase Mapping (ใส่เข้า Master Plan เดิม)
 
 ```
-Phase 0 (Week 1): Security Foundation → ไม่เปลี่ยน + เพิ่ม Embedding Strategy
+Phase 0 (Week 1): Security Foundation ✅ DONE (v0.5.0)
+  • Thai NLP Sidecar, Embedding Versioning, Docker 4-service stack
 
-Phase 1 (Week 2-3): Performance → เพิ่ม:
-  • 1.10 Adaptive Hybrid Search (Pillar 1.2)
-  • 1.11 Embedding Model Upgrade (Pillar 1.4)
-  • Container Warm Pool (มีแล้ว — เพิ่ม configurable weights & chunking)
+Phase 1 (Week 2-3): Performance & Search Intelligence ✅ DONE (v0.6.0)
+  • Adaptive Hybrid Search + Quality Correction (Part A)
+  • Pluggable Embedder Interface (Part B)
+  • Bilingual Smart Chunking with overlap (Part C)
+  • Thai NLP Indexer + Embedding Cache (Part D)
 
-Phase 2 (Week 3-4): Architecture Hardening → เพิ่ม:
-  • 2.8 Multi-Provider Failover Chain (Pillar 3.1)
-  • 2.9 Auth Profile Rotation (Pillar 3.2)
+Phase 2: Architecture Hardening ⏭️ SKIPPED
+  • Multi-Provider Failover, Auth Rotation
+  • เหตุผลที่ข้าม: ปัจจุบันใช้ Z.AI single provider ซึ่งเสถียรเพียงพอ
+    ยังไม่มี pain point จริงเรื่อง provider down หรือ rate limit
+    สามารถกลับมาทำได้เมื่อเริ่มใช้หลาย provider จริง
 
-Phase 3 (Week 4-5): Reliability → เพิ่ม:
-  • 3.6 Auto-Compaction System (Pillar 2.1)
-  • 3.7 Session Pruning (Pillar 2.2)
+Phase 3: Reliability (Context Mastery) ⏭️ SKIPPED
+  • Auto-Compaction, Session Pruning, Memory Flush
+  • เหตุผลที่ข้าม:
+    1. สถาปัตยกรรม Container ของ JellyCore สร้าง container ใหม่ทุก task
+       → ไม่มี context สะสมจนล้นเหมือน OpenClaw ที่ session อยู่ยาว
+    2. Oracle ทำหน้าที่ "ความจำถาวร" แยกจาก container อยู่แล้ว
+       → ไม่จำเป็นต้อง flush memory ก่อน compact เพราะข้อมูลอยู่ใน Oracle
+    3. ความเสี่ยง: Compaction สรุปข้อมูล → สูญเสีย nuance, tone, บริบทเฉพาะ
+       ถ้า implement ผิด → AI จำผิด แย่กว่าไม่จำเลย
+    4. เพิ่ม complexity ให้ NanoClaw โดยยังไม่มี use case จริงรองรับ
 
-Phase 4 (Week 5-8): Integration & Intelligence → เพิ่ม:
-  • 4.14 Five-Layer Memory System (Pillar 1.1)
-  • 4.15 Continuous Learning Loop (Pillar 1.3)
-  • 4.16 Block Streaming + Draft Streaming (Pillar 4.1-4.3)
-  • 4.17 Reply Shaping + NO_REPLY (Pillar 5.1-5.2)
-  • 4.18 Plugin Hook System (Pillar 6.2)
-  • 4.19 Status Indicators (Pillar 4.4)
-  • 4.20 Anticipatory Prefetch (Pillar 2.3)
+Phase 4: Five-Layer Memory System → ดำเนินการถัดไป (v0.7.0)
+  • 4.1 User Model Layer (Layer 1)
+  • 4.2 Procedural Memory (Layer 2)
+  • 4.3 Semantic Memory Enhancement (Layer 3)
+  • 4.4 Episodic Memory with Decay (Layer 4)
+  • 4.5 Continuous Learning Loop (Pillar 1.3)
 
 Phase 5 (Week 8-10): Production Polish → เพิ่ม:
   • 5.7 Cost Tracking & Budget System (Pillar 3.3)

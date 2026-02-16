@@ -6,6 +6,20 @@
 export type OracleDocumentType = 'principle' | 'pattern' | 'learning' | 'retro';
 
 /**
+ * Memory layer classification (v0.7.0 Phase 4)
+ * Five-Layer Memory System ตาม cognitive memory model
+ *
+ * - user_model:  Layer 1 — ข้อมูลเกี่ยวกับ user (preferences, expertise, style) ★ ไม่ decay
+ * - procedural:  Layer 2 — "วิธีทำงาน" ที่เรียนรู้จาก corrections/patterns ★ decay ช้า
+ * - semantic:    Layer 3 — knowledge base เดิม (principle/pattern/learning/retro) ★ decay ปกติ
+ * - episodic:    Layer 4 — conversation summaries, interaction records ★ มี TTL
+ * - (working):   Layer 5 — อยู่ใน container context ตามธรรมชาติ ไม่เก็บใน DB
+ *
+ * null (legacy documents) → treated as 'semantic' implicitly
+ */
+export type MemoryLayer = 'user_model' | 'procedural' | 'semantic' | 'episodic';
+
+/**
  * Granular document stored in vector DB
  * Following claude-mem's pattern of splitting large documents into smaller chunks
  */
@@ -23,6 +37,13 @@ export interface OracleDocument {
   chunk_index?: number;   // Chunk number within parent (0-indexed)
   total_chunks?: number;  // Total chunks parent was split into
   parent_id?: string;     // ID of the parent document (before chunking)
+  // Memory layer system (v0.7.0 Phase 4)
+  memory_layer?: MemoryLayer;  // null = legacy → treated as 'semantic'
+  confidence?: number;         // 0.0-1.0 ความมั่นใจในข้อมูล
+  access_count?: number;       // จำนวนครั้งที่ถูก search hit
+  last_accessed_at?: number;   // Unix timestamp ms ครั้งล่าสุดถูกเข้าถึง
+  decay_score?: number;        // 0.0-1.0 (1.0=fresh, 0.0=stale)
+  expires_at?: number;         // TTL timestamp ms (null=never expire)
 }
 
 /**
@@ -131,4 +152,111 @@ export interface IndexerConfig {
     learnings: string;
     retrospectives: string;
   };
+}
+
+// ============================================================================
+// v0.7.0 Phase 4 — Five-Layer Memory Types
+// ============================================================================
+
+/**
+ * User Model (Layer 1) — ข้อมูลเกี่ยวกับ user
+ * ถูกดึงเข้า system prompt ทุก request เพื่อ personalize response
+ *
+ * Storage: 1 document per user ใน oracle_documents
+ *   id = 'user_model_{userId}'
+ *   memory_layer = 'user_model'
+ *   type = 'learning'
+ *   is_private = 1
+ */
+export interface UserModel {
+  userId: string;
+  expertise: Record<string, 'novice' | 'intermediate' | 'advanced' | 'expert'>;
+  preferences: {
+    language: 'th' | 'en' | 'mixed';
+    responseLength: 'concise' | 'detailed' | 'auto';
+    responseStyle: 'formal' | 'casual' | 'auto';
+    codeStyle?: string;  // e.g., 'functional', 'oop'
+  };
+  commonTopics: string[];
+  timezone: string;
+  activeHours?: { start: number; end: number };
+  notes: string[];  // free-form personality/compatibility notes
+  updatedAt: number;
+}
+
+/** Expertise level type */
+export type ExpertiseLevel = 'novice' | 'intermediate' | 'advanced' | 'expert';
+
+/**
+ * Procedural Memory (Layer 2) — "วิธีทำงาน" ที่ AI เรียนรู้
+ * เรียนรู้จาก corrections, repeated success patterns, explicit teaching
+ *
+ * Storage: 1 document per procedure ใน oracle_documents
+ *   id = 'procedural_{hash(trigger)}'
+ *   memory_layer = 'procedural'
+ *   type = 'pattern'
+ */
+export interface ProceduralMemory {
+  trigger: string;        // "เมื่อ user ถาม deploy" — เงื่อนไขที่จะ activate
+  procedure: string[];    // ["แสดง checklist ก่อน", "ถามเรื่อง environment"]
+  source: 'correction' | 'repeated_pattern' | 'explicit';
+  successCount: number;
+  lastUsed: number;       // Unix timestamp ms
+}
+
+/**
+ * Episodic Memory (Layer 4) — summarized conversation episodes
+ *
+ * Storage: 1 document per episode ใน oracle_documents
+ *   id = 'episodic_{groupId}_{timestamp}'
+ *   memory_layer = 'episodic'
+ *   type = 'retro'
+ *   expires_at = created_at + 90 days
+ */
+export interface EpisodicMemory {
+  userId: string;
+  groupId: string;
+  summary: string;
+  topics: string[];
+  outcome: 'success' | 'partial' | 'failed' | 'unknown';
+  durationMs: number;
+  recordedAt: number;  // Unix timestamp ms
+}
+
+/**
+ * Default User Model — สร้างอัตโนมัติเมื่อไม่มี
+ */
+export const DEFAULT_USER_MODEL: Omit<UserModel, 'userId'> = {
+  expertise: {},
+  preferences: {
+    language: 'th',
+    responseLength: 'auto',
+    responseStyle: 'casual',
+  },
+  commonTopics: [],
+  timezone: 'Asia/Bangkok',
+  notes: [],
+  updatedAt: 0,
+};
+
+/**
+ * Helper: get effective memory layer (null → 'semantic')
+ */
+export function getEffectiveLayer(layer: MemoryLayer | null | undefined): MemoryLayer {
+  return layer ?? 'semantic';
+}
+
+/**
+ * Helper: convert DB integer (0-100) to float (0.0-1.0)
+ */
+export function intToFloat(value: number | null | undefined): number {
+  if (value == null) return 1.0;
+  return value / 100;
+}
+
+/**
+ * Helper: convert float (0.0-1.0) to DB integer (0-100)
+ */
+export function floatToInt(value: number): number {
+  return Math.round(Math.max(0, Math.min(1, value)) * 100);
 }

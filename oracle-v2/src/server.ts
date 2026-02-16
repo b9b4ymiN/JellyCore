@@ -56,6 +56,11 @@ import {
 
 import { searchCache } from './cache.js';
 
+import { getUserModelStore } from './memory/user-model.js';
+import { getProceduralStore } from './memory/procedural.js';
+import { getEpisodicStore } from './memory/episodic.js';
+import { refreshAllDecayScores } from './memory/decay.js';
+
 import {
   handleDashboardSummary,
   handleDashboardActivity,
@@ -155,8 +160,10 @@ app.get('/api/search', async (c) => {
   const mode = (c.req.query('mode') || 'hybrid') as 'hybrid' | 'fts' | 'vector';
   const project = c.req.query('project'); // Explicit project filter
   const cwd = c.req.query('cwd');         // Auto-detect project from cwd
+  const layerParam = c.req.query('layer'); // v0.7.0: filter by memory layer(s), comma-separated
+  const layerFilter = layerParam ? layerParam.split(',').map(l => l.trim()).filter(Boolean) : undefined;
 
-  const result = await handleSearch(q, type, limit, offset, mode, project, cwd);
+  const result = await handleSearch(q, type, limit, offset, mode, project, cwd, layerFilter);
   return c.json({ ...result, query: q });
 });
 
@@ -834,6 +841,168 @@ app.get('/api/traces/:id/linked-chain', async (c) => {
 });
 
 // ============================================================================
+// Memory Layer Routes (v0.7.0 Phase 4)
+// ============================================================================
+
+// User Model (Layer 1) — ข้อมูลเกี่ยวกับ user
+app.get('/api/user-model', async (c) => {
+  try {
+    const userId = c.req.query('userId') || 'default';
+    const store = getUserModelStore();
+    const model = await store.get(userId);
+    return c.json(model);
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+app.post('/api/user-model', async (c) => {
+  try {
+    const data = await c.req.json();
+    const userId = data.userId || 'default';
+    const updates = data.updates || data;
+    // Remove userId from updates to avoid confusion
+    delete updates.userId;
+    delete updates.updates;
+
+    const store = getUserModelStore();
+    const model = await store.update(userId, updates);
+
+    // Invalidate search cache — context changed
+    searchCache.invalidate();
+
+    return c.json({ success: true, model });
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+app.delete('/api/user-model', async (c) => {
+  try {
+    const userId = c.req.query('userId') || 'default';
+    const store = getUserModelStore();
+    await store.reset(userId);
+    return c.json({ success: true });
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+// Procedural Memory (Layer 2) — "วิธีทำงาน" ที่ AI เรียนรู้
+app.get('/api/procedural', async (c) => {
+  try {
+    const q = c.req.query('q') || '';
+    const limit = parseInt(c.req.query('limit') || '3');
+
+    if (!q) {
+      return c.json({ error: 'Missing required query parameter: q' }, 400);
+    }
+
+    const store = getProceduralStore();
+    const results = await store.find(q, limit);
+    return c.json({ results, total: results.length });
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+app.post('/api/procedural', async (c) => {
+  try {
+    const data = await c.req.json();
+    if (!data.trigger || !data.procedure) {
+      return c.json({ error: 'Missing required fields: trigger, procedure' }, 400);
+    }
+    if (!Array.isArray(data.procedure)) {
+      return c.json({ error: 'procedure must be an array of strings' }, 400);
+    }
+
+    const store = getProceduralStore();
+    const id = await store.learn({
+      trigger: data.trigger,
+      procedure: data.procedure,
+      source: data.source || 'explicit',
+    });
+
+    return c.json({ success: true, id });
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+app.post('/api/procedural/usage', async (c) => {
+  try {
+    const data = await c.req.json();
+    if (!data.id) {
+      return c.json({ error: 'Missing required field: id' }, 400);
+    }
+
+    const store = getProceduralStore();
+    await store.recordUsage(data.id);
+    return c.json({ success: true });
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+// Episodic Memory (Layer 4) — conversation summaries + interaction records
+app.post('/api/episodic', async (c) => {
+  try {
+    const data = await c.req.json();
+    if (!data.summary) {
+      return c.json({ error: 'Missing required field: summary' }, 400);
+    }
+
+    const store = getEpisodicStore();
+    const id = await store.record({
+      userId: data.userId || 'default',
+      groupId: data.groupId || 'default',
+      summary: data.summary,
+      topics: data.topics || [],
+      outcome: data.outcome || 'unknown',
+      durationMs: data.durationMs || 0,
+    });
+
+    return c.json({ success: true, id });
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+app.get('/api/episodic', async (c) => {
+  try {
+    const q = c.req.query('q') || '';
+    const userId = c.req.query('userId');
+    const limit = parseInt(c.req.query('limit') || '5');
+
+    if (!q) {
+      return c.json({ error: 'Missing required query parameter: q' }, 400);
+    }
+
+    const store = getEpisodicStore();
+    const results = await store.findRelated(q, userId || undefined, limit);
+    return c.json({ results, total: results.length });
+  } catch (error) {
+    return c.json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+// ============================================================================
 // Learn Route
 // ============================================================================
 
@@ -849,7 +1018,8 @@ app.post('/api/learn', async (c) => {
       data.concepts,
       data.origin,   // 'mother' | 'arthur' | 'volt' | 'human' (null = universal)
       data.project,  // ghq-style project path (null = universal)
-      data.cwd       // Auto-detect project from cwd
+      data.cwd,      // Auto-detect project from cwd
+      data.layer     // v0.7.0: memory layer target (optional)
     );
     return c.json(result);
   } catch (error) {
@@ -921,6 +1091,32 @@ app.get('*', (c) => {
 // Start Server
 // ============================================================================
 
+// v0.7.0: Initial decay score refresh + background job
+(async () => {
+  try {
+    const result = await refreshAllDecayScores();
+    console.log(`[Memory] Initial decay refresh: ${result.updated} documents`);
+  } catch (e) {
+    console.warn('[Memory] Decay refresh failed on startup:', e);
+  }
+})();
+
+// Refresh decay scores every 6 hours + purge expired episodic memories
+setInterval(async () => {
+  try {
+    const result = await refreshAllDecayScores();
+    console.log(`[Decay] Updated ${result.updated} documents`);
+
+    const episodic = getEpisodicStore();
+    const purged = await episodic.purgeExpired();
+    if (purged.removed > 0 || purged.archived > 0) {
+      console.log(`[Episodic] Purged ${purged.removed} expired, archived ${purged.archived}`);
+    }
+  } catch (e) {
+    console.warn('[Memory] Background job error:', e);
+  }
+}, 6 * 60 * 60 * 1000);
+
 console.log(`
 🔮 Oracle Nightly HTTP Server running! (Hono.js)
 
@@ -937,6 +1133,15 @@ console.log(`
    - GET  /api/context         Project context (ghq format)
    - POST /api/learn           Add new pattern/learning
    - POST /api/ask             Arthur AI chat
+
+   Memory (v0.7.0):
+   - GET  /api/user-model      Get user model
+   - POST /api/user-model      Update user model
+   - GET  /api/procedural?q=   Search procedural memory
+   - POST /api/procedural      Learn procedural pattern
+   - POST /api/procedural/usage Record procedure usage
+   - POST /api/episodic        Record episode
+   - GET  /api/episodic?q=     Search episodes
 
    Forum:
    - GET  /api/threads         List threads

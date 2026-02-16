@@ -33,6 +33,13 @@ export const oracleDocuments = sqliteTable('oracle_documents', {
   chunkIndex: integer('chunk_index'),          // Chunk number within parent (0-indexed)
   totalChunks: integer('total_chunks'),        // Total chunks parent was split into
   parentId: text('parent_id'),                 // ID of the parent document (before chunking)
+  // Memory layer system (v0.7.0 Phase 4) — Five-Layer Memory
+  memoryLayer: text('memory_layer'),           // 'user_model' | 'procedural' | 'semantic' | 'episodic' | null (legacy→semantic)
+  confidence: integer('confidence'),           // 0-100 mapped to 0.0-1.0 (SQLite integer for perf)
+  accessCount: integer('access_count').default(0),
+  lastAccessedAt: integer('last_accessed_at'), // Unix timestamp ms
+  decayScore: integer('decay_score').default(100), // 0-100 mapped to 0.0-1.0
+  expiresAt: integer('expires_at'),            // TTL timestamp ms (null = never)
 }, (table) => [
   index('idx_source').on(table.sourceFile),
   index('idx_type').on(table.type),
@@ -41,6 +48,9 @@ export const oracleDocuments = sqliteTable('oracle_documents', {
   index('idx_project').on(table.project),
   index('idx_embedding_model').on(table.embeddingModel),
   index('idx_parent_id').on(table.parentId),
+  index('idx_memory_layer').on(table.memoryLayer),
+  index('idx_decay_score').on(table.decayScore),
+  index('idx_expires_at').on(table.expiresAt),
 ]);
 
 // Indexing status tracking

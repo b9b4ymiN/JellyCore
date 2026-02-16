@@ -57,6 +57,13 @@ export function ensureSchema() {
     ['chunk_index', 'ALTER TABLE oracle_documents ADD COLUMN chunk_index INTEGER'],
     ['total_chunks', 'ALTER TABLE oracle_documents ADD COLUMN total_chunks INTEGER'],
     ['parent_id', 'ALTER TABLE oracle_documents ADD COLUMN parent_id TEXT'],
+    // v0.7.0: Memory layer system (Phase 4)
+    ['memory_layer', 'ALTER TABLE oracle_documents ADD COLUMN memory_layer TEXT'],
+    ['confidence', 'ALTER TABLE oracle_documents ADD COLUMN confidence INTEGER'],
+    ['access_count', 'ALTER TABLE oracle_documents ADD COLUMN access_count INTEGER DEFAULT 0'],
+    ['last_accessed_at', 'ALTER TABLE oracle_documents ADD COLUMN last_accessed_at INTEGER'],
+    ['decay_score', 'ALTER TABLE oracle_documents ADD COLUMN decay_score INTEGER DEFAULT 100'],
+    ['expires_at', 'ALTER TABLE oracle_documents ADD COLUMN expires_at INTEGER'],
   ];
 
   for (const [col, ddl] of migrations) {
@@ -69,6 +76,10 @@ export function ensureSchema() {
   // Ensure indexes for embedding versioning
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_embedding_model ON oracle_documents(embedding_model)');
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_parent_id ON oracle_documents(parent_id)');
+  // v0.7.0: Memory layer indexes
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_memory_layer ON oracle_documents(memory_layer)');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_decay_score ON oracle_documents(decay_score)');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_expires_at ON oracle_documents(expires_at)');
 
   // Ensure search_log has results column
   const searchLogCols = sqlite.prepare("PRAGMA table_info('search_log')").all() as { name: string }[];
