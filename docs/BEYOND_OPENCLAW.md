@@ -843,19 +843,25 @@ Phase 3: Reliability (Context Mastery) ⏭️ SKIPPED
        ถ้า implement ผิด → AI จำผิด แย่กว่าไม่จำเลย
     4. เพิ่ม complexity ให้ NanoClaw โดยยังไม่มี use case จริงรองรับ
 
-Phase 4: Five-Layer Memory System → ดำเนินการถัดไป (v0.7.0)
-  • 4.1 User Model Layer (Layer 1)
-  • 4.2 Procedural Memory (Layer 2)
-  • 4.3 Semantic Memory Enhancement (Layer 3)
-  • 4.4 Episodic Memory with Decay (Layer 4)
-  • 4.5 Continuous Learning Loop (Pillar 1.3)
+Phase 4: Five-Layer Memory System ✅ DONE (v0.7.0)
+  • 4.1 User Model Layer (Layer 1) — 19 tests
+  • 4.2 Procedural Memory (Layer 2) — 26 tests
+  • 4.3 Semantic Memory Enhancement (Layer 3) — 24 tests (decay)
+  • 4.4 Episodic Memory with Decay (Layer 4) — 16 tests
+  • 4.5 Continuous Learning Loop (Pillar 1.3) — 24 tests
+  • 4.6 Layer-Aware Search — 35 tests
+  • Schema Foundation — 66 tests
+  • Total: 210 tests, deployed 2026-02-16
+  • Spec: [v0.7.0-phase4-memory-layers.md](v0.7.0-phase4-memory-layers.md)
 
-Phase 5 (Week 8-10): Production Polish → เพิ่ม:
-  • 5.7 Cost Tracking & Budget System (Pillar 3.3)
-  • 5.8 Request Tracing (Pillar 7.1)
-  • 5.9 Knowledge Quality Metrics (Pillar 7.3)
-  • 5.10 Self-Diagnosis /doctor (Pillar 7.4)
-  • 5.11 Standardized Skills Format (Pillar 6.1)
+Phase 5 (Week 8-12): Production Polish & Intelligence Infrastructure → v0.8.0
+  • Part A: Context Mastery (Pillar 2) — Auto-Compaction + Memory Flush + Pruning
+  • Part B: Streaming & Response UX (Pillar 4) — Block Streaming + Status Indicators
+  • Part C: Cost Intelligence (Pillar 3) — Budget System + Auto-Downgrade
+  • Part D: Observability (Pillar 7) — Request Tracing + /doctor + Knowledge Quality
+  • Part E: Agent Loop (Pillar 5) — Reply Shaping + NO_REPLY + Tool Sanitization
+  • Part F: Skills & Extensibility (Pillar 6) — Skill Format + Hot Reload
+  • Spec: [v0.8.0-phase5-production-polish.md](v0.8.0-phase5-production-polish.md)
 
 Phase 6 (Week 10-12): ★ BEYOND OPENCLAW → ใหม่ทั้งหมด:
   • 6.1 Memory Consolidation Service
