@@ -5,6 +5,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  ENABLED_CHANNELS,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
@@ -603,13 +604,19 @@ async function main(): Promise<void> {
     logger.info('No TELEGRAM_BOT_TOKEN — Telegram disabled');
   }
 
-  // Create WhatsApp channel
-  const whatsapp = new WhatsAppChannel(channelCallbacks);
-  channels.push(whatsapp);
-  try {
-    await whatsapp.connect();
-  } catch (err) {
-    logger.warn({ err }, 'WhatsApp connection failed — continuing without WhatsApp');
+  // Create WhatsApp channel (only if enabled)
+  let whatsapp: WhatsAppChannel | undefined;
+  if (ENABLED_CHANNELS.has('whatsapp')) {
+    whatsapp = new WhatsAppChannel(channelCallbacks);
+    channels.push(whatsapp);
+    try {
+      await whatsapp.connect();
+      logger.info('WhatsApp channel enabled');
+    } catch (err) {
+      logger.warn({ err }, 'WhatsApp connection failed — continuing without WhatsApp');
+    }
+  } else {
+    logger.info('WhatsApp disabled via ENABLED_CHANNELS');
   }
 
   logger.info({ channels: channels.map(c => c.name) }, 'Active channels');
@@ -631,7 +638,7 @@ async function main(): Promise<void> {
     sendMessage: (jid, text) => sendToChannel(jid, text),
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp.syncGroupMetadata(force),
+    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });

@@ -12,8 +12,11 @@
 #   TELEGRAM_BOT_TOKEN         - Telegram bot token
 #   CHROMA_AUTH_TOKEN           - ChromaDB authentication token
 #   ORACLE_AUTH_TOKEN           - Oracle API authentication token
-#   JELLYCORE_AUTH_PASSPHRASE   - WhatsApp auth encryption key
+#   JELLYCORE_AUTH_PASSPHRASE   - WhatsApp auth encryption key (only if WhatsApp enabled)
 #   JELLYCORE_IPC_SECRET        - IPC integrity signing secret
+#
+# Optional:
+#   ENABLED_CHANNELS           - Comma-separated: telegram,whatsapp (default: telegram)
 
 services:
   # ========================================
@@ -124,7 +127,8 @@ services:
       # Group workspaces (shared with agent containers via DinD resolveHostPath)
       - ./groups:/app/nanoclaw/groups
     environment:
-      # Telegram
+      # Channels: comma-separated (telegram, whatsapp). Default: telegram only
+      - ENABLED_CHANNELS=${ENABLED_CHANNELS:-telegram}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       # Z.AI GLM Coding Plan — native Anthropic-compatible endpoint
       # https://docs.z.ai/devpack/tool/claude#manual-configuration

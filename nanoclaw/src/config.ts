@@ -73,6 +73,18 @@ export const AUTH_PASSPHRASE = process.env.JELLYCORE_AUTH_PASSPHRASE;
 // Telegram bot token (optional — if not set, Telegram channel is disabled)
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
+// Enabled channels: comma-separated list of channels to activate
+// Values: "telegram", "whatsapp" (case-insensitive)
+// Default: "telegram" (WhatsApp disabled by default)
+// Examples: ENABLED_CHANNELS=telegram  |  ENABLED_CHANNELS=telegram,whatsapp
+export const ENABLED_CHANNELS: Set<string> = new Set(
+  (process.env.ENABLED_CHANNELS || 'telegram')
+    .toLowerCase()
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
+
 // IPC integrity signing secret (auto-generated if not provided)
 export const IPC_SECRET = (() => {
   if (process.env.JELLYCORE_IPC_SECRET) return process.env.JELLYCORE_IPC_SECRET;

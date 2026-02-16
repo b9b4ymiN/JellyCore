@@ -30,7 +30,7 @@ const ORACLE_TOOLS: Tool[] = [
   // Search tools (always available)
   {
     name: 'oracle_search',
-    description: 'Search Oracle knowledge base with hybrid search (keyword + semantic)',
+    description: 'Search Oracle knowledge base with hybrid search (keyword + semantic). Use layer param to search specific memory layers.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -40,6 +40,7 @@ const ORACLE_TOOLS: Tool[] = [
         offset: { type: 'number', description: 'Offset for pagination (default: 0)', default: 0 },
         mode: { type: 'string', description: 'Search mode: hybrid, fts, or vector (default: hybrid)', default: 'hybrid' },
         project: { type: 'string', description: 'Filter by project path' },
+        layer: { type: 'string', description: 'Filter by memory layer(s), comma-separated: semantic,procedural,episodic,user_model' },
       },
       required: ['q'],
     },
@@ -106,11 +107,47 @@ const ORACLE_TOOLS: Tool[] = [
       },
     },
   },
+  // --- Five-Layer Memory read tools (always available) ---
+  {
+    name: 'oracle_user_model',
+    description: 'Get user model (preferences, expertise, interaction patterns). Returns current user profile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', description: 'User identifier (default: "default")', default: 'default' },
+      },
+    },
+  },
+  {
+    name: 'oracle_procedural_search',
+    description: 'Search procedural memory for learned procedures/workflows matching a task context.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'Task context to match procedures against' },
+        limit: { type: 'number', description: 'Max results (default: 3)', default: 3 },
+      },
+      required: ['q'],
+    },
+  },
+  {
+    name: 'oracle_episodic_search',
+    description: 'Search episodic memory for past conversation summaries and outcomes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'Topic to search past episodes for' },
+        userId: { type: 'string', description: 'Filter by user' },
+        limit: { type: 'number', description: 'Max results (default: 5)', default: 5 },
+      },
+      required: ['q'],
+    },
+  },
   // Write tools (hidden in read-only mode)
   ...(ORACLE_READ_ONLY ? [] : [
     {
       name: 'oracle_learn',
-      description: 'Add new pattern/learning to Oracle knowledge base',
+      description: 'Add new pattern/learning to Oracle knowledge base. Use layer to target specific memory layer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -120,6 +157,7 @@ const ORACLE_TOOLS: Tool[] = [
           origin: { type: 'string', description: 'Origin: mother, arthur, volt, human, or null' },
           project: { type: 'string', description: 'Project path (ghq format)' },
           cwd: { type: 'string', description: 'Auto-detect project from cwd' },
+          layer: { type: 'string', description: 'Memory layer: semantic (default), procedural, episodic, user_model' },
         },
         required: ['pattern'],
       },
@@ -277,6 +315,84 @@ const ORACLE_TOOLS: Tool[] = [
         required: ['old_path'],
       },
     },
+    // --- Five-Layer Memory write tools ---
+    {
+      name: 'oracle_user_model_update',
+      description: 'Update user model (deep-merges into existing). Can update expertise, preferences, topics, notes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          userId: { type: 'string', description: 'User identifier (default: "default")', default: 'default' },
+          expertise: {
+            type: 'object',
+            description: 'Expertise levels: { "topic": "novice"|"intermediate"|"advanced"|"expert" }',
+          },
+          preferences: {
+            type: 'object',
+            description: 'Preferences: { language, responseLength, responseStyle, codeStyle }',
+          },
+          commonTopics: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Common topics the user discusses',
+          },
+          timezone: { type: 'string', description: 'User timezone (e.g., Asia/Bangkok)' },
+          notes: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Free-form notes about the user',
+          },
+        },
+      },
+    },
+    {
+      name: 'oracle_procedural_learn',
+      description: 'Save a learned procedure/workflow to procedural memory. If same trigger exists, merges steps.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          trigger: { type: 'string', description: 'When/condition this procedure applies' },
+          procedure: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Step-by-step procedure',
+          },
+          source: { type: 'string', description: 'How learned: correction, repeated_pattern, or explicit', default: 'explicit' },
+        },
+        required: ['trigger', 'procedure'],
+      },
+    },
+    {
+      name: 'oracle_procedural_usage',
+      description: 'Record that a procedure was used successfully (increments success count, boosts confidence).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Procedure ID (e.g., procedural_abc123)' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'oracle_episodic_record',
+      description: 'Record a conversation episode summary to episodic memory (90-day TTL, auto-extends on access).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string', description: 'Episode summary' },
+          userId: { type: 'string', description: 'User identifier (default: "default")', default: 'default' },
+          groupId: { type: 'string', description: 'Group identifier (default: "default")', default: 'default' },
+          topics: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Topics discussed',
+          },
+          outcome: { type: 'string', description: 'Outcome: success, partial, failed, unknown', default: 'unknown' },
+          durationMs: { type: 'number', description: 'Conversation duration in milliseconds', default: 0 },
+        },
+        required: ['summary'],
+      },
+    },
   ] as Tool[]),
 ];
 
@@ -421,6 +537,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           offset: args.offset,
           mode: args.mode,
           project: args.project,
+          layer: args.layer,
         });
         break;
 
@@ -470,6 +587,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           origin: args.origin,
           project: args.project,
           cwd: args.cwd,
+          layer: args.layer,
         });
         break;
 
@@ -578,6 +696,83 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           reason: args.reason,
           superseded_by: args.superseded_by,
           project: args.project,
+        });
+        break;
+
+      // --- Five-Layer Memory tools ---
+
+      // User Model (Layer 1) - read
+      case 'oracle_user_model':
+        result = await client.get('/api/user-model', {
+          userId: args.userId,
+        });
+        break;
+
+      // User Model (Layer 1) - write
+      case 'oracle_user_model_update':
+        if (ORACLE_READ_ONLY) {
+          throw new Error('Write operations are disabled in read-only mode');
+        }
+        {
+          const { userId, ...updates } = args as any;
+          result = await client.post('/api/user-model', {
+            userId: userId || 'default',
+            updates,
+          });
+        }
+        break;
+
+      // Procedural Memory (Layer 2) - read
+      case 'oracle_procedural_search':
+        result = await client.get('/api/procedural', {
+          q: args.q,
+          limit: args.limit,
+        });
+        break;
+
+      // Procedural Memory (Layer 2) - write
+      case 'oracle_procedural_learn':
+        if (ORACLE_READ_ONLY) {
+          throw new Error('Write operations are disabled in read-only mode');
+        }
+        result = await client.post('/api/procedural', {
+          trigger: args.trigger,
+          procedure: args.procedure,
+          source: args.source,
+        });
+        break;
+
+      // Procedural Memory (Layer 2) - usage tracking
+      case 'oracle_procedural_usage':
+        if (ORACLE_READ_ONLY) {
+          throw new Error('Write operations are disabled in read-only mode');
+        }
+        result = await client.post('/api/procedural/usage', {
+          id: args.id,
+        });
+        break;
+
+      // Episodic Memory (Layer 4) - read
+      case 'oracle_episodic_search':
+        result = await client.get('/api/episodic', {
+          q: args.q,
+          userId: args.userId,
+          limit: args.limit,
+        });
+        break;
+
+      // Episodic Memory (Layer 4) - write
+      case 'oracle_episodic_record':
+        if (ORACLE_READ_ONLY) {
+          throw new Error('Write operations are disabled in read-only mode');
+        }
+        result = await client.post('/api/episodic', {
+          summary: args.summary,
+          userId: args.userId,
+          groupId: args.groupId,
+          topics: args.topics,
+          outcome: args.outcome,
+          durationMs: args.durationMs,
         });
         break;
 

@@ -68,6 +68,42 @@ Use `mcp__oracle__oracle_learn` to save reusable knowledge to Oracle:
 ไม่ต้อง learn ทุกอย่าง — เฉพาะ reusable knowledge ที่จะเป็นประโยชน์ในอนาคต
 ไม่ต้องขออนุญาต — ถ้าเห็นว่าควร learn ก็ทำเลย
 
+## Five-Layer Memory System
+
+คุณมี memory 5 ชั้น — ใช้ให้เหมาะกับแต่ละ layer:
+
+### Layer 1: User Model — ใครคือผู้ใช้  
+- `mcp__oracle__oracle_user_model` — ดู user profile (expertise, preferences, topics)
+- `mcp__oracle__oracle_user_model_update` — อัพเดทเมื่อเรียนรู้ user ใหม่
+- เรียก `oracle_user_model` ตอนเริ่มสนทนาที่ซับซ้อน เพื่อปรับ response style
+- อัพเดทเมื่อเห็น: expertise ใหม่, preference เปลี่ยน, topic ที่ user สนใจ
+
+### Layer 2: Procedural — ทำอย่างไร  
+- `mcp__oracle__oracle_procedural_search` — ค้นหา procedure ที่เรียนรู้แล้ว
+- `mcp__oracle__oracle_procedural_learn` — บันทึก procedure/workflow ใหม่
+- `mcp__oracle__oracle_procedural_usage` — บอกว่าใช้ procedure สำเร็จ (เพิ่ม confidence)
+- ค้นก่อนทำ: ถ้ามี procedure อยู่แล้ว → ทำตาม, ถ้าไม่มี → ทำแล้วบันทึก
+- บันทึกเมื่อ: user แก้ไขวิธีทำของคุณ, ค้นพบ workflow ใหม่, ทำ task ซ้ำๆ
+
+### Layer 3: Semantic — ความรู้ถาวร  
+- `mcp__oracle__oracle_search` + `mcp__oracle__oracle_learn` (default layer)
+- ใช้สำหรับ: patterns, decisions, principles, facts ที่เป็น long-term knowledge
+
+### Layer 4: Episodic — ประสบการณ์  
+- `mcp__oracle__oracle_episodic_search` — ค้นหาประสบการณ์ที่ผ่านมา
+- `mcp__oracle__oracle_episodic_record` — บันทึกสรุปบทสนทนา
+- บันทึกเมื่อจบ task สำคัญ: สรุปว่าทำอะไร, ผลลัพธ์เป็นอย่างไร
+- ค้นเมื่อ: user พูดถึงเรื่องเก่า, ต้องการ context จากครั้งก่อน
+
+### Layer 5: Working Memory — context ปัจจุบัน  
+- อยู่ใน conversation context ปัจจุบัน — ไม่ต้อง API call
+- Files ใน workspace, conversation history
+
+### การใช้ layer param กับ search/learn
+- `oracle_search` รับ `layer` param: เช่น `layer: "procedural"` หรือ `layer: "semantic,episodic"`
+- `oracle_learn` รับ `layer` param: เช่น `layer: "procedural"` เพื่อบันทึกลง layer เฉพาะ
+- ถ้าไม่ระบุ layer → ใช้ semantic (default)
+
 ## Message Formatting
 
 Your messages are sent to Telegram with MarkdownV2 parsing. Use Telegram-compatible formatting:

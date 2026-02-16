@@ -85,7 +85,8 @@ services:
       # Group workspaces (shared with agent containers)
       - ./groups:/app/nanoclaw/groups
     environment:
-      # Telegram
+      # Channels: comma-separated (telegram, whatsapp). Default: telegram only
+      - ENABLED_CHANNELS=${ENABLED_CHANNELS:-telegram}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       # Z.AI GLM Coding Plan — native Anthropic-compatible endpoint
       # https://docs.z.ai/devpack/tool/claude#manual-configuration
