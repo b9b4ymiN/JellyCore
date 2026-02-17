@@ -1,5 +1,5 @@
 # NanoClaw Agent Container
-# Runs Claude Agent SDK in isolated Linux VM with browser automation
+# Runs Claude Agent SDK in isolated Linux VM with browser automation + Python
 # Multi-stage build: TypeScript compiled at build time for fast cold start
 
 # --- Build stage: compile TypeScript ---
@@ -22,8 +22,8 @@ RUN npm run build
 # --- Runtime stage ---
 FROM node:22-slim
 
-# Install system dependencies for Chromium
-RUN apt-get update && apt-get install -y \
+# Install system dependencies for Chromium + Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
     fonts-noto-color-emoji \
@@ -42,11 +42,27 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    python3 \
+    python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chromium path for agent-browser
+# Set Chromium path for agent-browser + Playwright
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Install common Python packages system-wide (web scraping & HTTP)
+# Playwright reuses the system Chromium — no extra browser download
+RUN pip3 install --no-cache-dir --break-system-packages \
+    requests \
+    beautifulsoup4 \
+    lxml \
+    playwright \
+    && python3 -m playwright install-deps 2>/dev/null || true
+
+# Tell Playwright to use system Chromium (don't download its own)
+ENV PLAYWRIGHT_BROWSERS_PATH=0
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # Install agent-browser, claude-code, and PM2 globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code pm2
