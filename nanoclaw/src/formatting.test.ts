@@ -97,6 +97,55 @@ describe('formatMessages', () => {
     const result = formatMessages([]);
     expect(result).toBe('<messages>\n\n</messages>');
   });
+
+  it('truncates oldest messages when over maxChars budget', () => {
+    // Create 5 messages, each ~50 chars → total ~250 chars
+    const msgs = Array.from({ length: 5 }, (_, i) =>
+      makeMsg({ id: String(i), sender_name: `User${i}`, content: 'x'.repeat(30), timestamp: `t${i}` }),
+    );
+    // Set a small budget that can fit only ~2 messages
+    const result = formatMessages(msgs, 120);
+
+    // Should contain truncation comment
+    expect(result).toContain('earlier message(s) truncated');
+
+    // Should keep the NEWEST messages (last ones), drop oldest
+    expect(result).toContain('User4');
+    expect(result).not.toContain('User0');
+  });
+
+  it('preserves all messages when under maxChars budget', () => {
+    const msgs = [
+      makeMsg({ id: '1', sender_name: 'Alice', content: 'short' }),
+      makeMsg({ id: '2', sender_name: 'Bob', content: 'also short' }),
+    ];
+    const result = formatMessages(msgs, 50000);
+    expect(result).not.toContain('truncated');
+    expect(result).toContain('Alice');
+    expect(result).toContain('Bob');
+  });
+
+  it('keeps at least one message even if over budget', () => {
+    const msgs = [makeMsg({ content: 'x'.repeat(1000) })];
+    const result = formatMessages(msgs, 10); // budget way too small
+    // Should still contain the message — never drops to zero
+    expect(result).toContain('x'.repeat(1000));
+    // With only 1 message, nothing can be dropped
+    expect(result).toContain('sender="Alice"');
+  });
+
+  it('reports correct truncation count', () => {
+    const msgs = Array.from({ length: 10 }, (_, i) =>
+      makeMsg({ id: String(i), content: 'y'.repeat(50), timestamp: `t${i}` }),
+    );
+    // Each line is ~90 chars → total ~900. Budget of 200 should drop ~7-8 messages.
+    const result = formatMessages(msgs, 200);
+    const match = result.match(/(\d+) earlier message\(s\) truncated/);
+    expect(match).toBeTruthy();
+    const dropped = parseInt(match![1]);
+    expect(dropped).toBeGreaterThanOrEqual(5);
+    expect(dropped).toBeLessThan(10); // must keep at least 1
+  });
 });
 
 // --- TRIGGER_PATTERN ---

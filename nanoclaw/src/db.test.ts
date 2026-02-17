@@ -7,7 +7,11 @@ import {
   getAllChats,
   getMessagesSince,
   getNewMessages,
+  getSession,
+  getSessionAge,
   getTaskById,
+  clearSession,
+  setSession,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -311,5 +315,111 @@ describe('task CRUD', () => {
 
     deleteTask('task-3');
     expect(getTaskById('task-3')).toBeUndefined();
+  });
+});
+
+// --- getMessagesSince LIMIT ---
+
+describe('getMessagesSince LIMIT', () => {
+  beforeEach(() => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    // Insert 100 messages with sortable timestamps (using milliseconds for clean ordering)
+    for (let i = 1; i <= 100; i++) {
+      const ts = `2024-01-01T00:00:00.${String(i).padStart(3, '0')}Z`;
+      store({
+        id: `msg-${i}`,
+        chat_jid: 'group@g.us',
+        sender: 'user@s.whatsapp.net',
+        sender_name: 'User',
+        content: `message #${i}`,
+        timestamp: ts,
+      });
+    }
+  });
+
+  it('returns at most 50 messages by default', () => {
+    const msgs = getMessagesSince('group@g.us', '', 'BotName');
+    expect(msgs).toHaveLength(50);
+  });
+
+  it('returns the NEWEST 50 messages, not oldest', () => {
+    const msgs = getMessagesSince('group@g.us', '', 'BotName');
+    // Should have messages 51-100 (the newest 50)
+    expect(msgs[0].content).toBe('message #51');
+    expect(msgs[49].content).toBe('message #100');
+  });
+
+  it('returns messages in ascending order (oldest first within window)', () => {
+    const msgs = getMessagesSince('group@g.us', '', 'BotName');
+    for (let i = 1; i < msgs.length; i++) {
+      expect(msgs[i].timestamp >= msgs[i - 1].timestamp).toBe(true);
+    }
+  });
+
+  it('respects custom limit parameter', () => {
+    const msgs = getMessagesSince('group@g.us', '', 'BotName', 10);
+    expect(msgs).toHaveLength(10);
+    // Should be the newest 10
+    expect(msgs[0].content).toBe('message #91');
+    expect(msgs[9].content).toBe('message #100');
+  });
+
+  it('returns all when fewer than limit exist', () => {
+    // Timestamp .095 → only messages #96-#100 are after it
+    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:00.095Z', 'BotName');
+    expect(msgs.length).toBeLessThanOrEqual(50);
+    expect(msgs.length).toBe(5);
+  });
+});
+
+// --- Session rotation ---
+
+describe('session rotation', () => {
+  it('setSession records session_started_at timestamp', () => {
+    setSession('main', 'sess-abc');
+    const age = getSessionAge('main');
+    expect(age).not.toBeNull();
+    // Should be very recent (in milliseconds)
+    expect(age!).toBeLessThan(5000);
+  });
+
+  it('setSession preserves original timestamp when same sessionId is re-stored', () => {
+    setSession('main', 'sess-abc');
+    const age1 = getSessionAge('main');
+
+    // Re-store same session ID
+    setSession('main', 'sess-abc');
+    const age2 = getSessionAge('main');
+
+    // Age should be approximately the same (original timestamp preserved)
+    expect(Math.abs(age2! - age1!)).toBeLessThan(1000);
+  });
+
+  it('setSession updates timestamp when sessionId changes', () => {
+    setSession('main', 'sess-old');
+    const session1 = getSession('main');
+    expect(session1).toBe('sess-old');
+
+    // New session ID → new timestamp
+    setSession('main', 'sess-new');
+    const session2 = getSession('main');
+    expect(session2).toBe('sess-new');
+    const age = getSessionAge('main');
+    expect(age).not.toBeNull();
+    expect(age!).toBeLessThan(5000);
+  });
+
+  it('clearSession removes the session entirely', () => {
+    setSession('main', 'sess-xyz');
+    expect(getSession('main')).toBe('sess-xyz');
+
+    clearSession('main');
+    expect(getSession('main')).toBeUndefined();
+    expect(getSessionAge('main')).toBeNull();
+  });
+
+  it('getSessionAge returns null for non-existent session', () => {
+    expect(getSessionAge('nonexistent')).toBeNull();
   });
 });

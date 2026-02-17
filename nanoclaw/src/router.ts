@@ -29,6 +29,10 @@ export function formatMessages(messages: NewMessage[], maxChars: number = MAX_PR
     dropped++;
   }
 
+  if (dropped === 0) {
+    return `<messages>\n${lines.join('\n')}\n</messages>`;
+  }
+
   const header = `<!-- ${dropped} earlier message(s) truncated to fit context budget -->`;
   return `<messages>\n${header}\n${lines.join('\n')}\n</messages>`;
 }
