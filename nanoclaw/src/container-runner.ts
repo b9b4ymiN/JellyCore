@@ -410,6 +410,23 @@ export async function runContainerAgent(
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  // Log rotation: keep only the newest MAX_LOG_FILES log files
+  try {
+    const logFiles = fs.readdirSync(logsDir)
+      .filter(f => f.startsWith('container-') && f.endsWith('.log'))
+      .sort();
+    const MAX_LOG_FILES = 20;
+    if (logFiles.length > MAX_LOG_FILES) {
+      const toDelete = logFiles.slice(0, logFiles.length - MAX_LOG_FILES);
+      for (const f of toDelete) {
+        fs.unlinkSync(path.join(logsDir, f));
+      }
+      logger.debug({ deleted: toDelete.length, remaining: MAX_LOG_FILES }, 'Rotated old container logs');
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Log rotation failed');
+  }
+
   return new Promise((resolve) => {
     const container = spawn('docker', containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -549,15 +566,19 @@ export async function runContainerAgent(
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(timeoutLog, [
-          `=== Container Run Log (TIMEOUT) ===`,
-          `Timestamp: ${new Date().toISOString()}`,
-          `Group: ${group.name}`,
-          `Container: ${containerName}`,
-          `Duration: ${duration}ms`,
-          `Exit Code: ${code}`,
-          `Had Streaming Output: ${hadStreamingOutput}`,
-        ].join('\n'));
+        try {
+          fs.writeFileSync(timeoutLog, [
+            `=== Container Run Log (TIMEOUT) ===`,
+            `Timestamp: ${new Date().toISOString()}`,
+            `Group: ${group.name}`,
+            `Container: ${containerName}`,
+            `Duration: ${duration}ms`,
+            `Exit Code: ${code}`,
+            `Had Streaming Output: ${hadStreamingOutput}`,
+          ].join('\n'));
+        } catch (writeErr) {
+          logger.warn({ err: writeErr }, 'Failed to write timeout log (disk full?)');
+        }
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
@@ -644,8 +665,12 @@ export async function runContainerAgent(
         );
       }
 
-      fs.writeFileSync(logFile, logLines.join('\n'));
-      logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+      try {
+        fs.writeFileSync(logFile, logLines.join('\n'));
+        logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+      } catch (writeErr) {
+        logger.warn({ err: writeErr, logFile }, 'Failed to write container log (disk full?)');
+      }
 
       if (code !== 0) {
         logger.error(

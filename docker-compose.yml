@@ -52,7 +52,8 @@ services:
       - ORACLE_DATA_DIR=/data/oracle
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
-      - THAI_NLP_URL=http://thai-nlp:8000
+      # Thai NLP disabled — Oracle has graceful fallback (whitespace tokenization)
+      # - THAI_NLP_URL=http://thai-nlp:8000
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
       - NODE_ENV=production
     networks:
@@ -60,8 +61,7 @@ services:
     depends_on:
       chromadb:
         condition: service_healthy
-      thai-nlp:
-        condition: service_healthy
+      # thai-nlp dependency removed — Oracle falls back gracefully
     healthcheck:
       test: ["CMD", "bun", "-e", "const r = await fetch('http://localhost:47778/api/health'); process.exit(r.ok ? 0 : 1)"]
       interval: 30s
@@ -114,28 +114,27 @@ services:
       oracle:
         condition: service_healthy
 
-  # Thai NLP Sidecar - PyThaiNLP wrapper for Thai text processing
-  thai-nlp:
-    build: ./thai-nlp-sidecar
-    container_name: jellycore-thai-nlp
-    restart: unless-stopped
-    mem_limit: 256m
-    # No port mapping in dev — only accessible within jellycore-internal network
-    # For local testing: uncomment the ports line below
-    # ports:
-    #   - "47780:8000"
-    environment:
-      - PYTHAINLP_DATA_DIR=/data/pythainlp
-    volumes:
-      - thai-nlp-data:/data/pythainlp
-    networks:
-      - jellycore-internal
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 45s
+  # Thai NLP Sidecar — DISABLED to save resources
+  # Oracle has graceful fallback: uses whitespace tokenization instead of PyThaiNLP.
+  # Thai search quality slightly reduced but functional.
+  # Uncomment to re-enable:
+  # thai-nlp:
+  #   build: ./thai-nlp-sidecar
+  #   container_name: jellycore-thai-nlp
+  #   restart: unless-stopped
+  #   mem_limit: 256m
+  #   environment:
+  #     - PYTHAINLP_DATA_DIR=/data/pythainlp
+  #   volumes:
+  #     - thai-nlp-data:/data/pythainlp
+  #   networks:
+  #     - jellycore-internal
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+  #     interval: 15s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 45s
 
 volumes:
   chromadb-data:
@@ -148,8 +147,8 @@ volumes:
     driver: local
   nanoclaw-data:
     driver: local
-  thai-nlp-data:
-    driver: local
+  # thai-nlp-data:
+  #   driver: local
 
 networks:
   jellycore-internal:
