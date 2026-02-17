@@ -509,7 +509,7 @@ Pacing Config:
   Final block: ส่งทันที (ไม่ delay)
 
   ผลลัพธ์: ดูเหมือนคนพิมพ์ตอบ ไม่ใช่ bot dump ข้อความ
-  เข้ากับ personality ของ ฝน (Fon) ที่เป็น "เหมือนเพื่อนแชท"
+  เข้ากับ personality ที่เป็น "เหมือนเพื่อนแชท"
 ```
 
 ### 4.3 Telegram Draft Streaming
