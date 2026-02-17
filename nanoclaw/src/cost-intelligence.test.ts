@@ -35,7 +35,9 @@ describe('Model Pricing', () => {
     expect(MODEL_PRICING['haiku']).toBeDefined();
     expect(MODEL_PRICING['opus']).toBeDefined();
     expect(MODEL_PRICING['glm-4.7']).toBeDefined();
-    expect(MODEL_PRICING['glm-4.5-air']).toBeDefined();
+    expect(MODEL_PRICING['glm-4.7-flash']).toBeDefined();
+    expect(MODEL_PRICING['glm-4.6v']).toBeDefined();
+    expect(MODEL_PRICING['glm-4.6']).toBeDefined();
   });
 
   it('returns haiku pricing for unknown models', () => {
@@ -45,14 +47,14 @@ describe('Model Pricing', () => {
 
   it('calculates cost correctly for sonnet', () => {
     const cost = estimateCost('sonnet', 1000, 500);
-    // (1000 * 3.00 + 500 * 15.00) / 1_000_000
-    expect(cost).toBeCloseTo(0.0105, 4);
+    // (1000 * 0.50 + 500 * 2.00) / 1_000_000
+    expect(cost).toBeCloseTo(0.0015, 4);
   });
 
   it('calculates cost correctly for haiku', () => {
     const cost = estimateCost('haiku', 10000, 2000);
-    // (10000 * 0.25 + 2000 * 1.25) / 1_000_000
-    expect(cost).toBeCloseTo(0.005, 4);
+    // (10000 * 0.10 + 2000 * 0.40) / 1_000_000
+    expect(cost).toBeCloseTo(0.0018, 4);
   });
 
   it('calculates zero cost with zero tokens', () => {
@@ -139,13 +141,13 @@ describe('Budget Enforcement', () => {
 
   it('returns alert when spend reaches 80%', () => {
     setBudget('__global__', 10);
-    // Insert $8.50 of spend (85% of $10)
+    // Insert $9 of spend (~90% of $10) at z.ai GLM-4.7 pricing ($0.50/$2.00)
     trackUsageEnhanced({
       tier: 'container-full',
       model: 'sonnet',
       responseTimeMs: 5000,
-      inputTokens: 1_000_000,  // $3
-      outputTokens: 400_000,   // $6 → total $9 (but estimateCost is different)
+      inputTokens: 10_000_000,  // $5.00
+      outputTokens: 2_000_000,  // $4.00 → total $9
     });
     // Manually check what cost was tracked
     const spend = getSpend();
@@ -159,15 +161,15 @@ describe('Budget Enforcement', () => {
 
   it('returns downgrade when spend reaches 95%', () => {
     setBudget('__global__', 1);
-    // Spend ~$0.96 (96% of $1)
+    // Spend ~$1.00 (100% of $1) at z.ai GLM-4.7 pricing
     trackUsageEnhanced({
       tier: 'container-full',
       model: 'sonnet',
       responseTimeMs: 5000,
-      inputTokens: 100_000,
-      outputTokens: 50_000,
+      inputTokens: 1_000_000,   // $0.50
+      outputTokens: 250_000,    // $0.50 → total $1.00
     });
-    // Check: $0.30 + $0.75 = $1.05 → 105% → should be haiku-only or downgrade
+    // Check: $0.50 + $0.50 = $1.00 → 100% → should be haiku-only or downgrade
     const spend = getSpend();
     const status = checkBudget('sonnet');
 

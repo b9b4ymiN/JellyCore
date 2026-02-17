@@ -2,7 +2,7 @@
  * Cost Intelligence — Budget enforcement, model pricing, auto-downgrade
  *
  * Extends the basic cost-tracker with:
- *  - Configurable model pricing (Claude + GLM models)
+ *  - Configurable model pricing (z.ai GLM models via Anthropic-compatible API)
  *  - Per-group monthly/daily budgets with thresholds
  *  - Auto-downgrade when approaching budget limits
  *  - Cost chat commands (/usage, /cost, /budget)
@@ -23,15 +23,27 @@ export interface ModelPricing {
   contextWindow: number;
 }
 
-/** Configurable model pricing — supports Claude + GLM models */
+/**
+ * Model pricing — z.ai GLM models via Anthropic-compatible API
+ *
+ * Internal aliases (sonnet/haiku/opus) are remapped by Claude Code SDK:
+ *   sonnet → GLM-4.7      (ANTHROPIC_DEFAULT_SONNET_MODEL)
+ *   haiku  → GLM-4.7-Flash (ANTHROPIC_DEFAULT_HAIKU_MODEL)
+ *   opus   → GLM-4.7      (ANTHROPIC_DEFAULT_OPUS_MODEL)
+ *
+ * z.ai uses subscription pricing (Lite $3/mo, Pro $15/mo).
+ * Values below are estimates for internal budget tracking only.
+ */
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-  'sonnet':          { inputPer1M: 3.00,  outputPer1M: 15.00, contextWindow: 200_000 },
-  'haiku':           { inputPer1M: 0.25,  outputPer1M: 1.25,  contextWindow: 200_000 },
-  'opus':            { inputPer1M: 15.00, outputPer1M: 75.00, contextWindow: 200_000 },
-  'claude-sonnet-4': { inputPer1M: 3.00,  outputPer1M: 15.00, contextWindow: 200_000 },
-  'claude-haiku-3.5':{ inputPer1M: 0.25,  outputPer1M: 1.25,  contextWindow: 200_000 },
-  'glm-4.7':         { inputPer1M: 0.50,  outputPer1M: 2.00,  contextWindow: 128_000 },
-  'glm-4.5-air':     { inputPer1M: 0.10,  outputPer1M: 0.50,  contextWindow: 128_000 },
+  // Internal aliases — pricing reflects the actual GLM model behind the alias
+  'sonnet':          { inputPer1M: 0.50,  outputPer1M: 2.00,  contextWindow: 200_000 },  // → GLM-4.7
+  'haiku':           { inputPer1M: 0.10,  outputPer1M: 0.40,  contextWindow: 128_000 },  // → GLM-4.7-Flash
+  'opus':            { inputPer1M: 0.50,  outputPer1M: 2.00,  contextWindow: 200_000 },  // → GLM-4.7
+  // Actual z.ai model names (for direct reference / usage_tracking queries)
+  'glm-4.7':         { inputPer1M: 0.50,  outputPer1M: 2.00,  contextWindow: 200_000 },
+  'glm-4.7-flash':   { inputPer1M: 0.10,  outputPer1M: 0.40,  contextWindow: 128_000 },
+  'glm-4.6v':        { inputPer1M: 0.40,  outputPer1M: 1.50,  contextWindow: 200_000 },  // feedback model
+  'glm-4.6':         { inputPer1M: 0.40,  outputPer1M: 1.50,  contextWindow: 200_000 },
 };
 
 export function getModelPricing(model: string): ModelPricing {

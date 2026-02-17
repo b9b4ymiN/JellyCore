@@ -25,7 +25,7 @@ import {
 } from './container-runner.js';
 import { containerPool } from './container-pool.js';
 import { classifyQuery } from './query-router.js';
-import { handleInline } from './inline-handler.js';
+import { handleInline, InlineResult } from './inline-handler.js';
 import { handleOracleOnly } from './oracle-handler.js';
 import { initCostTracking, trackUsage } from './cost-tracker.js';
 import { initCostIntelligence, checkBudget, trackUsageEnhanced } from './cost-intelligence.js';
@@ -184,11 +184,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Tier 1: Inline — template response, no container/API
   if (classification.tier === 'inline') {
-    const reply = handleInline(classification.reason, lastMsg.content, chatJid, group.name);
+    const result = handleInline(classification.reason, lastMsg.content, chatJid, group.name);
+    const reply = typeof result === 'string' ? result : result.reply;
+    const action = typeof result === 'string' ? undefined : result.action;
+
     const ch = channelFor(chatJid);
     await sendToChannel(chatJid, formatOutbound(ch, reply));
     lastAgentTimestamp[chatJid] = lastMsg.timestamp;
     saveState();
+
+    // Handle side-effects from commands
+    if (action === 'clear-session') {
+      clearSession(group.folder);
+      delete sessions[group.folder];
+      delete lastAgentTimestamp[chatJid];
+      saveState();
+      logger.info({ group: group.name }, 'Session cleared via /clear command');
+    }
+
     trackUsage(classification.tier, classification.model, Date.now() - startTime);
     logger.info({ group: group.name, tier: 'inline', ms: Date.now() - startTime }, 'Inline response sent');
     return true;

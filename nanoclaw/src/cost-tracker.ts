@@ -25,11 +25,12 @@ export function initCostTracking(): void {
   `);
 }
 
-// Cost per 1M tokens (approximate, USD)
+// Cost per 1M tokens (approximate, z.ai GLM subscription pricing)
+// Internal aliases: sonnet→GLM-4.7, haiku→GLM-4.7-Flash, opus→GLM-4.7
 const MODEL_COSTS: Record<string, { input: number; output: number }> = {
-  haiku: { input: 0.25, output: 1.25 },
-  sonnet: { input: 3.0, output: 15.0 },
-  opus: { input: 15.0, output: 75.0 },
+  haiku:  { input: 0.10, output: 0.40 },  // → GLM-4.7-Flash
+  sonnet: { input: 0.50, output: 2.00 },  // → GLM-4.7
+  opus:   { input: 0.50, output: 2.00 },  // → GLM-4.7
 };
 
 export function trackUsage(
