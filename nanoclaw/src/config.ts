@@ -32,6 +32,20 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
+
+// Context budget: limits for prompt construction to prevent "Prompt is too long" errors
+export const MAX_PROMPT_MESSAGES = parseInt(
+  process.env.MAX_PROMPT_MESSAGES || '50',
+  10,
+); // Max messages fetched from DB per group
+export const MAX_PROMPT_CHARS = parseInt(
+  process.env.MAX_PROMPT_CHARS || '30000',
+  10,
+); // Max chars in formatted message XML (~10K tokens)
+export const SESSION_MAX_AGE_MS = parseInt(
+  process.env.SESSION_MAX_AGE_HOURS || '24',
+  10,
+) * 60 * 60 * 1000; // Session rotation age (default 24h)
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(
   process.env.IDLE_TIMEOUT || '1800000',

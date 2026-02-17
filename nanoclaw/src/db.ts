@@ -82,6 +82,15 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Add session_started_at column for session rotation (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE sessions ADD COLUMN session_started_at TEXT DEFAULT ''`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -258,6 +267,7 @@ export function getNewMessages(
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
     ORDER BY timestamp
+    LIMIT 200
   `;
 
   const rows = db
@@ -276,17 +286,22 @@ export function getMessagesSince(
   chatJid: string,
   sinceTimestamp: string,
   botPrefix: string,
+  limit = 50,
 ): NewMessage[] {
   // Filter out bot's own messages by checking content prefix
+  // Use subquery to get the MOST RECENT N messages, then re-order ascending
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
-    FROM messages
-    WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
-    ORDER BY timestamp
+    SELECT * FROM (
+      SELECT id, chat_jid, sender, sender_name, content, timestamp
+      FROM messages
+      WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) sub ORDER BY timestamp ASC
   `;
   return db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
+    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
 export function createTask(
@@ -448,8 +463,20 @@ export function getSession(groupFolder: string): string | undefined {
 
 export function setSession(groupFolder: string, sessionId: string): void {
   db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+    'INSERT OR REPLACE INTO sessions (group_folder, session_id, session_started_at) VALUES (?, ?, COALESCE((SELECT session_started_at FROM sessions WHERE group_folder = ? AND session_id = ?), ?))',
+  ).run(groupFolder, sessionId, groupFolder, sessionId, new Date().toISOString());
+}
+
+export function clearSession(groupFolder: string): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
+}
+
+export function getSessionAge(groupFolder: string): number | null {
+  const row = db
+    .prepare('SELECT session_started_at FROM sessions WHERE group_folder = ?')
+    .get(groupFolder) as { session_started_at: string } | undefined;
+  if (!row?.session_started_at) return null;
+  return Date.now() - new Date(row.session_started_at).getTime();
 }
 
 export function getAllSessions(): Record<string, string> {

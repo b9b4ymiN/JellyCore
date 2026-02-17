@@ -9,6 +9,7 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  SESSION_MAX_AGE_MS,
   TELEGRAM_BOT_TOKEN,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -35,6 +36,8 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  getSessionAge,
+  clearSession,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
@@ -287,7 +290,22 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // Session rotation: if session is too old, start fresh to prevent
+  // unbounded context accumulation from SDK session resume
+  if (sessionId) {
+    const age = getSessionAge(group.folder);
+    if (age !== null && age > SESSION_MAX_AGE_MS) {
+      logger.info(
+        { group: group.name, ageHours: Math.round(age / 3600000) },
+        'Session expired, rotating to fresh session',
+      );
+      clearSession(group.folder);
+      delete sessions[group.folder];
+      sessionId = undefined;
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();

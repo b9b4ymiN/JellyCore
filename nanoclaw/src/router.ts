@@ -1,4 +1,4 @@
-import { ASSISTANT_NAME } from './config.js';
+import { ASSISTANT_NAME, MAX_PROMPT_CHARS } from './config.js';
 import { Channel, NewMessage } from './types.js';
 
 export function escapeXml(s: string): string {
@@ -9,11 +9,28 @@ export function escapeXml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-export function formatMessages(messages: NewMessage[]): string {
+export function formatMessages(messages: NewMessage[], maxChars: number = MAX_PROMPT_CHARS): string {
   const lines = messages.map((m) =>
     `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`,
   );
-  return `<messages>\n${lines.join('\n')}\n</messages>`;
+
+  // If total size is within budget, return as-is
+  let total = lines.reduce((sum, l) => sum + l.length, 0);
+
+  if (total <= maxChars) {
+    return `<messages>\n${lines.join('\n')}\n</messages>`;
+  }
+
+  // Over budget: drop oldest messages until we fit
+  let dropped = 0;
+  while (lines.length > 1 && total > maxChars) {
+    total -= lines[0].length;
+    lines.shift();
+    dropped++;
+  }
+
+  const header = `<!-- ${dropped} earlier message(s) truncated to fit context budget -->`;
+  return `<messages>\n${header}\n${lines.join('\n')}\n</messages>`;
 }
 
 export function stripInternalTags(text: string): string {
