@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { ASSISTANT_NAME, GROUPS_DIR } from './config.js';
+import { cmdUsage, cmdCost, cmdBudget } from './cost-intelligence.js';
 
 // ─── Telegram Slash Commands ─────────────────────────────────────────
 
@@ -16,6 +17,9 @@ export const TELEGRAM_COMMANDS = [
   { command: 'start', description: 'เริ่มต้นใช้งาน' },
   { command: 'help', description: 'คำสั่งที่ใช้ได้' },
   { command: 'status', description: 'สถานะระบบ' },
+  { command: 'usage', description: 'สรุปการใช้งานวันนี้' },
+  { command: 'cost', description: 'ค่าใช้จ่ายเดือนนี้' },
+  { command: 'budget', description: 'ดู/ตั้ง budget' },
   { command: 'soul', description: 'ดูบุคลิกของ AI' },
   { command: 'me', description: 'ข้อมูลที่ AI รู้เกี่ยวกับคุณ' },
   { command: 'reset', description: 'ล้างข้อมูลผู้ใช้ (USER.md)' },
@@ -207,6 +211,9 @@ export function handleInline(
       case '/soul': return cmdSoul();
       case '/me': return cmdMe(chatJid || '', groupFolder);
       case '/reset': return cmdReset(groupFolder);
+      case '/usage': return cmdUsage();
+      case '/cost': return cmdCost();
+      case '/budget': return cmdBudget(message.trim().replace(/^\/budget\s*/i, ''));
       default: return `ไม่รู้จักคำสั่ง ${cmd} — ลอง /help ดูนะคะ`;
     }
   }

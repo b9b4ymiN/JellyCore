@@ -28,6 +28,7 @@ import { classifyQuery } from './query-router.js';
 import { handleInline } from './inline-handler.js';
 import { handleOracleOnly } from './oracle-handler.js';
 import { initCostTracking, trackUsage } from './cost-tracker.js';
+import { initCostIntelligence, checkBudget, trackUsageEnhanced } from './cost-intelligence.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -210,6 +211,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // Tier 3 & 4: Container-light / Container-full — spawn container
+  // Budget enforcement: check before spawning container
+  const budget = checkBudget(classification.model, group.folder);
+  if (budget.action === 'offline') {
+    const ch = channelFor(chatJid);
+    await sendToChannel(chatJid, formatOutbound(ch, budget.message || 'ขออภัย budget เดือนนี้หมดแล้วค่ะ'));
+    lastAgentTimestamp[chatJid] = lastMsg.timestamp;
+    saveState();
+    trackUsage(classification.tier, classification.model, Date.now() - startTime);
+    return true;
+  }
+  // Apply effective model (may be downgraded)
+  const effectiveModel = budget.effectiveModel;
+  if (effectiveModel !== classification.model) {
+    logger.info(
+      { group: group.name, from: classification.model, to: effectiveModel, reason: budget.action },
+      'Model auto-downgraded by budget',
+    );
+    classification.model = effectiveModel as 'haiku' | 'sonnet' | 'opus';
+  }
+
   const prompt = formatMessages(missedMessages);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
@@ -569,6 +590,7 @@ async function main(): Promise<void> {
   ensureDockerRunning();
   initDatabase();
   initCostTracking();
+  initCostIntelligence();
   initContainerPool();
   logger.info('Database initialized');
   loadState();
