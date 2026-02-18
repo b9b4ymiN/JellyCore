@@ -54,6 +54,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { startHealthServer, setStatusProvider, recordError } from './health-server.js';
+import { resourceMonitor } from './resource-monitor.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -295,6 +296,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Keep typing indicator alive (Telegram expires after 5s)
+  const typingInterval = setInterval(() => {
+    setTypingOnChannel(chatJid, true).catch(() => {});
+  }, 4000);
+
+  // Send a progress message after 20s of silence so user knows we're alive
+  let progressSent = false;
+  const progressTimer = setTimeout(async () => {
+    if (!outputSentToUser && !progressSent) {
+      progressSent = true;
+      try {
+        await sendToChannel(chatJid, '⏳ กำลังคิดอยู่ค่ะ รอสักครู่นะคะ...');
+      } catch { /* ignore */ }
+    }
+  }, 20_000);
+
   const ch = channelFor(chatJid);
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
@@ -307,6 +324,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (text) {
         await sendToChannel(chatJid, formatOutbound(ch, text));
         outputSentToUser = true;
+        // Cancel progress message once we have real output
+        clearTimeout(progressTimer);
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -318,6 +337,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   });
 
   await setTypingOnChannel(chatJid, false);
+  clearInterval(typingInterval);
+  clearTimeout(progressTimer);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -759,7 +780,6 @@ async function main(): Promise<void> {
     getQueueDepth: () => queue.getQueueDepth(),
     getRegisteredGroups: () => Object.values(registeredGroups).map(g => g.name),
     getResourceStats: () => {
-      const { resourceMonitor } = require('./resource-monitor.js');
       const stats = resourceMonitor.stats;
       return { currentMax: stats.currentMax, cpuUsage: stats.cpuUsage, memoryFree: stats.memoryFree };
     },

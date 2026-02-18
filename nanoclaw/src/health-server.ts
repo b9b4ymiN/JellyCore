@@ -18,7 +18,7 @@ const startTime = Date.now();
 
 // Circular buffer for recent errors (last 50)
 const MAX_ERRORS = 50;
-const recentErrors: Array<{ timestamp: string; message: string; group?: string }> = [];
+export const recentErrors: Array<{ timestamp: string; message: string; group?: string }> = [];
 
 /** Record an error for status reporting */
 export function recordError(message: string, group?: string): void {
@@ -34,7 +34,7 @@ export interface StatusProvider {
   getActiveContainers: () => number;
   getQueueDepth: () => number;
   getRegisteredGroups: () => string[];
-  getResourceStats: () => { currentMax: number; cpuUsage: number; memoryFree: number };
+  getResourceStats: () => { currentMax: number; cpuUsage: string | number; memoryFree: string | number };
 }
 
 let statusProvider: StatusProvider | null = null;

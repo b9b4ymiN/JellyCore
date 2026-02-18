@@ -21,7 +21,7 @@ export interface QueryClassification {
 const GREETING = /^(สวัสดี|หวัดดี|hello|hi|hey|ดี|yo|อรุณสวัสดิ์|ราตรีสวัสดิ์)\b/i;
 const THANKS = /^(ขอบคุณ|thanks|thank you|thx|ขอบใจ|ty)\b/i;
 const ACK = /^(ok|ได้|โอเค|ค่ะ|ครับ|รับทราบ|เข้าใจ|เข้าใจแล้ว|okey|okay|noted|understood|sure|yep|nope|ใช่|ไม่|yes|no)\s*[.!]*$/i;
-const ADMIN_CMD = /^\/(start|help|status|soul|me|reset|usage|cost|budget|clear|session|ping|model)\b/i;
+const ADMIN_CMD = /^\/(start|help|status|soul|me|reset|usage|cost|budget|clear|session|ping|model|containers|kill|errors|health|queue|restart|docker)\b/i;
 
 const SEARCH_QUERY = /^(หา|ค้นหา|search|find|ค้น)\s+/i;
 const MEMORY_STORE = /^(จำไว้|remember|จำว่า|note|บันทึก)\s+/i;
