@@ -510,6 +510,88 @@ async function runQuery(
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
+/**
+ * Auto-record an episodic memory summary when conversation ends.
+ * Fire-and-forget: Oracle failure doesn't block exit.
+ */
+async function recordEpisode(groupFolder: string): Promise<void> {
+  const oracleUrl = process.env.ORACLE_API_URL || 'http://oracle:47778';
+  const oracleToken = process.env.ORACLE_AUTH_TOKEN || '';
+  const isReadOnly = process.env.ORACLE_READ_ONLY === 'true';
+
+  if (isReadOnly) {
+    log('Skipping auto-episodic: read-only mode');
+    return;
+  }
+
+  // Collect user messages and assistant responses from conversation files
+  const conversationsDir = '/workspace/group/conversations';
+  let userMessages: string[] = [];
+  let assistantMessages: string[] = [];
+
+  // Try to read from most recent conversation archive
+  try {
+    if (fs.existsSync(conversationsDir)) {
+      const files = fs.readdirSync(conversationsDir)
+        .filter(f => f.endsWith('.md'))
+        .sort()
+        .reverse();
+
+      if (files.length > 0) {
+        const content = fs.readFileSync(path.join(conversationsDir, files[0]), 'utf-8');
+        const lines = content.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('**User**: ')) {
+            userMessages.push(line.replace('**User**: ', '').slice(0, 200));
+          } else if (line.startsWith('**Andy**: ')) {
+            assistantMessages.push(line.replace('**Andy**: ', '').slice(0, 200));
+          }
+        }
+      }
+    }
+  } catch (err) {
+    log(`Failed to read conversations for episode: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Build compact summary
+  const topicHints = userMessages.slice(0, 3).join(' | ');
+  const outcome = assistantMessages.length > 0
+    ? assistantMessages[assistantMessages.length - 1].slice(0, 200)
+    : 'no recorded response';
+
+  const summary = `[${groupFolder}] Topics: ${topicHints || 'general conversation'}. Outcome: ${outcome}`;
+
+  if (!topicHints && !outcome) {
+    log('No conversation content to record as episode');
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(`${oracleUrl}/api/episodic`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(oracleToken ? { 'Authorization': `Bearer ${oracleToken}` } : {}),
+      },
+      body: JSON.stringify({
+        summary: summary.slice(0, 800),
+        group: groupFolder,
+        participants: ['user', 'assistant'],
+        key_topics: userMessages.slice(0, 5).map(m => m.slice(0, 50)),
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    log(`Auto-episodic recorded: ${response.ok ? 'success' : `error ${response.status}`}`);
+  } catch (err) {
+    log(`Auto-episodic failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function main(): Promise<void> {
   let containerInput: ContainerInput;
 
@@ -585,7 +667,8 @@ async function main(): Promise<void> {
       // Don't emit a session-update marker (it would reset the host's
       // idle timer and cause a 30-min delay before the next _close).
       if (queryResult.closedDuringQuery) {
-        log('Close sentinel consumed during query, exiting');
+        log('Close sentinel consumed during query, recording episode then exiting');
+        await recordEpisode(containerInput.groupFolder);
         break;
       }
 
@@ -597,7 +680,8 @@ async function main(): Promise<void> {
       // Wait for the next message or _close sentinel
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
-        log('Close sentinel received, exiting');
+        log('Close sentinel received, recording episode then exiting');
+        await recordEpisode(containerInput.groupFolder);
         break;
       }
 

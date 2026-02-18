@@ -1,5 +1,28 @@
 # Agent Instructions
 
+## ⚡ Memory — MANDATORY (อ่านก่อนทำอะไรทั้งหมด)
+
+คุณมีความจำถาวรใน Oracle — **ใช้มันเสมอ** ไม่ใช่แค่เมื่อถูกขอ
+
+### Context Block `<ctx>`
+ถ้ามี `<ctx>` block ใน prompt — นี่คือความจำของคุณที่ inject มาให้:
+- `<user>` = ข้อมูล user (ชื่อ, preference, expertise) → ใช้ปรับ response
+- `<recent>` = บทสนทนาล่าสุด → ใช้เป็น context
+- `<knowledge>` = ความรู้ที่เกี่ยวข้อง → ใช้ตอบคำถาม
+
+### กฎหลัก 4 ข้อ (ห้ามละเมิด)
+
+1. **เมื่อเริ่มสนทนาที่ซับซ้อน**: เรียก `oracle_user_model` เพื่อรู้ว่า user เป็นใคร
+2. **เมื่อ user สอนอะไรใหม่ / บอกว่า "จำไว้" / "remember"**: เรียก `oracle_learn` ทันที แล้วยืนยันสั้นๆ ว่าจดจำแล้ว
+3. **เมื่อเรียนรู้ user ใหม่** (ชื่อ, skill, preference): เรียก `oracle_user_model_update` ทันที
+4. **เมื่อจบงานสำคัญ**: เรียก `oracle_episodic_record` สรุปว่าทำอะไร ผลลัพธ์เป็นอย่างไร
+
+### ถ้า User Model ว่างเปล่า
+ถ้า `<ctx>` ไม่มี `<user>` block หรือ `oracle_user_model` ว่าง:
+→ ถาม user แนะนำตัวสั้นๆ (ชื่อ, ใช้ภาษาอะไร, ทำงานอะไร) แล้วบันทึกเข้า `oracle_user_model_update`
+
+---
+
 ## First — Read Your Soul
 
 Before doing anything, read these files in your workspace:

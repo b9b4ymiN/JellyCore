@@ -27,6 +27,7 @@ import { containerPool } from './container-pool.js';
 import { classifyQuery } from './query-router.js';
 import { handleInline, InlineResult } from './inline-handler.js';
 import { handleOracleOnly } from './oracle-handler.js';
+import { getPromptBuilder } from './prompt-builder.js';
 import { initCostTracking, trackUsage } from './cost-tracker.js';
 import { initCostIntelligence, checkBudget, trackUsageEnhanced } from './cost-intelligence.js';
 import {
@@ -52,6 +53,7 @@ import { findChannel, formatMessages, formatOutbound, routeOutbound } from './ro
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { startHealthServer, setStatusProvider, recordError } from './health-server.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -244,7 +246,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     classification.model = effectiveModel as 'haiku' | 'sonnet' | 'opus';
   }
 
-  const prompt = formatMessages(missedMessages);
+  // --- Context Injection: prepend Oracle context to prompt ---
+  let oracleContext = '';
+  try {
+    const pb = getPromptBuilder();
+    const ctx = await pb.buildCompactContext(
+      lastMsg.content,
+      group.folder,
+    );
+    oracleContext = pb.formatCompact(ctx);
+    if (oracleContext) {
+      logger.info(
+        { group: group.name, tokens: ctx.tokenEstimate, cached: ctx.fromCache },
+        'Oracle context injected',
+      );
+    }
+  } catch (err) {
+    logger.warn({ group: group.name, err }, 'Oracle context injection failed, continuing without');
+  }
+
+  const rawPrompt = formatMessages(missedMessages);
+  const prompt = oracleContext ? `${oracleContext}\n\n${rawPrompt}` : rawPrompt;
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -306,6 +328,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       trackUsage(classification.tier, classification.model, Date.now() - startTime);
       return true;
     }
+    // Notify user about the error so they know something went wrong
+    try {
+      await sendToChannel(chatJid, formatOutbound(ch, '⚠️ ขอโทษครับ ระบบมีปัญหาชั่วคราว กำลัง retry ให้ครับ...'));
+    } catch (notifyErr) {
+      logger.warn({ group: group.name, err: notifyErr }, 'Failed to send error notification');
+    }
+    recordError(`Agent error for group ${group.name}`, group.name);
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
@@ -696,6 +725,24 @@ async function main(): Promise<void> {
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });
   queue.setProcessMessagesFn(processGroupMessages);
+
+  // Wire queue feedback callbacks to notify users
+  queue.onRejected(async (groupJid) => {
+    try {
+      await sendToChannel(groupJid, '⏳ คิวเต็ม กรุณารอสักครู่แล้วลองใหม่ครับ');
+    } catch (err) {
+      logger.warn({ groupJid, err }, 'Failed to send queue-full notification');
+    }
+  });
+
+  queue.onMaxRetriesExceeded(async (groupJid) => {
+    try {
+      await sendToChannel(groupJid, '❌ ไม่สามารถประมวลผลได้หลังลอง 5 ครั้ง กรุณาลองส่งข้อความใหม่ครับ');
+    } catch (err) {
+      logger.warn({ groupJid, err }, 'Failed to send max-retries notification');
+    }
+  });
+
   recoverPendingMessages();
 
   // Pre-warm pool containers for the main group
@@ -705,6 +752,19 @@ async function main(): Promise<void> {
       logger.warn({ err }, 'Failed to pre-warm main group container');
     });
   }
+
+  // Start health/status HTTP server (port 47779)
+  setStatusProvider({
+    getActiveContainers: () => queue.getActiveCount(),
+    getQueueDepth: () => queue.getQueueDepth(),
+    getRegisteredGroups: () => Object.values(registeredGroups).map(g => g.name),
+    getResourceStats: () => {
+      const { resourceMonitor } = require('./resource-monitor.js');
+      const stats = resourceMonitor.stats;
+      return { currentMax: stats.currentMax, cpuUsage: stats.cpuUsage, memoryFree: stats.memoryFree };
+    },
+  });
+  startHealthServer();
 
   startMessageLoop();
 }

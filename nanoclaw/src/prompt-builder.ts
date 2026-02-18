@@ -1,68 +1,46 @@
 /**
- * Prompt Builder - Context-Aware System Prompt Construction
+ * Prompt Builder - Compact Context Injection (v0.7.1)
  *
- * Gathers relevant context from Oracle V2 and constructs
- * enriched system prompts for Agent SDK.
+ * Gathers relevant context from Oracle V2 and injects a compact
+ * <ctx> block into the agent's prompt. Token-budgeted to ≤600 tokens.
+ *
+ * Sections (with char budgets → ~4 chars/token):
+ *   <user>     ≤ 600 chars  (~150 tokens) — Layer 1: User Model
+ *   <recent>   ≤ 800 chars  (~200 tokens) — Layer 4: Episodic
+ *   <knowledge> ≤ 1000 chars (~250 tokens) — Layer 3: Semantic
  *
  * Features:
- * - Parallel Oracle queries (knowledge, preferences, decisions)
- * - LRU caching for context (5min TTL)
- * - XML-formatted context injection
- * - Graceful fallback when Oracle unavailable
+ * - 3 parallel Oracle queries with 3s total timeout
+ * - LRU cache (50 entries, 5min TTL) per group
+ * - Skip-if-empty: no XML block if section is empty
+ * - Graceful degradation: Oracle down → empty context (0 tokens)
  */
 
-import { createHash } from 'crypto';
+import { logger } from './logger.js';
 
-interface OracleDocument {
-  id: string;
-  type: string;
-  content: string;
-  source_file: string;
-  concepts: string[];
-  project: string;
-  relevance?: number;
-}
+// Character budgets per section (≈4 chars/token)
+const USER_MODEL_CHAR_LIMIT = 600;
+const EPISODES_CHAR_LIMIT = 800;
+const KNOWLEDGE_CHAR_LIMIT = 1000;
+const ORACLE_TIMEOUT_MS = 3000; // Total timeout for all parallel queries
 
-interface OraclePreference {
-  id: string;
-  preference: string;
-  category: string;
-}
-
-interface OracleDecision {
-  id: string;
-  title: string;
-  status: string;
-  context: string;
-  decision?: string;
-  rationale?: string;
-  project: string;
-  decided_at?: string;
-}
-
-interface ConversationSummary {
-  id: string;
-  summary: string;
-  timestamp: number;
-}
-
-export interface PromptContext {
-  knowledge: OracleDocument[];
-  userPrefs: OraclePreference[];
-  recentDecisions: OracleDecision[];
-  conversationSummary?: ConversationSummary;
-  confidence: number;
+export interface CompactContext {
+  userModel: string;       // Compact user summary
+  recentEpisodes: string;  // Recent conversation summaries
+  relevantKnowledge: string; // Search results
+  tokenEstimate: number;   // Estimated token count
+  fromCache: boolean;
 }
 
 export interface PromptBuilderOpts {
   oracleApiUrl?: string;
   oracleAuthToken?: string;
-  cacheTtl?: number; // milliseconds, default 5min
-  cacheMax?: number; // default 50
+  cacheTtl?: number;
+  cacheMax?: number;
 }
 
 interface CacheEntry {
-  context: PromptContext;
+  context: CompactContext;
   timestamp: number;
 }
 
@@ -79,49 +57,33 @@ class ContextCache {
     this.ttl = ttl;
   }
 
-  get(key: string): PromptContext | undefined {
+  get(key: string): CompactContext | undefined {
     const entry = this.cache.get(key);
     if (!entry) return undefined;
-
-    // Check TTL
     if (Date.now() - entry.timestamp > this.ttl) {
       this.cache.delete(key);
       return undefined;
     }
-
     // Move to end (LRU)
     this.cache.delete(key);
     this.cache.set(key, entry);
     return entry.context;
   }
 
-  set(key: string, context: PromptContext): void {
-    // Evict oldest if at capacity
+  set(key: string, context: CompactContext): void {
     if (this.cache.size >= this.max) {
       const firstKey = this.cache.keys().next().value;
       if (firstKey) this.cache.delete(firstKey);
     }
-
-    this.cache.set(key, {
-      context,
-      timestamp: Date.now(),
-    });
+    this.cache.set(key, { context, timestamp: Date.now() });
   }
 
-  clear(): void {
-    this.cache.clear();
-  }
-
-  stats(): { size: number; keys: string[] } {
-    return {
-      size: this.cache.size,
-      keys: Array.from(this.cache.keys()),
-    };
-  }
+  clear(): void { this.cache.clear(); }
+  get size(): number { return this.cache.size; }
 }
 
 /**
- * Oracle V2 HTTP Client
+ * Compact Oracle V2 HTTP Client
  */
 class OracleClient {
   constructor(
@@ -132,6 +94,7 @@ class OracleClient {
   private async request(
     path: string,
     params?: Record<string, any>,
+    signal?: AbortSignal,
   ): Promise<any> {
     const url = new URL(path, this.baseUrl);
     if (params) {
@@ -140,93 +103,104 @@ class OracleClient {
       });
     }
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
 
-    if (this.authToken) {
-      headers['Authorization'] = `Bearer ${this.authToken}`;
-    }
+    const response = await fetch(url.toString(), { headers, signal });
+    if (!response.ok) throw new Error(`Oracle ${response.status}`);
+    return response.json();
+  }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
-
+  /** Layer 1: Get user model (compact) */
+  async getUserModel(signal?: AbortSignal): Promise<string> {
     try {
-      const response = await fetch(url.toString(), {
-        headers,
-        signal: controller.signal,
-      });
+      const result = await this.request('/api/user-model', undefined, signal);
+      if (!result || !result.model) return '';
 
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        throw new Error(`Oracle error ${response.status}: ${response.statusText}`);
+      // Compact format: key facts only
+      const m = result.model;
+      const parts: string[] = [];
+      if (m.name) parts.push(`ชื่อ: ${m.name}`);
+      if (m.language) parts.push(`ภาษา: ${m.language}`);
+      if (m.expertise) {
+        const exp = Array.isArray(m.expertise) ? m.expertise.join(', ') : m.expertise;
+        parts.push(`expertise: ${exp}`);
       }
-
-      return await response.json();
-    } catch (err: any) {
-      clearTimeout(timeout);
-      if (err.name === 'AbortError') {
-        throw new Error('Oracle request timeout (5s)');
+      if (m.preferences) {
+        const prefs = typeof m.preferences === 'object'
+          ? Object.entries(m.preferences).map(([k, v]) => `${k}: ${v}`).join(', ')
+          : m.preferences;
+        parts.push(`preferences: ${prefs}`);
       }
-      throw err;
-    }
-  }
-
-  async search(query: string, limit = 5): Promise<OracleDocument[]> {
-    try {
-      const result = await this.request('/api/search', { q: query, limit, mode: 'hybrid' });
-      return result.results || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async getUserPreferences(userId: string, limit = 3): Promise<OraclePreference[]> {
-    try {
-      const result = await this.request('/api/search', {
-        q: `user preferences ${userId}`,
-        type: 'preference',
-        limit,
-        mode: 'vector',
-      });
-      return result.results || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async getRecentDecisions(limit = 3): Promise<OracleDecision[]> {
-    try {
-      const result = await this.request('/api/decisions', {
-        limit,
-        status: 'active',
-      });
-      return result.decisions || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async getConversationSummary(chatJid: string): Promise<ConversationSummary | undefined> {
-    try {
-      const result = await this.request('/api/thread', { id: chatJid });
-      if (result.thread) {
-        return {
-          id: result.thread.id,
-          summary: result.thread.title || '',
-          timestamp: Date.now(),
-        };
+      if (m.topics) {
+        const topics = Array.isArray(m.topics) ? m.topics.join(', ') : m.topics;
+        parts.push(`สนใจ: ${topics}`);
       }
-      return undefined;
+      // Include any extra fields as key=value
+      for (const [key, value] of Object.entries(m)) {
+        if (['name', 'language', 'expertise', 'preferences', 'topics', 'id', 'created_at', 'updated_at'].includes(key)) continue;
+        if (value && typeof value === 'string') parts.push(`${key}: ${value}`);
+      }
+      return parts.join(', ').slice(0, USER_MODEL_CHAR_LIMIT);
     } catch {
-      return undefined;
+      return '';
+    }
+  }
+
+  /** Layer 4: Get recent episodes */
+  async getRecentEpisodes(limit = 2, signal?: AbortSignal): Promise<string> {
+    try {
+      const result = await this.request('/api/episodic', { limit }, signal);
+      const episodes = result?.episodes || result?.results || [];
+      if (episodes.length === 0) return '';
+
+      return episodes
+        .slice(0, limit)
+        .map((ep: any) => {
+          const time = ep.created_at ? formatTimeAgo(ep.created_at) : '?';
+          const summary = (ep.summary || ep.content || '').slice(0, 300);
+          return `- ${time}: ${summary}`;
+        })
+        .join('\n')
+        .slice(0, EPISODES_CHAR_LIMIT);
+    } catch {
+      return '';
+    }
+  }
+
+  /** Layer 3: Search relevant knowledge */
+  async searchKnowledge(query: string, limit = 3, signal?: AbortSignal): Promise<string> {
+    try {
+      const result = await this.request('/api/search', { q: query, limit, mode: 'hybrid' }, signal);
+      const results = result?.results || [];
+      if (results.length === 0) return '';
+
+      return results
+        .slice(0, limit)
+        .map((doc: any) => {
+          const title = doc.title || doc.type || 'doc';
+          const snippet = (doc.content || '').slice(0, 250);
+          return `- [${title}] ${snippet}`;
+        })
+        .join('\n')
+        .slice(0, KNOWLEDGE_CHAR_LIMIT);
+    } catch {
+      return '';
     }
   }
 }
 
+function formatTimeAgo(isoDate: string): string {
+  const diff = Date.now() - new Date(isoDate).getTime();
+  const hours = Math.floor(diff / 3600000);
+  if (hours < 1) return 'just now';
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
 /**
- * Main Prompt Builder Class
+ * Main Prompt Builder Class — Compact Context Injection
  */
 export class PromptBuilder {
   private oracleClient: OracleClient;
@@ -245,116 +219,79 @@ export class PromptBuilder {
   }
 
   /**
-   * Build context for a user message
+   * Build compact context for a user message.
+   * Total budget: ≤600 tokens (~2400 chars).
+   * Returns empty string if Oracle is unavailable.
    */
-  async buildContext(
-    userMessage: string,
-    userId: string,
+  async buildCompactContext(
+    latestUserMessage: string,
     groupId: string,
-  ): Promise<PromptContext> {
-    // Generate cache key
-    const messageHash = createHash('sha256').update(userMessage).digest('hex').slice(0, 16);
-    const cacheKey = `${groupId}:${userId}:${messageHash}`;
-
-    // Check cache
+  ): Promise<CompactContext> {
+    // Check cache (keyed by group — user model + episodes don't change per message)
+    const cacheKey = `ctx:${groupId}`;
     const cached = this.cache.get(cacheKey);
     if (cached) {
-      return cached;
+      return { ...cached, fromCache: true };
     }
 
-    // Parallel Oracle queries
-    const [knowledge, prefs, decisions, convSummary] = await Promise.all([
-      this.oracleClient.search(userMessage, 5),
-      this.oracleClient.getUserPreferences(userId, 3),
-      this.oracleClient.getRecentDecisions(3),
-      this.oracleClient.getConversationSummary(groupId),
-    ]);
+    // Create abort controller for total timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ORACLE_TIMEOUT_MS);
 
-    // Calculate confidence score
-    const knowledgeScore = knowledge.length > 0 ? 0.6 : 0;
-    const prefScore = prefs.length > 0 ? 0.2 : 0;
-    const decisionScore = decisions.length > 0 ? 0.2 : 0;
-    const confidence = knowledgeScore + prefScore + decisionScore;
+    try {
+      // Parallel queries: User Model + Episodic + Knowledge Search
+      const [userModel, recentEpisodes, relevantKnowledge] = await Promise.all([
+        this.oracleClient.getUserModel(controller.signal),
+        this.oracleClient.getRecentEpisodes(2, controller.signal),
+        this.oracleClient.searchKnowledge(latestUserMessage, 3, controller.signal),
+      ]);
 
-    const context: PromptContext = {
-      knowledge,
-      userPrefs: prefs,
-      recentDecisions: decisions,
-      conversationSummary: convSummary,
-      confidence,
-    };
+      clearTimeout(timeout);
 
-    // Cache result
-    this.cache.set(cacheKey, context);
+      const totalChars = userModel.length + recentEpisodes.length + relevantKnowledge.length;
+      const tokenEstimate = Math.ceil(totalChars / 4);
 
-    return context;
+      const context: CompactContext = {
+        userModel,
+        recentEpisodes,
+        relevantKnowledge,
+        tokenEstimate,
+        fromCache: false,
+      };
+
+      // Cache (keyed by group — knowledge varies but cache evicts in 5 min)
+      this.cache.set(cacheKey, context);
+
+      return context;
+    } catch (err) {
+      clearTimeout(timeout);
+      logger.warn({ err, groupId }, 'Oracle context injection failed, skipping');
+      return { userModel: '', recentEpisodes: '', relevantKnowledge: '', tokenEstimate: 0, fromCache: false };
+    }
   }
 
   /**
-   * Format context as XML for system prompt injection
+   * Format compact context as XML for prepending to prompt.
+   * Skip-if-empty: returns empty string if all sections are empty.
    */
-  formatAsXML(context: PromptContext): string {
-    const parts: string[] = [];
+  formatCompact(ctx: CompactContext): string {
+    const sections: string[] = [];
 
-    // Knowledge section
-    if (context.knowledge.length > 0) {
-      parts.push('<oracle_context>');
-      parts.push(`  <relevant_knowledge confidence="${context.confidence.toFixed(2)}">`);
-      for (const doc of context.knowledge.slice(0, 5)) {
-        parts.push(`    - Document: "${doc.type}" (relevance: ${doc.relevance || 0.8})`);
-        parts.push(`      Content: ${doc.content.slice(0, 200)}...`);
-        parts.push(`      Source: ${doc.source_file}`);
-      }
-      parts.push('  </relevant_knowledge>');
-      parts.push('</oracle_context>');
-    }
+    if (ctx.userModel) sections.push(`<user>${ctx.userModel}</user>`);
+    if (ctx.recentEpisodes) sections.push(`<recent>\n${ctx.recentEpisodes}\n</recent>`);
+    if (ctx.relevantKnowledge) sections.push(`<knowledge>\n${ctx.relevantKnowledge}\n</knowledge>`);
 
-    // User preferences
-    if (context.userPrefs.length > 0) {
-      parts.push('<user_preferences>');
-      for (const pref of context.userPrefs) {
-        parts.push(`  - ${pref.category}: ${pref.preference}`);
-      }
-      parts.push('</user_preferences>');
-    }
+    if (sections.length === 0) return '';
 
-    // Recent decisions
-    if (context.recentDecisions.length > 0) {
-      parts.push('<recent_decisions>');
-      for (const dec of context.recentDecisions) {
-        parts.push(`  - Decision: "${dec.title}" (${dec.status})`);
-        if (dec.decision) {
-          parts.push(`    Made: ${dec.decision}`);
-        }
-        if (dec.rationale) {
-          parts.push(`    Reason: ${dec.rationale.slice(0, 100)}`);
-        }
-        parts.push(`    Date: ${dec.decided_at || 'pending'}`);
-      }
-      parts.push('</recent_decisions>');
-    }
-
-    // Conversation summary
-    if (context.conversationSummary) {
-      parts.push('<conversation_history>');
-      parts.push(`  Last conversation: ${context.conversationSummary.summary}`);
-      parts.push(`  ID: ${context.conversationSummary.id}`);
-      parts.push('</conversation_history>');
-    }
-
-    return parts.join('\n');
+    return `<ctx>\n${sections.join('\n')}\n</ctx>`;
   }
 
-  /**
-   * Get cache statistics
-   */
-  getCacheStats(): { size: number; keys: string[] } {
-    return this.cache.stats();
+  /** Get cache statistics */
+  getCacheStats(): { size: number } {
+    return { size: this.cache.size };
   }
 
-  /**
-   * Clear cache (e.g., after Oracle update)
-   */
+  /** Clear cache */
   clearCache(): void {
     this.cache.clear();
   }

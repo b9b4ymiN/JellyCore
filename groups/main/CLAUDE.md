@@ -23,17 +23,16 @@ This is the **main channel**, which has elevated privileges.
 
 ## Container Mounts
 
-Main has access to the entire project:
+Main has access to its own workspace:
 
-| Container Path | Host Path | Access |
-|----------------|-----------|--------|
-| `/workspace/project` | Project root | read-write |
-| `/workspace/group` | `groups/main/` | read-write |
+| Container Path | Description | Access |
+|----------------|-------------|--------|
+| `/workspace/group` | Main group folder (`groups/main/`) | read-write |
+| `/workspace/global` | Global memory (`groups/global/`) | read-only |
+| `/workspace/ipc` | IPC directory (messages, tasks, input) | read-write |
 
-Key paths inside the container:
-- `/workspace/project/store/messages.db` - SQLite database
-- `/workspace/project/store/messages.db` (registered_groups table) - Group config
-- `/workspace/project/groups/` - All group folders
+> **Note**: You do NOT have direct access to the project root, store, or other groups' folders.
+> Use IPC and Oracle MCP tools to interact with the system.
 
 ---
 
@@ -67,31 +66,16 @@ echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).jso
 
 Then wait a moment and re-read `available_groups.json`.
 
-**Fallback**: Query the SQLite database directly:
-
-```bash
-sqlite3 /workspace/project/store/messages.db "
-  SELECT jid, name, last_message_time
-  FROM chats
-  WHERE jid LIKE '%@g.us' AND jid != '__group_sync__'
-  ORDER BY last_message_time DESC
-  LIMIT 10;
-"
-```
+**Fallback**: Use the Oracle MCP tools to query information — the agent does not have direct database access.
 
 ### Registered Groups Config
 
-Groups are registered in `/workspace/project/data/registered_groups.json`:
+Groups are registered via the `registered_groups.json` file managed by NanoClaw. To view or modify group registrations, use IPC commands:
 
-```json
-{
-  "1234567890-1234567890@g.us": {
-    "name": "Family Chat",
-    "folder": "family-chat",
-    "trigger": "@Andy",
-    "added_at": "2024-01-31T12:00:00.000Z"
-  }
-}
+Write a request to `/workspace/ipc/tasks/`:
+
+```bash
+echo '{"type": "list_groups"}' > /workspace/ipc/tasks/list_$(date +%s).json
 ```
 
 Fields:
@@ -110,12 +94,22 @@ Fields:
 
 ### Adding a Group
 
-1. Query the database to find the group's JID
-2. Read `/workspace/project/data/registered_groups.json`
-3. Add the new group entry with `containerConfig` if needed
-4. Write the updated JSON back
-5. Create the group folder: `/workspace/project/groups/{folder-name}/`
-6. Optionally create an initial `CLAUDE.md` for the group
+1. Write a task file to `/workspace/ipc/tasks/` requesting the group be registered
+2. Include the group's JID, desired folder name, and trigger word
+3. NanoClaw will create the group folder and configuration automatically
+
+Example IPC task:
+```bash
+cat > /workspace/ipc/tasks/add_group_$(date +%s).json << 'EOF'
+{
+  "type": "register_group",
+  "jid": "120363336345536173@g.us",
+  "name": "Family Chat",
+  "folder": "family-chat",
+  "trigger": "@Andy"
+}
+EOF
+```
 
 Example folder name conventions:
 - "Family Chat" → `family-chat`
@@ -150,20 +144,18 @@ The directory will appear at `/workspace/extra/webapp` in that group's container
 
 ### Removing a Group
 
-1. Read `/workspace/project/data/registered_groups.json`
-2. Remove the entry for that group
-3. Write the updated JSON back
-4. The group folder and its files remain (don't delete them)
+1. Write a task file to `/workspace/ipc/tasks/` requesting the group be unregistered
+2. The group folder and its files remain (don't delete them)
 
 ### Listing Groups
 
-Read `/workspace/project/data/registered_groups.json` and format it nicely.
+Write a task to IPC or use the Oracle MCP tool `oracle_search` with a query about groups.
 
 ---
 
 ## Global Memory
 
-You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
+You can read `/workspace/global/CLAUDE.md` for global instructions. To update global memory, use the Oracle MCP tools (`oracle_learn`, `oracle_user_model_update`) which persist across all sessions and groups.
 
 ---
 

@@ -34,6 +34,7 @@ export class GroupQueue {
   private shuttingDown = false;
   private onQueuedCallback: ((groupJid: string, position: number) => void) | null = null;
   private onRejectedCallback: ((groupJid: string) => void) | null = null;
+  private onMaxRetriesCallback: ((groupJid: string) => void) | null = null;
   // Track group folders for priority (set by caller)
   private groupFolders = new Map<string, string>();
 
@@ -46,6 +47,10 @@ export class GroupQueue {
 
   onRejected(cb: (groupJid: string) => void): void {
     this.onRejectedCallback = cb;
+  }
+
+  onMaxRetriesExceeded(cb: (groupJid: string) => void): void {
+    this.onMaxRetriesCallback = cb;
   }
 
   /**
@@ -274,6 +279,7 @@ export class GroupQueue {
         'Max retries exceeded, dropping messages (will retry on next incoming message)',
       );
       state.retryCount = 0;
+      this.onMaxRetriesCallback?.(groupJid);
       return;
     }
 
@@ -347,5 +353,15 @@ export class GroupQueue {
       { activeCount: this.activeCount, detachedContainers: activeContainers },
       'GroupQueue shutting down (containers detached, not killed)',
     );
+  }
+
+  /** Get current active container count */
+  getActiveCount(): number {
+    return this.activeCount;
+  }
+
+  /** Get current queue depth (waiting groups) */
+  getQueueDepth(): number {
+    return this.waitingGroups.length;
   }
 }

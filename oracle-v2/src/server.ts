@@ -1069,6 +1069,52 @@ app.get('/legacy/dashboard', (c) => {
 });
 
 // ============================================================================
+// NanoClaw Proxy + Admin Auth (v0.7.1)
+// ============================================================================
+
+const ADMIN_AUTH_TOKEN = process.env.ORACLE_AUTH_TOKEN || '';
+const NANOCLAW_INTERNAL_URL = process.env.NANOCLAW_URL || 'http://nanoclaw:47779';
+
+// Simple Bearer token auth for admin routes
+const adminAuth = async (c: any, next: any) => {
+  if (!ADMIN_AUTH_TOKEN) return next(); // No token = no auth (dev mode)
+  const authHeader = c.req.header('Authorization') || '';
+  const token = authHeader.replace('Bearer ', '');
+  if (token !== ADMIN_AUTH_TOKEN) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  return next();
+};
+
+// Proxy NanoClaw health
+app.get('/api/nanoclaw/health', adminAuth, async (c) => {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(`${NANOCLAW_INTERNAL_URL}/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+    const data = await resp.json();
+    return c.json(data);
+  } catch (err: any) {
+    return c.json({ status: 'unreachable', error: err.message }, 503);
+  }
+});
+
+// Proxy NanoClaw status
+app.get('/api/nanoclaw/status', adminAuth, async (c) => {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(`${NANOCLAW_INTERNAL_URL}/status`, { signal: controller.signal });
+    clearTimeout(timeout);
+    const data = await resp.json();
+    return c.json(data);
+  } catch (err: any) {
+    return c.json({ status: 'unreachable', error: err.message }, 503);
+  }
+});
+
+// ============================================================================
 // Static Files + SPA Fallback
 // ============================================================================
 

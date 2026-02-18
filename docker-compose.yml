@@ -108,6 +108,12 @@ services:
       - CONTAINER_IMAGE=${CONTAINER_IMAGE:-nanoclaw-agent:latest}
       # Docker network for agent containers to join
       - DOCKER_NETWORK=jellycore_jellycore-internal
+      # Health server port (internal only)
+      - NANOCLAW_HEALTH_PORT=47779
+      # Agent container resource limits
+      - CONTAINER_MEMORY_LIMIT=${CONTAINER_MEMORY_LIMIT:-512m}
+      - CONTAINER_CPU_LIMIT=${CONTAINER_CPU_LIMIT:-1.0}
+      - MAX_CONCURRENT_CONTAINERS=${MAX_CONCURRENT_CONTAINERS:-2}
     networks:
       - jellycore-internal
     depends_on:
