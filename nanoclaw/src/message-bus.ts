@@ -18,6 +18,22 @@ export interface IncomingMessage {
 class MessageBus extends EventEmitter {
   private _eventCount = 0;
 
+  constructor() {
+    super();
+    // Prevent crash on emitted 'error' events from listeners
+    this.on('error', (err) => {
+      // Imported lazily to avoid circular dependency at module load
+      try {
+        const { logger: log } = require('./logger.js');
+        log.error({ err }, 'MessageBus error event');
+      } catch {
+        console.error('MessageBus error:', err);
+      }
+    });
+    // Allow many groups to attach without warning
+    this.setMaxListeners(50);
+  }
+
   emitMessage(msg: IncomingMessage): void {
     this._eventCount++;
     this.emit('message', msg);

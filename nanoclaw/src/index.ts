@@ -80,10 +80,14 @@ async function sendToChannel(jid: string, text: string): Promise<void> {
   await routeOutbound(channels, jid, text);
 }
 
-/** Set typing indicator on the right channel */
+/** Set typing indicator on the right channel (safe — never throws) */
 async function setTypingOnChannel(jid: string, isTyping: boolean): Promise<void> {
-  const ch = findChannel(channels, jid);
-  if (ch?.setTyping) await ch.setTyping(jid, isTyping);
+  try {
+    const ch = findChannel(channels, jid);
+    if (ch?.setTyping) await ch.setTyping(jid, isTyping);
+  } catch (err) {
+    logger.debug({ jid, isTyping, err }, 'setTypingOnChannel failed (non-fatal)');
+  }
 }
 
 function loadState(): void {
@@ -312,34 +316,53 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }, 20_000);
 
-  const ch = channelFor(chatJid);
+  let ch: Channel;
+  try {
+    ch = channelFor(chatJid);
+  } catch (err) {
+    // Channel disconnected before we could start — clean up timers and bail
+    clearInterval(typingInterval);
+    clearTimeout(progressTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+    logger.warn({ chatJid, err }, 'Channel unavailable, aborting message processing');
+    return false;
+  }
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await sendToChannel(chatJid, formatOutbound(ch, text));
-        outputSentToUser = true;
-        // Cancel progress message once we have real output
-        clearTimeout(progressTimer);
+  let output: 'success' | 'error';
+  try {
+    output = await runAgent(group, prompt, chatJid, async (result) => {
+      // Streaming output callback — called for each agent result
+      try {
+        if (result.result) {
+          const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+          const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+          logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+          if (text) {
+            await sendToChannel(chatJid, formatOutbound(ch, text));
+            outputSentToUser = true;
+            // Cancel progress message once we have real output
+            clearTimeout(progressTimer);
+          }
+          // Only reset idle timer on actual results, not session-update markers (result: null)
+          resetIdleTimer();
+        }
+
+        if (result.status === 'error') {
+          hadError = true;
+        }
+      } catch (cbErr) {
+        logger.warn({ group: group.name, err: cbErr }, 'Streaming callback error (non-fatal)');
+        hadError = true;
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
-
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
-
-  await setTypingOnChannel(chatJid, false);
-  clearInterval(typingInterval);
-  clearTimeout(progressTimer);
-  if (idleTimer) clearTimeout(idleTimer);
+    });
+  } finally {
+    // ALWAYS clean up timers — even if runAgent() throws
+    clearInterval(typingInterval);
+    clearTimeout(progressTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+    await setTypingOnChannel(chatJid, false);
+  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —

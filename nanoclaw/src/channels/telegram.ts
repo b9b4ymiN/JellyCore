@@ -33,6 +33,8 @@ export class TelegramChannel implements Channel {
   private bot: Bot;
   private connected = false;
   private opts: TelegramChannelOpts;
+  private pollingHealthTimer?: ReturnType<typeof setInterval>;
+  private lastUpdateTime = Date.now();
 
   constructor(opts: TelegramChannelOpts) {
     this.opts = opts;
@@ -124,10 +126,30 @@ export class TelegramChannel implements Channel {
     this.bot.start({
       onStart: () => {
         this.connected = true;
+        this.lastUpdateTime = Date.now();
         logger.info('Telegram bot polling started');
       },
       drop_pending_updates: true,
     });
+
+    // Health monitor: detect if polling silently died
+    // grammY's internal retry handles transient errors, but if the bot
+    // object becomes completely unresponsive we need to know.
+    this.pollingHealthTimer = setInterval(async () => {
+      if (!this.connected) return;
+      try {
+        await this.bot.api.getMe();
+        this.lastUpdateTime = Date.now();
+      } catch (err) {
+        const silentMs = Date.now() - this.lastUpdateTime;
+        logger.warn({ err, silentMs }, 'Telegram health check failed');
+        if (silentMs > 120_000) {
+          // Bot has been unresponsive for >2 min — mark disconnected
+          logger.error('Telegram bot appears dead, marking disconnected');
+          this.connected = false;
+        }
+      }
+    }, 60_000);
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -177,6 +199,10 @@ export class TelegramChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    if (this.pollingHealthTimer) {
+      clearInterval(this.pollingHealthTimer);
+      this.pollingHealthTimer = undefined;
+    }
     await this.bot.stop();
   }
 
