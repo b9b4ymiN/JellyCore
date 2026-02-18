@@ -76,6 +76,8 @@ services:
     container_name: jellycore-nanoclaw
     restart: unless-stopped
     mem_limit: 1g
+    # Give nanoclaw enough time to kill orphan agent containers during shutdown
+    stop_grace_period: 45s
     ports:
       - "47779:47779"
     volumes:

@@ -12,6 +12,7 @@ import {
   SESSION_MAX_AGE_MS,
   TELEGRAM_BOT_TOKEN,
   TRIGGER_PATTERN,
+  TYPING_MAX_TTL,
 } from './config.js';
 import { messageBus } from './message-bus.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
@@ -67,6 +68,9 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+// Global registry of active typing intervals — cleared on shutdown
+const activeTypingIntervals = new Set<ReturnType<typeof setInterval>>();
 
 /** Find the channel that owns a JID, or throw */
 function channelFor(jid: string): Channel {
@@ -301,9 +305,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let outputSentToUser = false;
 
   // Keep typing indicator alive (Telegram expires after 5s)
+  // Auto-expires after TYPING_MAX_TTL to prevent permanent typing indicators
+  const typingStartTime = Date.now();
   const typingInterval = setInterval(() => {
+    if (Date.now() - typingStartTime > TYPING_MAX_TTL) {
+      clearInterval(typingInterval);
+      activeTypingIntervals.delete(typingInterval);
+      logger.info({ group: group.name, chatJid, ttlMs: TYPING_MAX_TTL }, 'Typing indicator TTL expired, auto-stopped');
+      return;
+    }
     setTypingOnChannel(chatJid, true).catch(() => {});
   }, 4000);
+  activeTypingIntervals.add(typingInterval);
 
   // Send a progress message after 20s of silence so user knows we're alive
   let progressSent = false;
@@ -322,6 +335,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   } catch (err) {
     // Channel disconnected before we could start — clean up timers and bail
     clearInterval(typingInterval);
+    activeTypingIntervals.delete(typingInterval);
     clearTimeout(progressTimer);
     if (idleTimer) clearTimeout(idleTimer);
     logger.warn({ chatJid, err }, 'Channel unavailable, aborting message processing');
@@ -359,6 +373,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   } finally {
     // ALWAYS clean up timers — even if runAgent() throws
     clearInterval(typingInterval);
+    activeTypingIntervals.delete(typingInterval);
     clearTimeout(progressTimer);
     if (idleTimer) clearTimeout(idleTimer);
     await setTypingOnChannel(chatJid, false);
@@ -684,8 +699,38 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+
+    // 1. Stop ALL typing indicators immediately
+    for (const interval of activeTypingIntervals) {
+      clearInterval(interval);
+    }
+    activeTypingIntervals.clear();
+
+    // 2. Shutdown container pool and queue
     await containerPool.shutdown();
     await queue.shutdown(10000);
+
+    // 3. Kill ALL orphan nanoclaw-* agent containers so Docker network can be freed
+    try {
+      const { execSync } = await import('child_process');
+      const output = execSync('docker ps --filter name=nanoclaw- --format {{.Names}}', {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+        timeout: 10000,
+      });
+      const orphans = output.trim().split('\n').filter(Boolean);
+      if (orphans.length > 0) {
+        logger.info({ count: orphans.length, names: orphans }, 'Stopping orphan agent containers...');
+        // Stop all in parallel for speed
+        execSync(`docker stop ${orphans.join(' ')}`, { stdio: 'pipe', timeout: 30000 });
+        execSync(`docker rm -f ${orphans.join(' ')}`, { stdio: 'pipe', timeout: 15000 });
+        logger.info('Orphan agent containers cleaned up');
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to clean up orphan containers during shutdown');
+    }
+
+    // 4. Disconnect channels
     for (const ch of channels) {
       try { await ch.disconnect(); } catch {}
     }

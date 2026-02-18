@@ -51,6 +51,13 @@ export const IDLE_TIMEOUT = parseInt(
   process.env.IDLE_TIMEOUT || '1800000',
   10,
 ); // 30min default — how long to keep container alive after last result
+
+// Maximum time to show typing indicator per request (safety net)
+// Even if the container is still running, stop sending typing after this
+export const TYPING_MAX_TTL = parseInt(
+  process.env.TYPING_MAX_TTL || '300000',
+  10,
+); // 5 min default
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
