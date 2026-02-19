@@ -6,9 +6,9 @@
 **Created:** 2026-02-14  
 **Updated:** 2025-07-14  
 **Status:** Planning  
-**Total Phases:** 6 (Phase 0–5)  
-**Total Items:** 40 (เดิม 29 + ใหม่ 11)  
-**Estimated Timeline:** 10 สัปดาห์  
+**Total Phases:** 7 (Phase 0–6)  
+**Total Items:** 47 (เดิม 40 + Phase 6 ใหม่ 7)  
+**Estimated Timeline:** 12 สัปดาห์  
 
 ---
 
@@ -82,6 +82,7 @@
 | [Phase 3](Phase_3_Reliability_Resilience/) | 4–5 | Reliability & Resilience | 5 | R1–R5, S6 |
 | [Phase 4](Phase_4_Integration_Channels/) | 5–8 | Integration & Intelligence | 13 (+8 ใหม่) | W4, W8, W9, W11, W15 |
 | [Phase 5](Phase_5_Production_Polish/) | 8–10 | Production Polish | 6 (+1 ใหม่) | W11 |
+| [Phase 6](Phase_6_Scheduler_Heartbeat/) | 10–12 | Scheduler Hardening + Heartbeat | 7 | B1–B6 + HB |
 
 ### 🆕 New Items Added (v2.1)
 

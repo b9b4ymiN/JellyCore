@@ -67,6 +67,15 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # Install agent-browser, claude-code, and PM2 globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code pm2
 
+# Oura Ring MCP server (optional — enabled when OURA_PERSONAL_ACCESS_TOKEN is set in env)
+# Token is NOT baked into the image; it flows through secrets at runtime
+RUN git clone --depth=1 https://github.com/elizabethtrykin/oura-mcp /opt/oura-mcp \
+    && cd /opt/oura-mcp \
+    && npm install \
+    && npm run build \
+    && rm -rf /opt/oura-mcp/node_modules \
+    && rm -rf /opt/oura-mcp/.git
+
 # Install PM2 log rotate module
 RUN pm2 install pm2-logrotate && \
     pm2 set pm2-logrotate:max_size 50M && \

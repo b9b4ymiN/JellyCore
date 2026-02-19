@@ -4,7 +4,10 @@ import path from 'path';
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Andy';
 export const POLL_INTERVAL = 30000; // Fallback only — event-driven via MessageBus
-export const SCHEDULER_POLL_INTERVAL = 60000;
+export const SCHEDULER_POLL_INTERVAL = parseInt(
+  process.env.SCHEDULER_POLL_INTERVAL || '10000',
+  10,
+); // 10s default — ±10s drift (was 60s)
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
@@ -87,6 +90,37 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// --- Oracle integration ---
+export const ORACLE_BASE_URL = process.env.ORACLE_BASE_URL || 'http://oracle-v2:47778';
+
+// --- Heartbeat ---
+export const HEARTBEAT_ENABLED =
+  (process.env.HEARTBEAT_ENABLED || 'true').toLowerCase() !== 'false';
+export const HEARTBEAT_INTERVAL_MS = parseInt(
+  process.env.HEARTBEAT_INTERVAL_HOURS || '6',
+  10,
+) * 60 * 60 * 1000; // hours → ms (default 6h)
+export const HEARTBEAT_SILENCE_THRESHOLD_MS = parseInt(
+  process.env.HEARTBEAT_SILENCE_THRESHOLD_HOURS || '2',
+  10,
+) * 60 * 60 * 1000; // hours → ms (default 2h)
+
+// --- Task defaults ---
+// Hard cap per scheduled task run (prevents hung containers)
+export const TASK_DEFAULT_TIMEOUT_MS = parseInt(
+  process.env.TASK_DEFAULT_TIMEOUT_MS || '600000',
+  10,
+); // 10 min default
+// Max consecutive retries before giving up
+export const TASK_DEFAULT_MAX_RETRIES = parseInt(
+  process.env.TASK_DEFAULT_MAX_RETRIES || '2',
+  10,
+);
+export const TASK_DEFAULT_RETRY_DELAY_MS = parseInt(
+  process.env.TASK_DEFAULT_RETRY_DELAY_MS || '300000',
+  10,
+); // 5 min between retries
 
 // WhatsApp auth encryption passphrase (required for encrypted auth at rest)
 export const AUTH_PASSPHRASE = process.env.JELLYCORE_AUTH_PASSPHRASE;

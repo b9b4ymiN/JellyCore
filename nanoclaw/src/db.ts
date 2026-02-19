@@ -91,6 +91,18 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // --- Phase 6 migrations: retry, timeout, label ---
+  const phase6Migrations: [string, string][] = [
+    [`ALTER TABLE scheduled_tasks ADD COLUMN retry_count INTEGER DEFAULT 0`, 'retry_count'],
+    [`ALTER TABLE scheduled_tasks ADD COLUMN max_retries INTEGER DEFAULT 0`, 'max_retries'],
+    [`ALTER TABLE scheduled_tasks ADD COLUMN retry_delay_ms INTEGER DEFAULT 300000`, 'retry_delay_ms'],
+    [`ALTER TABLE scheduled_tasks ADD COLUMN task_timeout_ms INTEGER`, 'task_timeout_ms'],
+    [`ALTER TABLE scheduled_tasks ADD COLUMN label TEXT`, 'label'],
+  ];
+  for (const [sql] of phase6Migrations) {
+    try { database.exec(sql); } catch { /* column already exists */ }
+  }
 }
 
 export function initDatabase(): void {
@@ -309,8 +321,10 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at,
+      retry_count, max_retries, retry_delay_ms, task_timeout_ms, label)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -323,6 +337,11 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.retry_count ?? 0,
+    task.max_retries ?? 0,
+    task.retry_delay_ms ?? 300000,
+    task.task_timeout_ms ?? null,
+    task.label ?? null,
   );
 }
 
@@ -351,7 +370,15 @@ export function updateTask(
   updates: Partial<
     Pick<
       ScheduledTask,
-      'prompt' | 'schedule_type' | 'schedule_value' | 'next_run' | 'status'
+      | 'prompt'
+      | 'schedule_type'
+      | 'schedule_value'
+      | 'next_run'
+      | 'status'
+      | 'label'
+      | 'max_retries'
+      | 'retry_delay_ms'
+      | 'task_timeout_ms'
     >
   >,
 ): void {
@@ -378,6 +405,22 @@ export function updateTask(
     fields.push('status = ?');
     values.push(updates.status);
   }
+  if (updates.label !== undefined) {
+    fields.push('label = ?');
+    values.push(updates.label);
+  }
+  if (updates.max_retries !== undefined) {
+    fields.push('max_retries = ?');
+    values.push(updates.max_retries);
+  }
+  if (updates.retry_delay_ms !== undefined) {
+    fields.push('retry_delay_ms = ?');
+    values.push(updates.retry_delay_ms);
+  }
+  if (updates.task_timeout_ms !== undefined) {
+    fields.push('task_timeout_ms = ?');
+    values.push(updates.task_timeout_ms);
+  }
 
   if (fields.length === 0) return;
 
@@ -385,6 +428,11 @@ export function updateTask(
   db.prepare(
     `UPDATE scheduled_tasks SET ${fields.join(', ')} WHERE id = ?`,
   ).run(...values);
+}
+
+export function cancelTask(id: string): void {
+  // Soft-delete: audit trail preserved, task will be hidden from agent snapshots
+  db.prepare(`UPDATE scheduled_tasks SET status = 'cancelled' WHERE id = ?`).run(id);
 }
 
 export function deleteTask(id: string): void {
@@ -404,6 +452,54 @@ export function getDueTasks(): ScheduledTask[] {
   `,
     )
     .all(now) as ScheduledTask[];
+}
+
+/**
+ * Check if a semantically identical task already exists (duplicate guard).
+ * Compares group_folder + schedule_value + first 200 chars of prompt.
+ */
+export function findDuplicateTask(
+  groupFolder: string,
+  scheduleValue: string,
+  promptPrefix: string,
+): ScheduledTask | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM scheduled_tasks
+       WHERE group_folder = ?
+         AND schedule_value = ?
+         AND substr(prompt, 1, 200) = substr(?, 1, 200)
+         AND status IN ('active', 'paused')
+       LIMIT 1`,
+    )
+    .get(groupFolder, scheduleValue, promptPrefix) as ScheduledTask | undefined;
+}
+
+/** Increment retry_count after a failure and schedule the next retry time. */
+export function scheduleRetry(id: string, retryDelayMs: number): void {
+  const retryAt = new Date(Date.now() + retryDelayMs).toISOString();
+  db.prepare(
+    `UPDATE scheduled_tasks
+     SET retry_count = retry_count + 1, next_run = ?
+     WHERE id = ?`,
+  ).run(retryAt, id);
+}
+
+/** Reset retry_count to 0 after a successful run. */
+export function resetRetryCount(id: string): void {
+  db.prepare(`UPDATE scheduled_tasks SET retry_count = 0 WHERE id = ?`).run(id);
+}
+
+/** Get recent run logs for a task. */
+export function getTaskRunLogs(
+  taskId: string,
+  limit = 20,
+): TaskRunLog[] {
+  return db
+    .prepare(
+      `SELECT * FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC LIMIT ?`,
+    )
+    .all(taskId, limit) as TaskRunLog[];
 }
 
 export function updateTaskAfterRun(

@@ -62,9 +62,29 @@ export interface ScheduledTask {
   next_run: string | null;
   last_run: string | null;
   last_result: string | null;
-  status: 'active' | 'paused' | 'completed';
+  /** active → running normally; paused → suspended by user; completed → once task done; cancelled → soft-deleted */
+  status: 'active' | 'paused' | 'completed' | 'cancelled';
   created_at: string;
+  // --- retry ---
+  /** Consecutive failure count. Reset to 0 on success. */
+  retry_count?: number;
+  /** Maximum retries before marking permanently failed. 0 = never retry. */
+  max_retries?: number;
+  /** Milliseconds to wait between retries. */
+  retry_delay_ms?: number;
+  // --- timeout ---
+  /** Per-task hard timeout in ms. Null = use TASK_DEFAULT_TIMEOUT_MS. */
+  task_timeout_ms?: number | null;
+  // --- label ---
+  /** Optional human-readable label shown in heartbeat/UI. */
+  label?: string | null;
 }
+
+/** Enriched view of a ScheduledTask including human-readable next_run in host timezone. */
+export type ScheduledTaskView = ScheduledTask & {
+  next_run_local: string | null;
+  timezone: string;
+};
 
 export interface TaskRunLog {
   task_id: string;

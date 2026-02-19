@@ -47,6 +47,7 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  updateTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
@@ -54,8 +55,9 @@ import { findChannel, formatMessages, formatOutbound, routeOutbound } from './ro
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { startHealthServer, setStatusProvider, recordError } from './health-server.js';
+import { startHealthServer, setStatusProvider, setHeartbeatProvider, recordError } from './health-server.js';
 import { resourceMonitor } from './resource-monitor.js';
+import { startHeartbeat, patchHeartbeatConfig, recordActivity } from './heartbeat.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -740,8 +742,12 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
 
   // Shared callbacks for all channels
+  const appStartTime = Date.now();
   const channelCallbacks = {
-    onMessage: (chatJid: string, msg: NewMessage) => storeMessage(msg),
+    onMessage: (chatJid: string, msg: NewMessage) => {
+      storeMessage(msg);
+      recordActivity(); // track for silence heartbeat
+    },
     onChatMetadata: (chatJid: string, timestamp: string, name?: string) => storeChatMetadata(chatJid, timestamp, name),
     registeredGroups: () => registeredGroups,
   };
@@ -812,6 +818,8 @@ async function main(): Promise<void> {
     syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+    patchHeartbeatConfig: (patch) => patchHeartbeatConfig(patch as Parameters<typeof patchHeartbeatConfig>[0]),
+    runTaskNow: (taskId) => updateTask(taskId, { next_run: new Date().toISOString() }),
   });
   queue.setProcessMessagesFn(processGroupMessages);
 
@@ -843,6 +851,16 @@ async function main(): Promise<void> {
   }
 
   // Start health/status HTTP server (port 47779)
+  const heartbeatStatusProvider = {
+    getStatus: () => ({
+      activeContainers: queue.getActiveCount(),
+      queueDepth: queue.getQueueDepth(),
+      registeredGroups: Object.values(registeredGroups).map(g => g.name),
+      uptimeMs: Date.now() - appStartTime,
+    }),
+    sendMessage: (jid: string, text: string) => sendToChannel(jid, text),
+  };
+
   setStatusProvider({
     getActiveContainers: () => queue.getActiveCount(),
     getQueueDepth: () => queue.getQueueDepth(),
@@ -851,8 +869,20 @@ async function main(): Promise<void> {
       const stats = resourceMonitor.stats;
       return { currentMax: stats.currentMax, cpuUsage: stats.cpuUsage, memoryFree: stats.memoryFree };
     },
+    getUptimeMs: () => Date.now() - appStartTime,
   });
+  setHeartbeatProvider(heartbeatStatusProvider);
   startHealthServer();
+
+  // Set heartbeat main chat JID = first registered main group
+  const mainEntry = Object.entries(registeredGroups).find(([, g]) => g.folder === MAIN_GROUP_FOLDER);
+  if (mainEntry) {
+    patchHeartbeatConfig({ mainChatJid: mainEntry[0] });
+  }
+
+  // Start heartbeat system
+  const stopHeartbeat = startHeartbeat(heartbeatStatusProvider);
+  process.once('beforeExit', stopHeartbeat);
 
   startMessageLoop();
 }

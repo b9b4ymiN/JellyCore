@@ -7,7 +7,11 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
+  ORACLE_BASE_URL,
   SCHEDULER_POLL_INTERVAL,
+  TASK_DEFAULT_MAX_RETRIES,
+  TASK_DEFAULT_RETRY_DELAY_MS,
+  TASK_DEFAULT_TIMEOUT_MS,
   TIMEZONE,
 } from './config.js';
 import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
@@ -16,11 +20,13 @@ import {
   getDueTasks,
   getTaskById,
   logTaskRun,
+  resetRetryCount,
+  scheduleRetry,
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
-import { RegisteredGroup, ScheduledTask } from './types.js';
+import { RegisteredGroup, ScheduledTaskView } from './types.js';
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -30,16 +36,34 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
+/** Enrich a task for container snapshot: human-readable next_run + timezone context. */
+function enrichTaskView(task: ReturnType<typeof getAllTasks>[number]): ScheduledTaskView {
+  const next_run_local = task.next_run
+    ? new Date(task.next_run).toLocaleString('th-TH', {
+        timeZone: TIMEZONE,
+        dateStyle: 'short',
+        timeStyle: 'short',
+      })
+    : null;
+  return { ...task, next_run_local, timezone: TIMEZONE };
+}
+
 async function runTask(
-  task: ScheduledTask,
+  task: ReturnType<typeof getTaskById>,
   deps: SchedulerDependencies,
 ): Promise<void> {
+  if (!task) return;
+
   const startTime = Date.now();
   const groupDir = path.join(GROUPS_DIR, task.group_folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  const effectiveTimeout = task.task_timeout_ms ?? TASK_DEFAULT_TIMEOUT_MS;
+  const effectiveMaxRetries = task.max_retries ?? TASK_DEFAULT_MAX_RETRIES;
+  const effectiveRetryDelay = task.retry_delay_ms ?? TASK_DEFAULT_RETRY_DELAY_MS;
+
   logger.info(
-    { taskId: task.id, group: task.group_folder },
+    { taskId: task.id, group: task.group_folder, label: task.label, timeout: effectiveTimeout },
     'Running scheduled task',
   );
 
@@ -70,27 +94,42 @@ async function runTask(
   writeTasksSnapshot(
     task.group_folder,
     isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
+    tasks
+      .filter((t) => t.status !== 'cancelled')
+      .map((t) => {
+        const view = enrichTaskView(t);
+        return {
+          id: view.id,
+          groupFolder: view.group_folder, // writeTasksSnapshot expects camelCase
+          prompt: view.prompt,
+          schedule_type: view.schedule_type,
+          schedule_value: view.schedule_value,
+          status: view.status,
+          next_run: view.next_run,
+          next_run_local: view.next_run_local,
+          timezone: view.timezone,
+          label: view.label ?? null,
+        };
+      }),
   );
 
   let result: string | null = null;
   let error: string | null = null;
+
+  // Hard timeout guard — prevents a hung container from blocking the scheduler forever
+  let hardTimeoutFired = false;
+  const hardTimeoutTimer = setTimeout(() => {
+    hardTimeoutFired = true;
+    logger.error({ taskId: task.id, timeoutMs: effectiveTimeout }, 'Task hard timeout — forcing stdin close');
+    deps.queue.closeStdin(task.chat_jid);
+  }, effectiveTimeout);
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
-  // Idle timer: writes _close sentinel after IDLE_TIMEOUT of no output,
-  // so the container exits instead of hanging at waitForIpcMessage forever.
+  // Idle timer: writes _close sentinel after IDLE_TIMEOUT of no output
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
@@ -116,9 +155,7 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
           await deps.sendMessage(task.chat_jid, streamedOutput.result);
-          // Only reset idle timer on actual results, not session-update markers
           resetIdleTimer();
         }
         if (streamedOutput.status === 'error') {
@@ -132,8 +169,11 @@ async function runTask(
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     } else if (output.result) {
-      // Messages are sent via MCP tool (IPC), result text is just logged
       result = output.result;
+    }
+
+    if (hardTimeoutFired) {
+      error = `Hard timeout after ${effectiveTimeout}ms`;
     }
 
     logger.info(
@@ -144,19 +184,55 @@ async function runTask(
     if (idleTimer) clearTimeout(idleTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+  } finally {
+    clearTimeout(hardTimeoutTimer);
   }
 
   const durationMs = Date.now() - startTime;
 
-  logTaskRun({
-    task_id: task.id,
-    run_at: new Date().toISOString(),
-    duration_ms: durationMs,
-    status: error ? 'error' : 'success',
-    result,
-    error,
-  });
+  // --- Retry logic ---
+  if (error) {
+    const currentRetryCount = task.retry_count ?? 0;
+    if (effectiveMaxRetries > 0 && currentRetryCount < effectiveMaxRetries) {
+      // Schedule a retry
+      scheduleRetry(task.id, effectiveRetryDelay);
+      logTaskRun({
+        task_id: task.id,
+        run_at: new Date().toISOString(),
+        duration_ms: durationMs,
+        status: 'error',
+        result: null,
+        error: `${error} (retry ${currentRetryCount + 1}/${effectiveMaxRetries} in ${effectiveRetryDelay / 1000}s)`,
+      });
+      logger.warn(
+        { taskId: task.id, attempt: currentRetryCount + 1, maxRetries: effectiveMaxRetries },
+        'Task failed — retry scheduled',
+      );
+      return;
+    }
+    // Exhausted retries or no retry configured
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: durationMs,
+      status: 'error',
+      result: null,
+      error,
+    });
+  } else {
+    // Success — reset retry counter
+    resetRetryCount(task.id);
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: durationMs,
+      status: 'success',
+      result,
+      error: null,
+    });
+  }
 
+  // --- Compute next_run ---
   let nextRun: string | null = null;
   if (task.schedule_type === 'cron') {
     const interval = CronExpressionParser.parse(task.schedule_value, {
@@ -167,7 +243,7 @@ async function runTask(
     const ms = parseInt(task.schedule_value, 10);
     nextRun = new Date(Date.now() + ms).toISOString();
   }
-  // 'once' tasks have no next run
+  // 'once' tasks: nextRun = null → status becomes 'completed'
 
   const resultSummary = error
     ? `Error: ${error}`
@@ -185,7 +261,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
     return;
   }
   schedulerRunning = true;
-  logger.info('Scheduler loop started');
+  logger.info({ pollIntervalMs: SCHEDULER_POLL_INTERVAL }, 'Scheduler loop started');
 
   const loop = async () => {
     try {
@@ -195,7 +271,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       }
 
       for (const task of dueTasks) {
-        // Re-check task status in case it was paused/cancelled
+        // Re-fetch to check for concurrent pause/cancel
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
           continue;
@@ -216,3 +292,23 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   loop();
 }
+
+/** Fetch Oracle health summary for use in heartbeat messages. */
+export async function fetchOracleSummary(): Promise<string | null> {
+  try {
+    const res = await fetch(`${ORACLE_BASE_URL}/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return `Oracle: HTTP ${res.status}`;
+    const data = await res.json() as Record<string, unknown>;
+    const status = data['status'] ?? 'unknown';
+    const uptimeSec = typeof data['uptime'] === 'number' ? data['uptime'] : null;
+    const uptimeStr = uptimeSec !== null
+      ? `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`
+      : '?';
+    return `Oracle ${status} (uptime ${uptimeStr})`;
+  } catch {
+    return 'Oracle unreachable';
+  }
+}
+

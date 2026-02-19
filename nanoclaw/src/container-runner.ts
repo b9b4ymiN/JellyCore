@@ -296,6 +296,8 @@ function readSecrets(): Record<string, string> {
     'ANTHROPIC_BASE_URL', 'ORACLE_API_URL', 'ORACLE_AUTH_TOKEN',
     // Z.AI model mapping (docs.z.ai/devpack/tool/claude#manual-configuration)
     'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    // Oura Ring MCP (optional — set to enable health/sleep/activity data access)
+    'OURA_PERSONAL_ACCESS_TOKEN',
   ];
   const secrets: Record<string, string> = {};
 
@@ -931,6 +933,10 @@ export function writeTasksSnapshot(
     schedule_value: string;
     status: string;
     next_run: string | null;
+    // Phase 6: enriched fields for agent visibility
+    next_run_local?: string | null;
+    timezone?: string;
+    label?: string | null;
   }>,
 ): void {
   // Write filtered tasks to the group's IPC directory

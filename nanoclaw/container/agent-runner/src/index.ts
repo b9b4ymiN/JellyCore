@@ -443,7 +443,8 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__nanoclaw__*',
+        'mcp__oura__*'
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -468,6 +469,16 @@ async function runQuery(
             ORACLE_READ_ONLY: containerInput.isMain ? 'false' : 'true',
           },
         },
+        // Oura Ring MCP — only activated when token is present
+        ...(sdkEnv.OURA_PERSONAL_ACCESS_TOKEN ? {
+          oura: {
+            command: 'node',
+            args: ['/opt/oura-mcp/build/index.js'],
+            env: {
+              OURA_PERSONAL_ACCESS_TOKEN: sdkEnv.OURA_PERSONAL_ACCESS_TOKEN,
+            },
+          },
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook()] }],

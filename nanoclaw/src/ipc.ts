@@ -12,7 +12,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { createTask, cancelTask, getTaskById, updateTask, findDuplicateTask } from './db.js';
 import { verifyIpcMessage } from './ipc-signing.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -29,6 +29,10 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  /** Forward heartbeat config patch (from heartbeat_config IPC command) */
+  patchHeartbeatConfig?: (patch: Record<string, unknown>) => void;
+  /** Trigger an immediate task run by setting next_run = now */
+  runTaskNow?: (taskId: string) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -209,6 +213,13 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For heartbeat_config
+    heartbeat?: Record<string, unknown>;
+    // For update_task / schedule_task metadata
+    label?: string;
+    max_retries?: number;
+    retry_delay_ms?: number;
+    task_timeout_ms?: number | null;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -290,6 +301,17 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
+
+        // Duplicate guard: block semantically identical tasks
+        const existing = findDuplicateTask(targetFolder, data.schedule_value, data.prompt);
+        if (existing) {
+          logger.warn(
+            { existingId: existing.id, targetFolder, scheduleValue: data.schedule_value },
+            'Duplicate task blocked (same group/schedule/prompt already active)',
+          );
+          break;
+        }
+
         createTask({
           id: taskId,
           group_folder: targetFolder,
@@ -301,6 +323,11 @@ export async function processTaskIpc(
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),
+          retry_count: 0,
+          max_retries: data.max_retries ?? 0,
+          retry_delay_ms: data.retry_delay_ms ?? 300000,
+          task_timeout_ms: data.task_timeout_ms ?? null,
+          label: data.label ?? null,
         });
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
@@ -349,7 +376,7 @@ export async function processTaskIpc(
       if (data.taskId) {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
+          cancelTask(data.taskId); // soft-delete: preserves audit trail
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task cancelled via IPC',
@@ -360,6 +387,67 @@ export async function processTaskIpc(
             'Unauthorized task cancel attempt',
           );
         }
+      }
+      break;
+
+    case 'run_task_now':
+      if (data.taskId) {
+        const task = getTaskById(data.taskId);
+        if (task && (isMain || task.group_folder === sourceGroup)) {
+          if (task.status !== 'active') {
+            logger.warn({ taskId: data.taskId }, 'run_task_now: task is not active');
+            break;
+          }
+          if (deps.runTaskNow) {
+            deps.runTaskNow(data.taskId);
+          } else {
+            updateTask(data.taskId, { next_run: new Date().toISOString() });
+          }
+          logger.info({ taskId: data.taskId, sourceGroup }, 'Task triggered via run_task_now');
+        } else {
+          logger.warn({ taskId: data.taskId, sourceGroup }, 'Unauthorized run_task_now attempt');
+        }
+      }
+      break;
+
+    case 'update_task':
+      if (data.taskId) {
+        const task = getTaskById(data.taskId);
+        if (task && (isMain || task.group_folder === sourceGroup)) {
+          const patch: Parameters<typeof updateTask>[1] = {};
+          if (data.prompt !== undefined) patch.prompt = data.prompt;
+          if (data.schedule_type) patch.schedule_type = data.schedule_type as 'cron' | 'interval' | 'once';
+          if (data.schedule_value) {
+            patch.schedule_value = data.schedule_value;
+            // Recalculate next_run when cron schedule changes
+            const newSched = data.schedule_type ?? task.schedule_type;
+            if (newSched === 'cron') {
+              try {
+                const interval = CronExpressionParser.parse(data.schedule_value, { tz: TIMEZONE });
+                patch.next_run = interval.next().toISOString();
+              } catch {
+                logger.warn({ scheduleValue: data.schedule_value }, 'update_task: invalid cron expression');
+              }
+            }
+          }
+          if (data.label !== undefined) patch.label = data.label;
+          if (data.max_retries !== undefined) patch.max_retries = data.max_retries;
+          if (data.retry_delay_ms !== undefined) patch.retry_delay_ms = data.retry_delay_ms;
+          if (data.task_timeout_ms !== undefined) patch.task_timeout_ms = data.task_timeout_ms;
+          updateTask(data.taskId, patch);
+          logger.info({ taskId: data.taskId, patch, sourceGroup }, 'Task updated via IPC');
+        } else {
+          logger.warn({ taskId: data.taskId, sourceGroup }, 'Unauthorized update_task attempt');
+        }
+      }
+      break;
+
+    case 'heartbeat_config':
+      if (isMain && data.heartbeat && deps.patchHeartbeatConfig) {
+        deps.patchHeartbeatConfig(data.heartbeat);
+        logger.info({ patch: data.heartbeat }, 'Heartbeat config updated via IPC');
+      } else if (!isMain) {
+        logger.warn({ sourceGroup }, 'Unauthorized heartbeat_config attempt (main group only)');
       }
       break;
 
