@@ -334,6 +334,25 @@ export async function processTaskIpc(
           task_timeout_ms: data.task_timeout_ms ?? null,
           label: data.label ?? null,
         });
+
+        // Write feedback file so the container can read the actual task ID
+        // (the container generates a client-side timestamp which differs from host)
+        try {
+          const feedbackDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'feedback');
+          fs.mkdirSync(feedbackDir, { recursive: true });
+          const feedbackFile = path.join(feedbackDir, `task-created-${Date.now()}.json`);
+          fs.writeFileSync(feedbackFile, JSON.stringify({
+            type: 'task_created',
+            taskId,
+            scheduleType,
+            scheduleValue: data.schedule_value,
+            nextRun: nextRun,
+            label: data.label ?? null,
+          }));
+        } catch (feedbackErr) {
+          logger.debug({ feedbackErr }, 'Failed to write task feedback (non-fatal)');
+        }
+
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',

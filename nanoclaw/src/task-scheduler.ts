@@ -288,6 +288,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
+        logger.info({ taskId: task.id, label: task.label }, 'Task claimed, enqueuing for execution');
+
         // Re-fetch to get latest status (might have been paused/cancelled concurrently)
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
@@ -299,6 +301,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           currentTask.id,
           () => runTask(currentTask, deps),
         );
+      }
+
+      // After enqueuing all due tasks, ensure idle containers are preempted
+      // so tasks don't wait behind a 30-min idle timeout.
+      if (dueTasks.length > 0) {
+        deps.queue.preemptForPendingTasks();
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

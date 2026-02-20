@@ -152,7 +152,11 @@ export class GroupQueue {
 
     if (state.active) {
       state.pendingTasks.push({ id: taskId, groupJid, fn });
-      logger.debug({ groupJid, taskId }, 'Container active, task queued');
+      logger.info({ groupJid, taskId }, 'Container active, task queued — preempting idle container');
+      // Preempt the idle container: write _close sentinel so it wraps up
+      // quickly and drainGroup() can run the pending task. Any pending
+      // messages will be handled in a fresh container after the task runs.
+      this.closeStdin(groupJid);
       return;
     }
 
@@ -376,5 +380,22 @@ export class GroupQueue {
   /** Check if a task is currently running */
   isTaskRunning(taskId: string): boolean {
     return this.runningTaskIds.has(taskId);
+  }
+
+  /**
+   * Preempt idle containers for all groups that have pending tasks.
+   * Called by the scheduler after enqueuing due tasks to ensure
+   * containers don't sit idle for 30 minutes while tasks wait.
+   */
+  preemptForPendingTasks(): void {
+    for (const [groupJid, state] of this.groups) {
+      if (state.active && state.pendingTasks.length > 0 && state.groupFolder) {
+        logger.debug(
+          { groupJid, pendingTasks: state.pendingTasks.length },
+          'Preempting idle container for pending tasks',
+        );
+        this.closeStdin(groupJid);
+      }
+    }
   }
 }
