@@ -144,6 +144,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       schedule_value: args.schedule_value,
       context_mode: args.context_mode || 'group',
       targetJid,
+      groupFolder,
       createdBy: groupFolder,
       timestamp: new Date().toISOString(),
     };

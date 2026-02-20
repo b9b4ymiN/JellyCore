@@ -37,6 +37,8 @@ export class GroupQueue {
   private onMaxRetriesCallback: ((groupJid: string) => void) | null = null;
   // Track group folders for priority (set by caller)
   private groupFolders = new Map<string, string>();
+  // Track task IDs that are currently executing (defense-in-depth against re-enqueue)
+  private runningTaskIds = new Set<string>();
 
   /**
    * Register callbacks for queue feedback
@@ -138,7 +140,11 @@ export class GroupQueue {
 
     const state = this.getGroup(groupJid);
 
-    // Prevent double-queuing of the same task
+    // Prevent double-queuing of the same task (pending OR already running)
+    if (this.runningTaskIds.has(taskId)) {
+      logger.debug({ groupJid, taskId }, 'Task already running, skipping');
+      return;
+    }
     if (state.pendingTasks.some((t) => t.id === taskId)) {
       logger.debug({ groupJid, taskId }, 'Task already queued, skipping');
       return;
@@ -251,6 +257,7 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     state.active = true;
     this.activeCount++;
+    this.runningTaskIds.add(task.id);
 
     logger.debug(
       { groupJid, taskId: task.id, activeCount: this.activeCount },
@@ -262,6 +269,7 @@ export class GroupQueue {
     } catch (err) {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
+      this.runningTaskIds.delete(task.id);
       state.active = false;
       state.process = null;
       state.containerName = null;
@@ -363,5 +371,10 @@ export class GroupQueue {
   /** Get current queue depth (waiting groups) */
   getQueueDepth(): number {
     return this.waitingGroups.length;
+  }
+
+  /** Check if a task is currently running */
+  isTaskRunning(taskId: string): boolean {
+    return this.runningTaskIds.has(taskId);
   }
 }

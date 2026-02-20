@@ -455,6 +455,48 @@ export function getDueTasks(): ScheduledTask[] {
 }
 
 /**
+ * Sentinel value used to "claim" a task — prevents getDueTasks() from
+ * returning it again while it's running or queued.
+ */
+const CLAIM_SENTINEL = '9999-12-31T23:59:59.999Z';
+
+/**
+ * Atomically claim a due task by advancing its next_run to a far-future
+ * sentinel.  Returns true if the claim succeeded (row was still active with
+ * a past next_run).  This is an optimistic lock: only one poll cycle can
+ * claim a given task because the UPDATE is atomic in SQLite.
+ */
+export function claimTask(id: string): boolean {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `UPDATE scheduled_tasks
+       SET next_run = ?
+       WHERE id = ? AND status = 'active' AND next_run IS NOT NULL AND next_run <= ?`,
+    )
+    .run(CLAIM_SENTINEL, id, now);
+  return result.changes > 0;
+}
+
+/**
+ * Crash recovery: reset any tasks that were claimed (sentinel next_run)
+ * but never completed — e.g. because the process crashed mid-execution.
+ * For cron/interval tasks we set next_run = NOW so they run on the next
+ * poll cycle; for once tasks we also set next_run = NOW.
+ */
+export function recoverStaleClaims(): number {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `UPDATE scheduled_tasks
+       SET next_run = ?
+       WHERE status = 'active' AND next_run = ?`,
+    )
+    .run(now, CLAIM_SENTINEL);
+  return result.changes;
+}
+
+/**
  * Check if a semantically identical task already exists (duplicate guard).
  * Compares group_folder + schedule_value + first 200 chars of prompt.
  */

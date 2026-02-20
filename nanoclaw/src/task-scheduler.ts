@@ -18,6 +18,8 @@ import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './contai
 import {
   getAllTasks,
   getDueTasks,
+  claimTask,
+  recoverStaleClaims,
   getTaskById,
   logTaskRun,
   resetRetryCount,
@@ -261,6 +263,14 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
     return;
   }
   schedulerRunning = true;
+
+  // Crash recovery: release any tasks that were claimed but never completed
+  // (e.g. process crashed between claim and updateTaskAfterRun)
+  const recovered = recoverStaleClaims();
+  if (recovered > 0) {
+    logger.warn({ recovered }, 'Recovered stale task claims from previous crash');
+  }
+
   logger.info({ pollIntervalMs: SCHEDULER_POLL_INTERVAL }, 'Scheduler loop started');
 
   const loop = async () => {
@@ -271,7 +281,14 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       }
 
       for (const task of dueTasks) {
-        // Re-fetch to check for concurrent pause/cancel
+        // Atomically claim this task — sets next_run to a far-future sentinel
+        // so no subsequent poll cycle can re-discover it.
+        if (!claimTask(task.id)) {
+          logger.debug({ taskId: task.id }, 'Task already claimed, skipping');
+          continue;
+        }
+
+        // Re-fetch to get latest status (might have been paused/cancelled concurrently)
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
           continue;
