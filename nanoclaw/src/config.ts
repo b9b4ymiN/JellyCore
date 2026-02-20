@@ -105,6 +105,16 @@ export const HEARTBEAT_SILENCE_THRESHOLD_MS = parseInt(
   process.env.HEARTBEAT_SILENCE_THRESHOLD_HOURS || '2',
   10,
 ) * 60 * 60 * 1000; // hours → ms (default 2h)
+/** Default interval for smart heartbeat jobs (default 1 hour) */
+export const HEARTBEAT_JOB_DEFAULT_INTERVAL_MS = parseInt(
+  process.env.HEARTBEAT_JOB_INTERVAL_MINUTES || '60',
+  10,
+) * 60 * 1000; // minutes → ms (default 60 min)
+/** How often the job runner polls for due jobs (default 30 seconds) */
+export const HEARTBEAT_JOB_POLL_INTERVAL_MS = parseInt(
+  process.env.HEARTBEAT_JOB_POLL_INTERVAL_MS || '30000',
+  10,
+);
 
 // --- Task defaults ---
 // Hard cap per scheduled task run (prevents hung containers)

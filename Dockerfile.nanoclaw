@@ -24,6 +24,21 @@ COPY nanoclaw/tsconfig.json ./
 COPY nanoclaw/src/ ./src/
 RUN npx tsc
 
+# --- Stage 1b: Build Oura MCP server ---
+FROM node:22-slim AS oura-builder
+
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth=1 https://github.com/elizabethtrykin/oura-mcp /opt/oura-mcp
+
+WORKDIR /opt/oura-mcp
+
+# Install ALL deps (including typescript), build, then prune to production
+RUN npm install \
+    && npm run build \
+    && test -f /opt/oura-mcp/build/index.js \
+    && rm -rf node_modules .git \
+    && npm install --omit=dev
+
 # --- Stage 2: Runtime ---
 FROM node:22-slim
 
@@ -50,6 +65,9 @@ RUN npm install --omit=dev
 
 # Copy compiled NanoClaw
 COPY --from=builder /build/nanoclaw/dist/ ./dist/
+
+# Copy pre-built Oura MCP server (optional — only used if OURA_PERSONAL_ACCESS_TOKEN is set)
+COPY --from=oura-builder /opt/oura-mcp /opt/oura-mcp
 
 # Create data directories
 RUN mkdir -p /app/nanoclaw/store /app/nanoclaw/data /app/nanoclaw/groups

@@ -288,6 +288,152 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+// ── Smart Heartbeat Job Tools ────────────────────────────────────────────────
+
+server.tool(
+  'add_heartbeat_job',
+  `Add a smart heartbeat job — a recurring AI task that runs autonomously on a schedule.
+
+Categories:
+• learning: AI research, study, knowledge building (e.g., "ศึกษาเรื่อง AI agents ล่าสุด")
+• monitor: Track stocks, prices, news, websites (e.g., "ติดตามราคาหุ้น NVDA")
+• health: Personal health/wellness checks (e.g., "เตือนให้ดื่มน้ำและยืดเส้น")
+• custom: Any other recurring intelligence task
+
+Jobs run automatically at the configured interval (default 60 minutes).
+Results are sent to this chat and included in heartbeat reports.`,
+  {
+    label: z.string().describe('Short name for the job (e.g., "ติดตามหุ้น NVDA", "เรียนรู้ AI agents")'),
+    prompt: z.string().describe('What the AI should do each time this job runs. Be specific and detailed.'),
+    category: z.enum(['learning', 'monitor', 'health', 'custom']).describe('Job category'),
+    interval_minutes: z.number().optional().describe('Run interval in minutes (default: 60). Use null for system default.'),
+  },
+  async (args) => {
+    const data = {
+      type: 'heartbeat_add_job',
+      label: args.label,
+      prompt: args.prompt,
+      category: args.category,
+      interval_ms: args.interval_minutes ? args.interval_minutes * 60 * 1000 : null,
+      chatJid,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    const filename = writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `✅ Heartbeat job "${args.label}" added (${filename}). Category: ${args.category}, Interval: ${args.interval_minutes ?? 60} min.`,
+      }],
+    };
+  },
+);
+
+server.tool(
+  'list_heartbeat_jobs',
+  'List all smart heartbeat jobs with their status, last result, and schedule.',
+  {},
+  async () => {
+    const jobsFile = path.join(IPC_DIR, 'heartbeat_jobs.json');
+
+    try {
+      if (!fs.existsSync(jobsFile)) {
+        return { content: [{ type: 'text' as const, text: 'No heartbeat jobs configured yet. Use add_heartbeat_job to create one.' }] };
+      }
+
+      const jobs = JSON.parse(fs.readFileSync(jobsFile, 'utf-8'));
+
+      if (jobs.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No heartbeat jobs configured yet. Use add_heartbeat_job to create one.' }] };
+      }
+
+      const categoryEmoji: Record<string, string> = {
+        learning: '📚',
+        monitor: '📊',
+        health: '🏥',
+        custom: '🔧',
+      };
+
+      const formatted = jobs
+        .map(
+          (j: { id: string; label: string; category: string; status: string; interval_ms: number | null; last_run: string | null; last_result: string | null }) => {
+            const emoji = categoryEmoji[j.category] ?? '🔧';
+            const intervalMin = j.interval_ms ? j.interval_ms / 60000 : 60;
+            const lastRun = j.last_run ? new Date(j.last_run).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' }) : 'ยังไม่เคย';
+            const lastResult = j.last_result ? j.last_result.slice(0, 100) : '-';
+            return `${emoji} [${j.id.slice(0, 8)}] ${j.label}\n   Status: ${j.status} | ทุก ${intervalMin}น. | Last: ${lastRun}\n   Result: ${lastResult}`;
+          },
+        )
+        .join('\n\n');
+
+      return { content: [{ type: 'text' as const, text: `Smart Heartbeat Jobs:\n\n${formatted}` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error reading jobs: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
+server.tool(
+  'update_heartbeat_job',
+  'Update a heartbeat job — change its prompt, label, category, interval, or pause/resume it.',
+  {
+    job_id: z.string().describe('The job ID (first 8 chars are enough)'),
+    label: z.string().optional().describe('New label'),
+    prompt: z.string().optional().describe('New prompt'),
+    category: z.enum(['learning', 'monitor', 'health', 'custom']).optional().describe('New category'),
+    interval_minutes: z.number().optional().describe('New interval in minutes'),
+    status: z.enum(['active', 'paused']).optional().describe('Set status to active or paused'),
+  },
+  async (args) => {
+    const data: Record<string, unknown> = {
+      type: 'heartbeat_update_job',
+      jobId: args.job_id,
+      groupFolder,
+      isMain,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (args.label !== undefined) data.label = args.label;
+    if (args.prompt !== undefined) data.prompt = args.prompt;
+    if (args.category !== undefined) data.category = args.category;
+    if (args.interval_minutes !== undefined) data.interval_ms = args.interval_minutes * 60 * 1000;
+    if (args.status !== undefined) data.status = args.status;
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Heartbeat job ${args.job_id} update requested.` }],
+    };
+  },
+);
+
+server.tool(
+  'remove_heartbeat_job',
+  'Remove a heartbeat job permanently.',
+  {
+    job_id: z.string().describe('The job ID to remove (first 8 chars are enough)'),
+  },
+  async (args) => {
+    const data = {
+      type: 'heartbeat_remove_job',
+      jobId: args.job_id,
+      groupFolder,
+      isMain,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Heartbeat job ${args.job_id} removal requested.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

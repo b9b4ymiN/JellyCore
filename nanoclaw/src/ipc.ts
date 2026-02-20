@@ -12,10 +12,10 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, cancelTask, getTaskById, updateTask, findDuplicateTask } from './db.js';
+import { createTask, cancelTask, getTaskById, updateTask, findDuplicateTask, createHeartbeatJob, getHeartbeatJob, getAllHeartbeatJobs, updateHeartbeatJob, deleteHeartbeatJob } from './db.js';
 import { verifyIpcMessage } from './ipc-signing.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, HeartbeatJob } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -220,6 +220,11 @@ export async function processTaskIpc(
     max_retries?: number;
     retry_delay_ms?: number;
     task_timeout_ms?: number | null;
+    // For heartbeat job commands
+    jobId?: string;
+    category?: string;
+    interval_ms?: number | null;
+    status?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -501,7 +506,107 @@ export async function processTaskIpc(
       }
       break;
 
+    // ── Smart Heartbeat Job Commands ───────────────────────────────────────
+
+    case 'heartbeat_add_job': {
+      if (!data.label || !data.prompt || !data.category) {
+        logger.warn({ data }, 'heartbeat_add_job: missing required fields');
+        break;
+      }
+      const jobId = `hb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const chatJidForJob = data.chatJid || (
+        Object.entries(registeredGroups).find(([, g]) => g.folder === sourceGroup)?.[0] ?? ''
+      );
+      createHeartbeatJob({
+        id: jobId,
+        chat_jid: chatJidForJob,
+        label: data.label,
+        prompt: data.prompt,
+        category: data.category as 'learning' | 'monitor' | 'health' | 'custom',
+        status: 'active',
+        interval_ms: data.interval_ms ?? null,
+        last_run: null,
+        last_result: null,
+        created_at: new Date().toISOString(),
+        created_by: sourceGroup,
+      });
+      // Write snapshot for containers to read
+      writeHeartbeatJobsSnapshot();
+      logger.info(
+        { jobId, label: data.label, category: data.category, sourceGroup },
+        'Heartbeat job created via IPC',
+      );
+      break;
+    }
+
+    case 'heartbeat_update_job': {
+      if (!data.jobId) {
+        logger.warn({ data }, 'heartbeat_update_job: missing jobId');
+        break;
+      }
+      // Resolve partial ID match
+      const allJobs = getAllHeartbeatJobs();
+      const matchingJob = allJobs.find(j => j.id === data.jobId || j.id.startsWith(data.jobId!));
+      if (!matchingJob) {
+        logger.warn({ jobId: data.jobId }, 'heartbeat_update_job: job not found');
+        break;
+      }
+      // Non-main can only update own jobs
+      if (!isMain && matchingJob.created_by !== sourceGroup) {
+        logger.warn({ jobId: data.jobId, sourceGroup }, 'Unauthorized heartbeat_update_job attempt');
+        break;
+      }
+      const patch: Partial<Pick<HeartbeatJob, 'label' | 'prompt' | 'category' | 'status' | 'interval_ms'>> = {};
+      if (data.label !== undefined) patch.label = data.label;
+      if (data.prompt !== undefined) patch.prompt = data.prompt;
+      if (data.category !== undefined) patch.category = data.category as HeartbeatJob['category'];
+      if (data.status !== undefined) patch.status = data.status as HeartbeatJob['status'];
+      if (data.interval_ms !== undefined) patch.interval_ms = data.interval_ms;
+      updateHeartbeatJob(matchingJob.id, patch);
+      writeHeartbeatJobsSnapshot();
+      logger.info({ jobId: matchingJob.id, patch, sourceGroup }, 'Heartbeat job updated via IPC');
+      break;
+    }
+
+    case 'heartbeat_remove_job': {
+      if (!data.jobId) {
+        logger.warn({ data }, 'heartbeat_remove_job: missing jobId');
+        break;
+      }
+      const allJobsForDelete = getAllHeartbeatJobs();
+      const targetJob = allJobsForDelete.find(j => j.id === data.jobId || j.id.startsWith(data.jobId!));
+      if (!targetJob) {
+        logger.warn({ jobId: data.jobId }, 'heartbeat_remove_job: job not found');
+        break;
+      }
+      if (!isMain && targetJob.created_by !== sourceGroup) {
+        logger.warn({ jobId: data.jobId, sourceGroup }, 'Unauthorized heartbeat_remove_job attempt');
+        break;
+      }
+      deleteHeartbeatJob(targetJob.id);
+      writeHeartbeatJobsSnapshot();
+      logger.info({ jobId: targetJob.id, sourceGroup }, 'Heartbeat job removed via IPC');
+      break;
+    }
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+/**
+ * Write current heartbeat jobs to a JSON snapshot for containers to read.
+ */
+export function writeHeartbeatJobsSnapshot(): void {
+  const jobs = getAllHeartbeatJobs();
+  const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+  const snapshotPath = path.join(ipcBaseDir, 'heartbeat_jobs.json');
+  try {
+    fs.mkdirSync(ipcBaseDir, { recursive: true });
+    const tempPath = `${snapshotPath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(jobs, null, 2));
+    fs.renameSync(tempPath, snapshotPath);
+  } catch (err) {
+    logger.warn({ err }, 'Failed to write heartbeat_jobs snapshot');
   }
 }

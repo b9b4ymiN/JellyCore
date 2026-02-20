@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, STORE_DIR } from './config.js';
-import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
+import { HeartbeatJob, NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
 
 let db: Database.Database;
 
@@ -103,6 +103,24 @@ function createSchema(database: Database.Database): void {
   for (const [sql] of phase6Migrations) {
     try { database.exec(sql); } catch { /* column already exists */ }
   }
+
+  // --- Heartbeat Jobs table ---
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS heartbeat_jobs (
+      id TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      label TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'custom',
+      status TEXT NOT NULL DEFAULT 'active',
+      interval_ms INTEGER,
+      last_run TEXT,
+      last_result TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL DEFAULT 'main'
+    );
+    CREATE INDEX IF NOT EXISTS idx_hb_jobs_status ON heartbeat_jobs(status);
+  `);
 }
 
 export function initDatabase(): void {
@@ -759,4 +777,80 @@ function migrateJsonState(): void {
       setRegisteredGroup(jid, group);
     }
   }
+}
+
+// --- Heartbeat Jobs CRUD ---
+
+export function createHeartbeatJob(job: HeartbeatJob): void {
+  db.prepare(
+    `INSERT INTO heartbeat_jobs (id, chat_jid, label, prompt, category, status, interval_ms, last_run, last_result, created_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    job.id,
+    job.chat_jid,
+    job.label,
+    job.prompt,
+    job.category,
+    job.status,
+    job.interval_ms,
+    job.last_run,
+    job.last_result,
+    job.created_at,
+    job.created_by,
+  );
+}
+
+export function getHeartbeatJob(id: string): HeartbeatJob | undefined {
+  return db.prepare('SELECT * FROM heartbeat_jobs WHERE id = ?').get(id) as HeartbeatJob | undefined;
+}
+
+export function getActiveHeartbeatJobs(): HeartbeatJob[] {
+  return db
+    .prepare(`SELECT * FROM heartbeat_jobs WHERE status = 'active' ORDER BY created_at`)
+    .all() as HeartbeatJob[];
+}
+
+export function getAllHeartbeatJobs(): HeartbeatJob[] {
+  return db
+    .prepare('SELECT * FROM heartbeat_jobs ORDER BY created_at DESC')
+    .all() as HeartbeatJob[];
+}
+
+export function getDueHeartbeatJobs(defaultIntervalMs: number): HeartbeatJob[] {
+  const now = Date.now();
+  return getActiveHeartbeatJobs().filter((job) => {
+    if (!job.last_run) return true; // Never run → due now
+    const interval = job.interval_ms ?? defaultIntervalMs;
+    const elapsed = now - new Date(job.last_run).getTime();
+    return elapsed >= interval;
+  });
+}
+
+export function updateHeartbeatJob(
+  id: string,
+  updates: Partial<Pick<HeartbeatJob, 'label' | 'prompt' | 'category' | 'status' | 'interval_ms'>>,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.label !== undefined) { fields.push('label = ?'); values.push(updates.label); }
+  if (updates.prompt !== undefined) { fields.push('prompt = ?'); values.push(updates.prompt); }
+  if (updates.category !== undefined) { fields.push('category = ?'); values.push(updates.category); }
+  if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
+  if (updates.interval_ms !== undefined) { fields.push('interval_ms = ?'); values.push(updates.interval_ms); }
+
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE heartbeat_jobs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function updateHeartbeatJobResult(id: string, result: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE heartbeat_jobs SET last_run = ?, last_result = ? WHERE id = ?`,
+  ).run(now, result, id);
+}
+
+export function deleteHeartbeatJob(id: string): void {
+  db.prepare('DELETE FROM heartbeat_jobs WHERE id = ?').run(id);
 }

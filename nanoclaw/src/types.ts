@@ -95,6 +95,33 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Heartbeat Jobs ---
+
+/** A user-configurable job that runs every heartbeat cycle. */
+export interface HeartbeatJob {
+  id: string;
+  /** Which group chat should receive the heartbeat results */
+  chat_jid: string;
+  /** Short human-readable label (e.g. "Monitor NVDA", "Health check") */
+  label: string;
+  /** Full prompt given to the AI agent when this job runs */
+  prompt: string;
+  /** Category for grouping in reports: learning, monitor, health, custom */
+  category: 'learning' | 'monitor' | 'health' | 'custom';
+  /** active | paused */
+  status: 'active' | 'paused';
+  /** Override interval for THIS job in ms. NULL = use global heartbeat interval (default 1h) */
+  interval_ms: number | null;
+  /** ISO timestamp of last execution */
+  last_run: string | null;
+  /** Summary of last execution result */
+  last_result: string | null;
+  /** ISO timestamp of creation */
+  created_at: string;
+  /** Who created it (group folder) */
+  created_by: string;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

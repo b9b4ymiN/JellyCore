@@ -50,14 +50,14 @@ import {
   updateTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { startIpcWatcher } from './ipc.js';
+import { startIpcWatcher, writeHeartbeatJobsSnapshot } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound, routeOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { startHealthServer, setStatusProvider, setHeartbeatProvider, recordError } from './health-server.js';
 import { resourceMonitor } from './resource-monitor.js';
-import { startHeartbeat, patchHeartbeatConfig, recordActivity } from './heartbeat.js';
+import { startHeartbeat, startHeartbeatJobRunner, patchHeartbeatConfig, recordActivity } from './heartbeat.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -883,6 +883,62 @@ async function main(): Promise<void> {
   // Start heartbeat system
   const stopHeartbeat = startHeartbeat(heartbeatStatusProvider);
   process.once('beforeExit', stopHeartbeat);
+
+  // Write initial heartbeat jobs snapshot for containers
+  writeHeartbeatJobsSnapshot();
+
+  // Start smart heartbeat job runner
+  const stopJobRunner = startHeartbeatJobRunner({
+    executeJobPrompt: async (job) => {
+      // Find the group for this job (default to main group)
+      const group = Object.values(registeredGroups).find(
+        (g) => g.folder === (job.created_by || MAIN_GROUP_FOLDER),
+      ) ?? Object.values(registeredGroups).find(
+        (g) => g.folder === MAIN_GROUP_FOLDER,
+      );
+
+      if (!group) {
+        throw new Error(`No group found for heartbeat job ${job.id}`);
+      }
+
+      const isMain = group.folder === MAIN_GROUP_FOLDER;
+      const targetJid = job.chat_jid || mainEntry?.[0] || '';
+
+      // Run via container agent (same as scheduled tasks)
+      return new Promise<string>((resolve, reject) => {
+        const jobTaskId = `hbjob-${job.id}-${Date.now()}`;
+
+        queue.enqueueTask(targetJid, jobTaskId, async () => {
+          try {
+            const { runContainerAgent } = await import('./container-runner.js');
+            const output = await runContainerAgent(
+              group,
+              {
+                prompt: `[Heartbeat Job: ${job.label}]\n\n${job.prompt}\n\nRespond with a concise summary of your findings/actions. Keep it brief and actionable.`,
+                groupFolder: group.folder,
+                chatJid: targetJid,
+                isMain,
+                isScheduledTask: true,
+              },
+              (proc, containerName) => {
+                queue.registerProcess(targetJid, proc, containerName, group.folder);
+              },
+            );
+
+            if (output.status === 'error') {
+              reject(new Error(output.error || 'Container agent failed'));
+            } else {
+              resolve(output.result || 'Completed (no output)');
+            }
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+    },
+    sendMessage: (jid, text) => sendToChannel(jid, text),
+  });
+  process.once('beforeExit', stopJobRunner);
 
   startMessageLoop();
 }

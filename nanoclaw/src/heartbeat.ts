@@ -1,23 +1,37 @@
 /**
- * NanoClaw Heartbeat System (v1.0)
+ * NanoClaw Heartbeat System (v2.0 — Smart Heartbeat)
  *
  * Sends periodic health snapshots to the main admin group.
+ * Now with user-configurable "Heartbeat Jobs" that run on each cycle:
+ * - Learning: AI research/study tasks
+ * - Monitor: Stock tracking, price alerts, news monitoring
+ * - Health: Personal health/wellness checks
+ * - Custom: Any user-defined recurring intelligence task
+ *
+ * Users configure jobs via chat → AI uses MCP tools to manage them.
+ * Jobs execute as lightweight prompts during each heartbeat cycle.
+ *
+ * Features:
  * - Fetches Oracle health + stats for a comprehensive status report
  * - Silence detection: alerts when there is no activity for N hours
  * - Fully configurable at runtime via IPC (AI can adjust settings)
  * - Self-escalating: increases frequency when errors are detected
+ * - Smart Jobs: user-configurable tasks that run with each heartbeat
  */
 
 import {
   HEARTBEAT_ENABLED,
   HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_JOB_DEFAULT_INTERVAL_MS,
+  HEARTBEAT_JOB_POLL_INTERVAL_MS,
   HEARTBEAT_SILENCE_THRESHOLD_MS,
   ORACLE_BASE_URL,
   TIMEZONE,
 } from './config.js';
-import { getAllTasks, getTaskRunLogs } from './db.js';
+import { getAllTasks, getDueHeartbeatJobs, getActiveHeartbeatJobs, getTaskRunLogs, updateHeartbeatJobResult } from './db.js';
 import { recentErrors } from './health-server.js';
 import { logger } from './logger.js';
+import { HeartbeatJob } from './types.js';
 
 // ── Runtime config (can be patched via IPC / heartbeat_config command) ──────
 
@@ -223,6 +237,30 @@ async function buildHeartbeatMessage(
     lines.push(``);
   }
 
+  // Smart Heartbeat Jobs summary
+  const activeJobs = getActiveHeartbeatJobs();
+  if (activeJobs.length > 0) {
+    const categoryEmoji: Record<string, string> = {
+      learning: '📚',
+      monitor: '📊',
+      health: '🏥',
+      custom: '🔧',
+    };
+    lines.push(`🧠 *Smart Jobs* (${activeJobs.length} active)`);
+    for (const job of activeJobs.slice(0, 5)) {
+      const emoji = categoryEmoji[job.category] ?? '🔧';
+      const lastResult = job.last_result
+        ? ` → ${job.last_result.slice(0, 60)}${job.last_result.length > 60 ? '…' : ''}`
+        : ' (ยังไม่เคยทำงาน)';
+      const intervalMin = (job.interval_ms ?? HEARTBEAT_JOB_DEFAULT_INTERVAL_MS) / 60000;
+      lines.push(`   ${emoji} ${job.label} (ทุก ${intervalMin}น.)${lastResult}`);
+    }
+    if (activeJobs.length > 5) {
+      lines.push(`   … และอีก ${activeJobs.length - 5} งาน`);
+    }
+    lines.push(``);
+  }
+
   // Footer
   if (reason === 'silence') {
     const silentMin = Math.floor((Date.now() - lastActivityTime) / 60000);
@@ -313,4 +351,172 @@ export async function triggerManualHeartbeat(
   provider: HeartbeatStatusProvider,
 ): Promise<void> {
   await sendHeartbeat('manual', provider);
+}
+
+// ── Smart Heartbeat Job Runner ───────────────────────────────────────────────
+
+/**
+ * Dependencies for the heartbeat job runner.
+ * Allows jobs to be executed through the existing container agent system.
+ */
+export interface HeartbeatJobRunnerDeps {
+  /**
+   * Execute a heartbeat job's prompt and return the result.
+   * This should enqueue the job as a message/task and wait for the result.
+   * Implementations can either:
+   * 1. Run via container agent (full AI capabilities)
+   * 2. Send as a message to the main group and collect response
+   */
+  executeJobPrompt: (job: HeartbeatJob) => Promise<string>;
+  /** Send a message to a JID (for reporting results) */
+  sendMessage: (jid: string, text: string) => Promise<void>;
+}
+
+/** Tracks recently completed job results for inclusion in heartbeat reports */
+const recentJobResults: Array<{ jobId: string; label: string; result: string; category: string; completedAt: number }> = [];
+const MAX_RECENT_RESULTS = 20;
+
+function trackJobResult(job: HeartbeatJob, result: string): void {
+  recentJobResults.push({
+    jobId: job.id,
+    label: job.label,
+    result,
+    category: job.category,
+    completedAt: Date.now(),
+  });
+  // Keep only recent results
+  while (recentJobResults.length > MAX_RECENT_RESULTS) {
+    recentJobResults.shift();
+  }
+}
+
+/** Get results from the last N hours for heartbeat reports */
+export function getRecentJobResults(withinMs: number = 24 * 60 * 60 * 1000): typeof recentJobResults {
+  const cutoff = Date.now() - withinMs;
+  return recentJobResults.filter(r => r.completedAt > cutoff);
+}
+
+/**
+ * Run a single heartbeat job.
+ * Returns the result string or throws on failure.
+ */
+async function executeHeartbeatJob(
+  job: HeartbeatJob,
+  deps: HeartbeatJobRunnerDeps,
+): Promise<string> {
+  const startTime = Date.now();
+  logger.info(
+    { jobId: job.id, label: job.label, category: job.category },
+    'Executing heartbeat job',
+  );
+
+  try {
+    const result = await deps.executeJobPrompt(job);
+    const durationMs = Date.now() - startTime;
+
+    // Update job result in DB
+    updateHeartbeatJobResult(job.id, result);
+    trackJobResult(job, result);
+
+    logger.info(
+      { jobId: job.id, label: job.label, durationMs },
+      'Heartbeat job completed',
+    );
+
+    return result;
+  } catch (err) {
+    const durationMs = Date.now() - startTime;
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    updateHeartbeatJobResult(job.id, `Error: ${errorMsg}`);
+    trackJobResult(job, `❌ ${errorMsg}`);
+
+    logger.error(
+      { jobId: job.id, label: job.label, error: errorMsg, durationMs },
+      'Heartbeat job failed',
+    );
+
+    throw err;
+  }
+}
+
+/**
+ * Poll for due heartbeat jobs and execute them in sequence.
+ * Running in sequence avoids overloading the container queue.
+ */
+async function runDueHeartbeatJobs(deps: HeartbeatJobRunnerDeps): Promise<void> {
+  const dueJobs = getDueHeartbeatJobs(HEARTBEAT_JOB_DEFAULT_INTERVAL_MS);
+
+  if (dueJobs.length === 0) return;
+
+  logger.info({ count: dueJobs.length }, 'Found due heartbeat jobs');
+
+  const { mainChatJid } = runtimeConfig;
+
+  for (const job of dueJobs) {
+    try {
+      const result = await executeHeartbeatJob(job, deps);
+
+      // Optionally send job result to the job's originating chat
+      if (mainChatJid && result) {
+        const categoryEmoji: Record<string, string> = {
+          learning: '📚',
+          monitor: '📊',
+          health: '🏥',
+          custom: '🔧',
+        };
+        const emoji = categoryEmoji[job.category] ?? '🔧';
+        const summary = result.length > 500 ? result.slice(0, 500) + '…' : result;
+        await deps.sendMessage(
+          job.chat_jid || mainChatJid,
+          `${emoji} *${job.label}*\n${summary}`,
+        );
+      }
+    } catch (err) {
+      // Already logged in executeHeartbeatJob — continue with next job
+      logger.debug({ jobId: job.id }, 'Continuing after job failure');
+    }
+  }
+}
+
+/**
+ * Start the heartbeat job runner.
+ * Polls for due jobs on a configurable interval (default 30s).
+ * Returns a cleanup function.
+ */
+export function startHeartbeatJobRunner(deps: HeartbeatJobRunnerDeps): () => void {
+  let running = false;
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped || running) return;
+    if (!runtimeConfig.enabled) return;
+
+    running = true;
+    try {
+      await runDueHeartbeatJobs(deps);
+    } catch (err) {
+      logger.error({ err }, 'Heartbeat job runner error');
+    } finally {
+      running = false;
+    }
+  };
+
+  const timer = setInterval(poll, HEARTBEAT_JOB_POLL_INTERVAL_MS);
+
+  // Run immediately on startup (after a short delay to let system initialize)
+  setTimeout(poll, 5000);
+
+  logger.info(
+    {
+      pollIntervalMs: HEARTBEAT_JOB_POLL_INTERVAL_MS,
+      defaultJobIntervalMs: HEARTBEAT_JOB_DEFAULT_INTERVAL_MS,
+    },
+    'Heartbeat job runner started',
+  );
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    logger.debug('Heartbeat job runner stopped');
+  };
 }
