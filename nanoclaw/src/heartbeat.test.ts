@@ -10,11 +10,24 @@ import {
   updateHeartbeatJob,
   updateHeartbeatJobResult,
   deleteHeartbeatJob,
+  createHeartbeatJobLog,
+  getHeartbeatJobLogs,
+  getRecentHeartbeatJobLogs,
 } from './db.js';
+import { startHeartbeatJobRunner, runDueHeartbeatJobs } from './heartbeat-jobs.js';
+import { patchHeartbeatConfig } from './heartbeat-config.js';
 import type { HeartbeatJob } from './types.js';
 
 beforeEach(() => {
   _initTestDatabase();
+  // Put heartbeat config into a known state for tests that use the runner
+  patchHeartbeatConfig({
+    enabled: true,
+    intervalMs: 3_600_000,
+    silenceThresholdMs: 7_200_000,
+    mainChatJid: 'main@g.us',
+    escalateAfterErrors: 3,
+  });
 });
 
 // --- Heartbeat Jobs CRUD ---
@@ -261,5 +274,183 @@ describe('heartbeat edge cases', () => {
     expect(due[0].id).toBe('hb-order-1');
     expect(due[1].id).toBe('hb-order-2');
     expect(due[2].id).toBe('hb-order-3');
+  });
+});
+// --- Heartbeat Job Log CRUD ---
+
+describe('createHeartbeatJobLog', () => {
+  it('creates a log entry retrievable by job ID', () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-log-1' }));
+    createHeartbeatJobLog({ job_id: 'hb-log-1', status: 'ok', result: 'All good', duration_ms: 1200, error: null });
+
+    const logs = getHeartbeatJobLogs('hb-log-1');
+    expect(logs).toHaveLength(1);
+    expect(logs[0].status).toBe('ok');
+    expect(logs[0].result).toBe('All good');
+    expect(logs[0].duration_ms).toBe(1200);
+    expect(logs[0].error).toBeNull();
+    expect(logs[0].run_at).toBeTruthy();
+  });
+
+  it('creates an error log entry', () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-log-err' }));
+    createHeartbeatJobLog({ job_id: 'hb-log-err', status: 'error', result: null, duration_ms: 500, error: 'Container timeout' });
+
+    const logs = getHeartbeatJobLogs('hb-log-err');
+    expect(logs[0].status).toBe('error');
+    expect(logs[0].result).toBeNull();
+    expect(logs[0].error).toBe('Container timeout');
+  });
+
+  it('respects the limit parameter', () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-log-limit' }));
+    for (let i = 0; i < 15; i++) {
+      createHeartbeatJobLog({ job_id: 'hb-log-limit', status: 'ok', result: `run-${i}`, duration_ms: 100, error: null });
+    }
+
+    const logs = getHeartbeatJobLogs('hb-log-limit', 5);
+    expect(logs).toHaveLength(5);
+  });
+
+  it('getRecentHeartbeatJobLogs returns across all jobs', () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-log-a' }));
+    createHeartbeatJob(createTestJob({ id: 'hb-log-b' }));
+    createHeartbeatJobLog({ job_id: 'hb-log-a', status: 'ok', result: 'A', duration_ms: 100, error: null });
+    createHeartbeatJobLog({ job_id: 'hb-log-b', status: 'ok', result: 'B', duration_ms: 200, error: null });
+
+    const recent = getRecentHeartbeatJobLogs();
+    expect(recent.length).toBeGreaterThanOrEqual(2);
+    const jobIds = recent.map(l => l.job_id);
+    expect(jobIds).toContain('hb-log-a');
+    expect(jobIds).toContain('hb-log-b');
+  });
+});
+
+// --- Claim mechanism (updateHeartbeatJobResult as claim sentinel) ---
+
+describe('claim mechanism', () => {
+  it('updateHeartbeatJobResult with __RUNNING__ stamps last_run without truthy result', () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-claim-1', last_run: null }));
+
+    // Before claim: due
+    expect(getDueHeartbeatJobs(3600000).map(j => j.id)).toContain('hb-claim-1');
+
+    // Claim
+    updateHeartbeatJobResult('hb-claim-1', '__RUNNING__');
+
+    const job = getHeartbeatJob('hb-claim-1');
+    expect(job!.last_run).not.toBeNull();
+    expect(job!.last_result).toBe('__RUNNING__');
+
+    // Not immediately due again (elapsed ~0ms, interval 1h)
+    expect(getDueHeartbeatJobs(3600000).map(j => j.id)).not.toContain('hb-claim-1');
+  });
+
+  it('claim then success overwrites __RUNNING__ with real result', () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-claim-2', last_run: null }));
+    updateHeartbeatJobResult('hb-claim-2', '__RUNNING__');
+    updateHeartbeatJobResult('hb-claim-2', 'Analysis complete: NVDA up 3%');
+
+    const job = getHeartbeatJob('hb-claim-2');
+    expect(job!.last_result).toBe('Analysis complete: NVDA up 3%');
+  });
+});
+
+// --- Job runner: poll and execute ---
+
+describe('runDueHeartbeatJobs', () => {
+  it('executes due jobs and updates DB', async () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-runner-1', last_run: null }));
+
+    const executed: string[] = [];
+    const count = await runDueHeartbeatJobs({
+      executeJobPrompt: async (job) => {
+        executed.push(job.id);
+        return 'Test result';
+      },
+      sendMessage: async () => {},
+    });
+
+    expect(count).toBe(1);
+    expect(executed).toContain('hb-runner-1');
+
+    const job = getHeartbeatJob('hb-runner-1');
+    expect(job!.last_result).toBe('Test result');
+    expect(job!.last_run).not.toBeNull();
+  });
+
+  it('returns 0 when no jobs are due', async () => {
+    createHeartbeatJob(createTestJob({
+      id: 'hb-runner-recent',
+      last_run: new Date().toISOString(),
+      interval_ms: 3_600_000,
+    }));
+
+    const count = await runDueHeartbeatJobs({
+      executeJobPrompt: async () => 'unused',
+      sendMessage: async () => {},
+    });
+
+    expect(count).toBe(0);
+  });
+
+  it('continues to next job when one job throws', async () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-runner-fail', last_run: null }));
+    createHeartbeatJob(createTestJob({ id: 'hb-runner-ok', last_run: null }));
+
+    const executed: string[] = [];
+    await runDueHeartbeatJobs({
+      executeJobPrompt: async (job) => {
+        executed.push(job.id);
+        if (job.id === 'hb-runner-fail') throw new Error('intentional failure');
+        return 'ok';
+      },
+      sendMessage: async () => {},
+    });
+
+    // Both attempted; second one recorded ok
+    expect(executed).toContain('hb-runner-fail');
+    expect(executed).toContain('hb-runner-ok');
+    expect(getHeartbeatJob('hb-runner-ok')!.last_result).toBe('ok');
+  });
+
+  it('records job log entries for each run', async () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-runner-log', last_run: null }));
+
+    await runDueHeartbeatJobs({
+      executeJobPrompt: async () => 'log this result',
+      sendMessage: async () => {},
+    });
+
+    const logs = getHeartbeatJobLogs('hb-runner-log');
+    expect(logs).toHaveLength(1);
+    expect(logs[0].status).toBe('ok');
+    expect(logs[0].result).toBe('log this result');
+    expect(logs[0].duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('records error log entries on failure', async () => {
+    createHeartbeatJob(createTestJob({ id: 'hb-runner-errlog', last_run: null }));
+
+    await runDueHeartbeatJobs({
+      executeJobPrompt: async () => { throw new Error('boom'); },
+      sendMessage: async () => {},
+    });
+
+    const logs = getHeartbeatJobLogs('hb-runner-errlog');
+    expect(logs).toHaveLength(1);
+    expect(logs[0].status).toBe('error');
+    expect(logs[0].error).toBe('boom');
+  });
+});
+
+describe('startHeartbeatJobRunner', () => {
+  it('starts and stops without error', () => {
+    const stop = startHeartbeatJobRunner({
+      executeJobPrompt: async () => 'ok',
+      sendMessage: async () => {},
+    });
+    expect(typeof stop).toBe('function');
+    stop();
   });
 });

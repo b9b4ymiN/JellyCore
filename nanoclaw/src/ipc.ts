@@ -551,6 +551,26 @@ export async function processTaskIpc(
       });
       // Write snapshot for containers to read
       writeHeartbeatJobsSnapshot();
+
+      // Write feedback file so the container knows the real job ID and can
+      // confirm creation (mirrors the pattern used by schedule_task)
+      try {
+        const feedbackDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'feedback');
+        fs.mkdirSync(feedbackDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(feedbackDir, `hbjob-created-${Date.now()}.json`),
+          JSON.stringify({
+            type: 'heartbeat_job_created',
+            jobId,
+            label: data.label,
+            category: data.category,
+            intervalMs: data.interval_ms ?? null,
+          }),
+        );
+      } catch (feedbackErr) {
+        logger.debug({ feedbackErr }, 'Failed to write heartbeat job feedback (non-fatal)');
+      }
+
       logger.info(
         { jobId, label: data.label, category: data.category, sourceGroup },
         'Heartbeat job created via IPC',
@@ -614,17 +634,48 @@ export async function processTaskIpc(
 }
 
 /**
- * Write current heartbeat jobs to a JSON snapshot for containers to read.
+ * Write current heartbeat jobs to JSON snapshot files that containers can read.
+ *
+ * Each group container mounts `data/ipc/{groupFolder}/` as `/workspace/ipc`, so the
+ * snapshot must live inside **each** group's directory. We also write the root
+ * `data/ipc/heartbeat_jobs.json` for backwards-compatible host-side reads.
  */
 export function writeHeartbeatJobsSnapshot(): void {
   const jobs = getAllHeartbeatJobs();
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
-  const snapshotPath = path.join(ipcBaseDir, 'heartbeat_jobs.json');
+  const content = JSON.stringify(jobs, null, 2);
   try {
     fs.mkdirSync(ipcBaseDir, { recursive: true });
-    const tempPath = `${snapshotPath}.tmp`;
-    fs.writeFileSync(tempPath, JSON.stringify(jobs, null, 2));
-    fs.renameSync(tempPath, snapshotPath);
+
+    // Discover all group subdirectories
+    let groupDirs: string[] = [];
+    try {
+      groupDirs = fs.readdirSync(ipcBaseDir).filter((f) => {
+        try {
+          return fs.statSync(path.join(ipcBaseDir, f)).isDirectory() && f !== 'errors';
+        } catch { return false; }
+      });
+    } catch {
+      groupDirs = [];
+    }
+
+    // Write to each group directory (per-group mount: /workspace/ipc)
+    for (const group of groupDirs) {
+      try {
+        const snapshotPath = path.join(ipcBaseDir, group, 'heartbeat_jobs.json');
+        const tempPath = `${snapshotPath}.tmp`;
+        fs.writeFileSync(tempPath, content);
+        fs.renameSync(tempPath, snapshotPath);
+      } catch (err) {
+        logger.warn({ err, group }, 'Failed to write heartbeat_jobs snapshot for group');
+      }
+    }
+
+    // Also write to the root IPC dir for host-side reads
+    const rootSnapshotPath = path.join(ipcBaseDir, 'heartbeat_jobs.json');
+    const tempPath = `${rootSnapshotPath}.tmp`;
+    fs.writeFileSync(tempPath, content);
+    fs.renameSync(tempPath, rootSnapshotPath);
   } catch (err) {
     logger.warn({ err }, 'Failed to write heartbeat_jobs snapshot');
   }

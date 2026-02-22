@@ -115,6 +115,11 @@ export const HEARTBEAT_JOB_POLL_INTERVAL_MS = parseInt(
   process.env.HEARTBEAT_JOB_POLL_INTERVAL_MS || '30000',
   10,
 );
+/** Hard timeout for a single heartbeat job execution (default 10 minutes) */
+export const HEARTBEAT_JOB_TIMEOUT_MS = parseInt(
+  process.env.HEARTBEAT_JOB_TIMEOUT_MINUTES || '10',
+  10,
+) * 60 * 1000;
 
 // --- Task defaults ---
 // Hard cap per scheduled task run (prevents hung containers)

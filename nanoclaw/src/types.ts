@@ -122,6 +122,22 @@ export interface HeartbeatJob {
   created_by: string;
 }
 
+/** Per-run log entry for a HeartbeatJob execution. */
+export interface HeartbeatJobLog {
+  id: number;
+  job_id: string;
+  /** ISO timestamp of the run */
+  run_at: string;
+  /** 'ok' | 'error' */
+  status: string;
+  /** Truncated result string, or null on error */
+  result: string | null;
+  /** Wall-clock duration in ms */
+  duration_ms: number;
+  /** Error message, or null on success */
+  error: string | null;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

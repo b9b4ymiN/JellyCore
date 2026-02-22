@@ -7,6 +7,8 @@ import {
   getRegisteredGroup,
   getTaskById,
   setRegisteredGroup,
+  getAllHeartbeatJobs,
+  getHeartbeatJob,
 } from './db.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
@@ -590,5 +592,240 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+// --- heartbeat_add_job authorization ---
+
+describe('heartbeat_add_job authorization', () => {
+  it('any group can add a heartbeat job', async () => {
+    await processTaskIpc(
+      {
+        type: 'heartbeat_add_job',
+        label: 'Monitor NVDA',
+        prompt: 'Check NVDA stock price',
+        category: 'monitor',
+        interval_ms: 1800000,
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    const jobs = getAllHeartbeatJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].label).toBe('Monitor NVDA');
+    expect(jobs[0].created_by).toBe('other-group');
+  });
+
+  it('main group can also add a heartbeat job', async () => {
+    await processTaskIpc(
+      {
+        type: 'heartbeat_add_job',
+        label: 'Reflection Coach',
+        prompt: 'Ask a thought-provoking question',
+        category: 'learning',
+      },
+      'main',
+      true,
+      deps,
+    );
+
+    const jobs = getAllHeartbeatJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].created_by).toBe('main');
+  });
+
+  it('rejects add with missing required fields', async () => {
+    await processTaskIpc(
+      {
+        type: 'heartbeat_add_job',
+        // missing label and prompt
+        category: 'custom',
+      },
+      'main',
+      true,
+      deps,
+    );
+
+    expect(getAllHeartbeatJobs()).toHaveLength(0);
+  });
+});
+
+// --- heartbeat_update_job authorization ---
+
+describe('heartbeat_update_job authorization', () => {
+  const seedJob = () => ({
+    id: 'hb-auth-001',
+    chat_jid: 'other@g.us',
+    label: 'Original Label',
+    prompt: 'Original prompt',
+    category: 'custom' as const,
+    status: 'active' as const,
+    interval_ms: null,
+    last_run: null,
+    last_result: null,
+    created_at: new Date().toISOString(),
+    created_by: 'other-group',
+  });
+
+  it('main group can update any job', async () => {
+    const { createHeartbeatJob } = await import('./db.js');
+    createHeartbeatJob(seedJob());
+
+    await processTaskIpc(
+      { type: 'heartbeat_update_job', jobId: 'hb-auth-001', label: 'Updated by Main' },
+      'main',
+      true,
+      deps,
+    );
+
+    const job = getHeartbeatJob('hb-auth-001');
+    expect(job!.label).toBe('Updated by Main');
+  });
+
+  it('owning group can update its own job', async () => {
+    const { createHeartbeatJob } = await import('./db.js');
+    createHeartbeatJob(seedJob());
+
+    await processTaskIpc(
+      { type: 'heartbeat_update_job', jobId: 'hb-auth-001', label: 'Updated by Owner' },
+      'other-group',
+      false,
+      deps,
+    );
+
+    const job = getHeartbeatJob('hb-auth-001');
+    expect(job!.label).toBe('Updated by Owner');
+  });
+
+  it('non-owning group cannot update another group\'s job', async () => {
+    const { createHeartbeatJob } = await import('./db.js');
+    createHeartbeatJob(seedJob());
+
+    await processTaskIpc(
+      { type: 'heartbeat_update_job', jobId: 'hb-auth-001', label: 'Hijacked Label' },
+      'third-group',
+      false,
+      deps,
+    );
+
+    const job = getHeartbeatJob('hb-auth-001');
+    // Label should remain unchanged
+    expect(job!.label).toBe('Original Label');
+  });
+
+  it('partial ID matching works for update', async () => {
+    const { createHeartbeatJob } = await import('./db.js');
+    createHeartbeatJob(seedJob());
+
+    await processTaskIpc(
+      { type: 'heartbeat_update_job', jobId: 'hb-auth', label: 'Partial Match Update' },
+      'main',
+      true,
+      deps,
+    );
+
+    const job = getHeartbeatJob('hb-auth-001');
+    expect(job!.label).toBe('Partial Match Update');
+  });
+});
+
+// --- heartbeat_remove_job authorization ---
+
+describe('heartbeat_remove_job authorization', () => {
+  const seedJob = () => ({
+    id: 'hb-rm-001',
+    chat_jid: 'other@g.us',
+    label: 'To Remove',
+    prompt: 'Some prompt',
+    category: 'custom' as const,
+    status: 'active' as const,
+    interval_ms: null,
+    last_run: null,
+    last_result: null,
+    created_at: new Date().toISOString(),
+    created_by: 'other-group',
+  });
+
+  it('main group can remove any job', async () => {
+    const { createHeartbeatJob } = await import('./db.js');
+    createHeartbeatJob(seedJob());
+
+    await processTaskIpc(
+      { type: 'heartbeat_remove_job', jobId: 'hb-rm-001' },
+      'main',
+      true,
+      deps,
+    );
+
+    expect(getHeartbeatJob('hb-rm-001')).toBeUndefined();
+  });
+
+  it('owning group can remove its own job', async () => {
+    const { createHeartbeatJob } = await import('./db.js');
+    createHeartbeatJob(seedJob());
+
+    await processTaskIpc(
+      { type: 'heartbeat_remove_job', jobId: 'hb-rm-001' },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(getHeartbeatJob('hb-rm-001')).toBeUndefined();
+  });
+
+  it('non-owning group cannot remove another group\'s job', async () => {
+    const { createHeartbeatJob } = await import('./db.js');
+    createHeartbeatJob(seedJob());
+
+    await processTaskIpc(
+      { type: 'heartbeat_remove_job', jobId: 'hb-rm-001' },
+      'third-group',
+      false,
+      deps,
+    );
+
+    // Job must still exist
+    expect(getHeartbeatJob('hb-rm-001')).toBeDefined();
+  });
+});
+
+// --- heartbeat_config authorization ---
+
+describe('heartbeat_config authorization', () => {
+  it('main group can configure heartbeat', async () => {
+    let patched = false;
+    const depsWithPatch: typeof deps = {
+      ...deps,
+      patchHeartbeatConfig: (patch) => { if (patch.enabled !== undefined) patched = true; },
+    };
+
+    await processTaskIpc(
+      { type: 'heartbeat_config', heartbeat: { enabled: false } },
+      'main',
+      true,
+      depsWithPatch,
+    );
+
+    // patchHeartbeatConfig should have been called
+    expect(patched).toBe(true);
+  });
+
+  it('non-main group cannot configure heartbeat', async () => {
+    let patched = false;
+    const depsWithPatch: typeof deps = {
+      ...deps,
+      patchHeartbeatConfig: () => { patched = true; },
+    };
+
+    await processTaskIpc(
+      { type: 'heartbeat_config', heartbeat: { enabled: false } },
+      'other-group',
+      false,
+      depsWithPatch,
+    );
+
+    expect(patched).toBe(false);
   });
 });

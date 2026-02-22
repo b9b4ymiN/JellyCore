@@ -365,6 +365,7 @@ Results are sent to this chat and included in heartbeat reports.`,
     interval_minutes: z.number().optional().describe('Run interval in minutes (default: 60). Use null for system default.'),
   },
   async (args) => {
+    const clientTs = Date.now();
     const data = {
       type: 'heartbeat_add_job',
       label: args.label,
@@ -378,10 +379,45 @@ Results are sent to this chat and included in heartbeat reports.`,
 
     const filename = writeIpcFile(TASKS_DIR, data);
 
+    // Poll for feedback from the host to confirm the job was created.
+    // The host writes data/ipc/{group}/feedback/hbjob-created-{ts}.json after
+    // processing the IPC file. We wait up to 4 seconds.
+    const feedbackDir = path.join(IPC_DIR, 'feedback');
+    let confirmedJobId: string | null = null;
+    const deadline = clientTs + 4000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 200));
+      if (!fs.existsSync(feedbackDir)) continue;
+      try {
+        const entries = fs.readdirSync(feedbackDir).filter(f => f.startsWith('hbjob-created-') && f.endsWith('.json'));
+        for (const entry of entries) {
+          const entryTs = parseInt(entry.replace('hbjob-created-', '').replace('.json', ''), 10);
+          if (entryTs >= clientTs) {
+            try {
+              const feedback = JSON.parse(fs.readFileSync(path.join(feedbackDir, entry), 'utf-8'));
+              confirmedJobId = feedback.jobId ?? null;
+            } catch { /* ignore parse errors */ }
+            break;
+          }
+        }
+      } catch { /* ignore readdir errors */ }
+      if (confirmedJobId) break;
+    }
+
+    if (confirmedJobId) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `✅ Heartbeat job "${args.label}" created successfully (ID: ${confirmedJobId.slice(0, 8)}).\nCategory: ${args.category} | Interval: ${args.interval_minutes ?? 60} min.\n\nJob is now active — first run in ~${args.interval_minutes ?? 60} min.`,
+        }],
+      };
+    }
+
+    // Fallback (host may be slow to process)
     return {
       content: [{
         type: 'text' as const,
-        text: `✅ Heartbeat job "${args.label}" added (${filename}). Category: ${args.category}, Interval: ${args.interval_minutes ?? 60} min.`,
+        text: `✅ Heartbeat job "${args.label}" queued (${filename}). Category: ${args.category}, Interval: ${args.interval_minutes ?? 60} min.\n⚠️ Could not confirm creation within 4s — use list_heartbeat_jobs to verify.`,
       }],
     };
   },
@@ -394,35 +430,55 @@ server.tool(
   async () => {
     const jobsFile = path.join(IPC_DIR, 'heartbeat_jobs.json');
 
+    // Helper: read and format the snapshot file
+    const readSnapshot = (): string | null => {
+      try {
+        if (!fs.existsSync(jobsFile)) return null;
+        const jobs = JSON.parse(fs.readFileSync(jobsFile, 'utf-8'));
+        if (!Array.isArray(jobs) || jobs.length === 0) return '';
+
+        const categoryEmoji: Record<string, string> = {
+          learning: '📚',
+          monitor: '📊',
+          health: '🏥',
+          custom: '🔧',
+        };
+
+        return jobs
+          .map(
+            (j: { id: string; label: string; category: string; status: string; interval_ms: number | null; last_run: string | null; last_result: string | null }) => {
+              const emoji = categoryEmoji[j.category] ?? '🔧';
+              const intervalMin = j.interval_ms ? j.interval_ms / 60000 : 60;
+              const lastRun = j.last_run ? new Date(j.last_run).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' }) : 'ยังไม่เคย';
+              const rawResult = j.last_result;
+              const lastResult = rawResult === '__RUNNING__'
+                ? '⏳ กำลังทำงาน'
+                : (rawResult ? rawResult.slice(0, 100) : '-');
+              return `${emoji} [${j.id.slice(0, 8)}] ${j.label}\n   Status: ${j.status} | ทุก ${intervalMin}น. | Last: ${lastRun}\n   Result: ${lastResult}`;
+            },
+          )
+          .join('\n\n');
+      } catch {
+        return null;
+      }
+    };
+
     try {
-      if (!fs.existsSync(jobsFile)) {
-        return { content: [{ type: 'text' as const, text: 'No heartbeat jobs configured yet. Use add_heartbeat_job to create one.' }] };
+      let formatted = readSnapshot();
+
+      // If snapshot is missing or empty, wait briefly for the host to process
+      // any recently submitted IPC files (race condition after add_heartbeat_job)
+      if (formatted === null || formatted === '') {
+        await new Promise(r => setTimeout(r, 1500));
+        formatted = readSnapshot();
       }
 
-      const jobs = JSON.parse(fs.readFileSync(jobsFile, 'utf-8'));
-
-      if (jobs.length === 0) {
+      if (formatted === null) {
         return { content: [{ type: 'text' as const, text: 'No heartbeat jobs configured yet. Use add_heartbeat_job to create one.' }] };
       }
-
-      const categoryEmoji: Record<string, string> = {
-        learning: '📚',
-        monitor: '📊',
-        health: '🏥',
-        custom: '🔧',
-      };
-
-      const formatted = jobs
-        .map(
-          (j: { id: string; label: string; category: string; status: string; interval_ms: number | null; last_run: string | null; last_result: string | null }) => {
-            const emoji = categoryEmoji[j.category] ?? '🔧';
-            const intervalMin = j.interval_ms ? j.interval_ms / 60000 : 60;
-            const lastRun = j.last_run ? new Date(j.last_run).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' }) : 'ยังไม่เคย';
-            const lastResult = j.last_result ? j.last_result.slice(0, 100) : '-';
-            return `${emoji} [${j.id.slice(0, 8)}] ${j.label}\n   Status: ${j.status} | ทุก ${intervalMin}น. | Last: ${lastRun}\n   Result: ${lastResult}`;
-          },
-        )
-        .join('\n\n');
+      if (formatted === '') {
+        return { content: [{ type: 'text' as const, text: 'No heartbeat jobs configured yet. Use add_heartbeat_job to create one.' }] };
+      }
 
       return { content: [{ type: 'text' as const, text: `Smart Heartbeat Jobs:\n\n${formatted}` }] };
     } catch (err) {

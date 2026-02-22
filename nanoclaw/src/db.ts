@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, STORE_DIR } from './config.js';
-import { HeartbeatJob, NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
+import { HeartbeatJob, HeartbeatJobLog, NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
 
 let db: Database.Database;
 
@@ -120,6 +120,21 @@ function createSchema(database: Database.Database): void {
       created_by TEXT NOT NULL DEFAULT 'main'
     );
     CREATE INDEX IF NOT EXISTS idx_hb_jobs_status ON heartbeat_jobs(status);
+  `);
+
+  // --- Heartbeat Job Log table ---
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS heartbeat_job_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id TEXT NOT NULL,
+      run_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ok',
+      result TEXT,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_hb_log_job_id ON heartbeat_job_log(job_id);
+    CREATE INDEX IF NOT EXISTS idx_hb_log_run_at ON heartbeat_job_log(run_at);
   `);
 }
 
@@ -853,4 +868,53 @@ export function updateHeartbeatJobResult(id: string, result: string): void {
 
 export function deleteHeartbeatJob(id: string): void {
   db.prepare('DELETE FROM heartbeat_jobs WHERE id = ?').run(id);
+}
+
+// --- Heartbeat Job Log CRUD ---
+
+/** Record a completed (or failed) heartbeat job run. */
+export function createHeartbeatJobLog(
+  entry: Omit<HeartbeatJobLog, 'id' | 'run_at'>,
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO heartbeat_job_log (job_id, run_at, status, result, duration_ms, error)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    entry.job_id,
+    now,
+    entry.status,
+    entry.result ?? null,
+    entry.duration_ms,
+    entry.error ?? null,
+  );
+}
+
+/**
+ * Get run logs for a specific heartbeat job, most recent first.
+ * @param limit Maximum number of entries to return (default 10).
+ */
+export function getHeartbeatJobLogs(
+  jobId: string,
+  limit: number = 10,
+): HeartbeatJobLog[] {
+  return db
+    .prepare(
+      `SELECT * FROM heartbeat_job_log WHERE job_id = ?
+       ORDER BY run_at DESC LIMIT ?`,
+    )
+    .all(jobId, limit) as HeartbeatJobLog[];
+}
+
+/**
+ * Get recent job logs across all jobs, most recent first.
+ */
+export function getRecentHeartbeatJobLogs(
+  limit: number = 20,
+): HeartbeatJobLog[] {
+  return db
+    .prepare(
+      `SELECT * FROM heartbeat_job_log ORDER BY run_at DESC LIMIT ?`,
+    )
+    .all(limit) as HeartbeatJobLog[];
 }
