@@ -24,6 +24,7 @@ import {
   logTaskRun,
   resetRetryCount,
   scheduleRetry,
+  updateTask,
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
@@ -123,7 +124,7 @@ async function runTask(
   const hardTimeoutTimer = setTimeout(() => {
     hardTimeoutFired = true;
     logger.error({ taskId: task.id, timeoutMs: effectiveTimeout }, 'Task hard timeout — forcing stdin close');
-    deps.queue.closeStdin(task.chat_jid);
+    deps.queue.closeStdin('_sched_' + task.id);
   }, effectiveTimeout);
 
   // For group context mode, use the group's current session
@@ -138,7 +139,7 @@ async function runTask(
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Scheduled task idle timeout, closing container stdin');
-      deps.queue.closeStdin(task.chat_jid);
+      deps.queue.closeStdin('_sched_' + task.id);
     }, IDLE_TIMEOUT);
   };
 
@@ -153,7 +154,7 @@ async function runTask(
         isMain,
         isScheduledTask: true,
       },
-      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+      (proc, containerName) => deps.onProcess('_sched_' + task.id, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -221,6 +222,17 @@ async function runTask(
       result: null,
       error,
     });
+    // Auto-pause tasks that have exhausted their retry budget to prevent infinite failure loops
+    if (effectiveMaxRetries > 0) {
+      updateTask(task.id, { status: 'paused' });
+      logger.warn({ taskId: task.id, maxRetries: effectiveMaxRetries }, 'Task auto-paused after retry exhaustion');
+      try {
+        await deps.sendMessage(
+          task.chat_jid,
+          `⚠️ Task "${task.label ?? task.id.slice(0, 8)}" ถูกหยุดอัตโนมัติหลังจากล้มเหลว ${effectiveMaxRetries} ครั้งติดต่อกัน\n\nสาเหตุ: ${error}\n\nใช้ resume_task เพื่อเริ่มใหม่ครับ`,
+        );
+      } catch { /* non-fatal */ }
+    }
   } else {
     // Success — reset retry counter
     resetRetryCount(task.id);
@@ -296,8 +308,9 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
+        // Use a virtual JID so scheduled tasks never block the user's message queue
         deps.queue.enqueueTask(
-          currentTask.chat_jid,
+          '_sched_' + currentTask.id,
           currentTask.id,
           () => runTask(currentTask, deps),
         );

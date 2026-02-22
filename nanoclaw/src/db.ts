@@ -866,6 +866,22 @@ export function updateHeartbeatJobResult(id: string, result: string): void {
   ).run(now, result, id);
 }
 
+/**
+ * Reset jobs stuck in __RUNNING__ state (written before execution starts).
+ * Called on startup to clean up stale state from a previous crash or restart.
+ * Returns the number of jobs recovered.
+ */
+export function recoverStaleHeartbeatJobs(): number {
+  const result = db
+    .prepare(
+      `UPDATE heartbeat_jobs
+       SET last_result = 'Error: process interrupted (recovered on restart)'
+       WHERE last_result = '__RUNNING__'`,
+    )
+    .run();
+  return result.changes;
+}
+
 export function deleteHeartbeatJob(id: string): void {
   db.prepare('DELETE FROM heartbeat_jobs WHERE id = ?').run(id);
 }

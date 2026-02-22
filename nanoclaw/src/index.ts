@@ -324,16 +324,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }, 4000);
   activeTypingIntervals.add(typingInterval);
 
-  // Send a progress message after 20s of silence so user knows we're alive
-  let progressSent = false;
-  const progressTimer = setTimeout(async () => {
-    if (!outputSentToUser && !progressSent) {
-      progressSent = true;
-      try {
-        await sendToChannel(chatJid, '⏳ กำลังคิดอยู่ค่ะ รอสักครู่นะคะ...');
-      } catch { /* ignore */ }
-    }
-  }, 20_000);
+  // Escalating progress messages so the user knows we're still working
+  const progressTimers: ReturnType<typeof setTimeout>[] = [];
+  const scheduleProgress = (delayMs: number, msg: string) => {
+    progressTimers.push(setTimeout(async () => {
+      if (!outputSentToUser) {
+        try { await sendToChannel(chatJid, msg); } catch { /* ignore */ }
+      }
+    }, delayMs));
+  };
+  scheduleProgress(20_000,       '⏳ กำลังคิดอยู่ค่ะ รอสักครู่นะคะ...');
+  scheduleProgress(3 * 60_000,   '⏳ ยังประมวลผลอยู่ครับ (3 นาที)...');
+  scheduleProgress(6 * 60_000,   '⏳ งานนี้ใช้เวลาหน่อยนะครับ (6 นาที)...');
+  scheduleProgress(10 * 60_000,  '⏳ กำลังทำงานอยู่ครับ ซับซ้อนหน่อย (10 นาที)...');
 
   let ch: Channel;
   try {
@@ -342,7 +345,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Channel disconnected before we could start — clean up timers and bail
     clearInterval(typingInterval);
     activeTypingIntervals.delete(typingInterval);
-    clearTimeout(progressTimer);
+    progressTimers.forEach(clearTimeout);
     if (idleTimer) clearTimeout(idleTimer);
     logger.warn({ chatJid, err }, 'Channel unavailable, aborting message processing');
     return false;
@@ -361,8 +364,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           if (text) {
             await sendToChannel(chatJid, formatOutbound(ch, text));
             outputSentToUser = true;
-            // Cancel progress message once we have real output
-            clearTimeout(progressTimer);
+            // Cancel all progress messages once we have real output
+            progressTimers.forEach(clearTimeout);
           }
           // Only reset idle timer on actual results, not session-update markers (result: null)
           resetIdleTimer();
@@ -380,7 +383,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // ALWAYS clean up timers — even if runAgent() throws
     clearInterval(typingInterval);
     activeTypingIntervals.delete(typingInterval);
-    clearTimeout(progressTimer);
+    progressTimers.forEach(clearTimeout);
     if (idleTimer) clearTimeout(idleTimer);
     await setTypingOnChannel(chatJid, false);
   }
@@ -844,6 +847,16 @@ async function main(): Promise<void> {
     }
   });
 
+  queue.onQueued(async (groupJid, position) => {
+    // Skip virtual JIDs used by the scheduler — no user to notify
+    if (groupJid.startsWith('_sched_')) return;
+    try {
+      await sendToChannel(groupJid, `📥 ได้รับแล้วครับ กำลังเข้าคิว (ตำแหน่ง #${position})...`);
+    } catch (err) {
+      logger.warn({ groupJid, err }, 'Failed to send queue-position notification');
+    }
+  });
+
   recoverPendingMessages();
 
   // Pre-warm pool containers for the main group
@@ -908,37 +921,29 @@ async function main(): Promise<void> {
       const isMain = group.folder === MAIN_GROUP_FOLDER;
       const targetJid = job.chat_jid || mainEntry?.[0] || '';
 
-      // Run via container agent (same as scheduled tasks)
-      return new Promise<string>((resolve, reject) => {
-        const jobTaskId = `hbjob-${job.id}-${Date.now()}`;
+      // Run container DIRECTLY — intentionally bypassing the user message queue.
+      // Heartbeat jobs use their own concurrency control (BATCH_CONCURRENCY in
+      // heartbeat-jobs.ts) and must not block nor be blocked by user messages.
+      const { runContainerAgent } = await import('./container-runner.js');
+      const output = await runContainerAgent(
+        group,
+        {
+          prompt: `[Heartbeat Job: ${job.label}]\n\n${job.prompt}\n\nRespond with a concise summary of your findings/actions. Keep it brief and actionable.`,
+          groupFolder: group.folder,
+          chatJid: targetJid,
+          isMain,
+          isScheduledTask: true,
+        },
+        (_proc, _containerName) => {
+          // Heartbeat containers are not registered in the user queue;
+          // they are managed by the container-runner's own lifecycle.
+        },
+      );
 
-        queue.enqueueTask(targetJid, jobTaskId, async () => {
-          try {
-            const { runContainerAgent } = await import('./container-runner.js');
-            const output = await runContainerAgent(
-              group,
-              {
-                prompt: `[Heartbeat Job: ${job.label}]\n\n${job.prompt}\n\nRespond with a concise summary of your findings/actions. Keep it brief and actionable.`,
-                groupFolder: group.folder,
-                chatJid: targetJid,
-                isMain,
-                isScheduledTask: true,
-              },
-              (proc, containerName) => {
-                queue.registerProcess(targetJid, proc, containerName, group.folder);
-              },
-            );
-
-            if (output.status === 'error') {
-              reject(new Error(output.error || 'Container agent failed'));
-            } else {
-              resolve(output.result || 'Completed (no output)');
-            }
-          } catch (err) {
-            reject(err);
-          }
-        });
-      });
+      if (output.status === 'error') {
+        throw new Error(output.error || 'Container agent failed');
+      }
+      return output.result || 'Completed (no output)';
     },
     sendMessage: (jid, text) => sendToChannel(jid, text),
   });

@@ -20,6 +20,7 @@ import {
   getDueHeartbeatJobs,
   updateHeartbeatJobResult,
   createHeartbeatJobLog,
+  recoverStaleHeartbeatJobs,
 } from './db.js';
 import { logger } from './logger.js';
 import { getHeartbeatConfig } from './heartbeat-config.js';
@@ -191,6 +192,12 @@ export async function runDueHeartbeatJobs(deps: HeartbeatJobRunnerDeps): Promise
 export function startHeartbeatJobRunner(deps: HeartbeatJobRunnerDeps): () => void {
   let running = false;
   let stopped = false;
+
+  // Clean up any jobs left in __RUNNING__ state from a previous crash / restart
+  const recovered = recoverStaleHeartbeatJobs();
+  if (recovered > 0) {
+    logger.warn({ recovered }, 'Recovered stale __RUNNING__ heartbeat jobs from previous crash');
+  }
 
   const poll = async () => {
     if (stopped || running) return;
