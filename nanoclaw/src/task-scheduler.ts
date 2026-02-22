@@ -229,7 +229,7 @@ async function runTask(
       try {
         await deps.sendMessage(
           task.chat_jid,
-          `⚠️ Task "${task.label ?? task.id.slice(0, 8)}" ถูกหยุดอัตโนมัติหลังจากล้มเหลว ${effectiveMaxRetries} ครั้งติดต่อกัน\n\nสาเหตุ: ${error}\n\nใช้ resume_task เพื่อเริ่มใหม่ครับ`,
+          `⚠️ Task "${task.label ?? task.id.slice(0, 8)}" has failed ${effectiveMaxRetries} times in a row\n\nReason: ${error}\n\nUse resume_task to start again`,
         );
       } catch { /* non-fatal */ }
     }

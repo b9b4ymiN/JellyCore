@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.6.0-blue" alt="v0.6.0">
+  <img src="https://img.shields.io/badge/version-0.8.1-blue" alt="v0.8.1">
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node.js 22+">
   <img src="https://img.shields.io/badge/bun-%3E%3D1.2-orange" alt="Bun 1.2+">
   <img src="https://img.shields.io/badge/docker-compose%20v2-blue" alt="Docker Compose v2">
@@ -22,11 +22,11 @@ JellyCore เป็นแพลตฟอร์ม AI ส่วนตัวแบ
 | **NanoClaw** | AI orchestrator — routes messages, spawns agent containers, manages queues | Node.js 22, TypeScript, grammY |
 | **Oracle V2** | Knowledge engine — adaptive hybrid search (FTS5 + vector), bilingual chunking | Bun, SQLite, Drizzle ORM, Hono.js |
 | **ChromaDB** | Vector database — semantic similarity search with token auth | ChromaDB 0.4.24 |
-| **Thai NLP** | Thai language sidecar — tokenization, normalization, spellcheck | Python, PyThaiNLP, FastAPI |
+| **Thai NLP** | Thai language sidecar — tokenization, normalization, spellcheck *(optional, disabled by default)* | Python, PyThaiNLP, FastAPI |
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                        JellyCore v0.6.0                      │
+│                        JellyCore v0.8.1                      │
 │                                                              │
 │  ┌──────────┐    ┌──────────────┐    ┌────────────────────┐  │
 │  │ Telegram │───▶│   NanoClaw   │───▶│  Agent Container   │  │
@@ -51,7 +51,7 @@ JellyCore เป็นแพลตฟอร์ม AI ส่วนตัวแบ
 - **Agent Swarms** — สร้างทีม AI agents ที่ทำงานร่วมกันในบทสนทนาเดียว
 - **Scheduled Tasks** — Cron-based scheduling ผ่าน NanoClaw
 
-### Search Intelligence (v0.6.0)
+### Search Intelligence (v0.8.1)
 - **Adaptive Hybrid Search** — วิเคราะห์ query type (exact/semantic/mixed) แล้วปรับ FTS5 vs Vector weight อัตโนมัติ
 - **Quality Correction** — วัด search result quality แล้ว override classifier ถ้าผิด (dampened priors + relevance metric)
 - **Pluggable Embedding Models** — สลับ embedding model ได้ทันที (default: all-MiniLM-L6-v2, option: multilingual-e5-small)

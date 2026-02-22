@@ -4,21 +4,24 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process that connects to WhatsApp, routes messages to Claude Agent SDK running in Apple Container (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process that connects to Telegram, routes messages to Claude Agent SDK running in Docker containers. Each group has isolated filesystem and memory.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
+| `src/channels/telegram.ts` | Telegram bot connection, grammY, send/receive |
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
+| `src/heartbeat-config.ts` | Heartbeat runtime config, activity/error tracking |
+| `src/heartbeat-reporter.ts` | Status message builder, restartable timers |
+| `src/heartbeat-jobs.ts` | Smart job runner: claim, timeout, parallel batch |
 | `src/db.ts` | SQLite operations |
-| `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
+| `groups/{name}/CLAUDE.md` | Per-group agent instructions (isolated) |
 | `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
 
 ## Skills
@@ -41,17 +44,19 @@ npm run build        # Compile TypeScript
 
 Service management:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
+docker compose up -d nanoclaw      # Start service
+docker compose restart nanoclaw    # Restart service
+docker compose logs -f nanoclaw    # Follow logs
+docker compose down                # Stop all services
 ```
 
-## Container Build Cache
+## Agent Container Build Cache
 
-Apple Container's buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild:
+Docker BuildKit caches layers aggressively. `--no-cache` alone does NOT invalidate COPY steps if the build context hasn't changed. To force a clean rebuild:
 
 ```bash
-container builder stop && container builder rm && container builder start
+docker builder prune -f
 ./container/build.sh
 ```
 
-Always verify after rebuild: `container run -i --rm --entrypoint wc nanoclaw-agent:latest -l /app/src/index.ts`
+Always verify after rebuild: `docker run -i --rm --entrypoint wc nanoclaw-agent:latest -l /app/src/index.ts`

@@ -21,6 +21,15 @@ import { validateAdditionalMounts } from './mount-security.js';
 import { containerPool } from './container-pool.js';
 import { RegisteredGroup } from './types.js';
 
+/** Format milliseconds as human-readable duration (e.g., "30 min", "1h 30 min"). */
+function formatMs(ms: number): string {
+  const totalMin = Math.round(ms / 60_000);
+  if (totalMin < 60) return `${totalMin} min`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m > 0 ? `${h}h ${m} min` : `${h}h`;
+}
+
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
@@ -617,7 +626,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container timed out after ${configTimeout}ms`,
+          error: `Container timed out after ${formatMs(configTimeout)} (no output)`,
         });
         return;
       }
@@ -833,7 +842,7 @@ async function runPooledContainer(
         status: hadStreamingOutput ? 'success' : 'error',
         result: null,
         newSessionId,
-        error: hadStreamingOutput ? undefined : `Container timed out after ${configTimeout}ms`,
+        error: hadStreamingOutput ? undefined : `Container timed out after ${formatMs(configTimeout)} (no output)`,
       });
     };
 

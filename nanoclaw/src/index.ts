@@ -833,7 +833,7 @@ async function main(): Promise<void> {
   // Wire queue feedback callbacks to notify users
   queue.onRejected(async (groupJid) => {
     try {
-      await sendToChannel(groupJid, '⏳ คิวเต็ม กรุณารอสักครู่แล้วลองใหม่ครับ');
+      await sendToChannel(groupJid, '⏳ Queue full, please wait a moment and try again.');
     } catch (err) {
       logger.warn({ groupJid, err }, 'Failed to send queue-full notification');
     }
@@ -841,7 +841,7 @@ async function main(): Promise<void> {
 
   queue.onMaxRetriesExceeded(async (groupJid) => {
     try {
-      await sendToChannel(groupJid, '❌ ไม่สามารถประมวลผลได้หลังลอง 5 ครั้ง กรุณาลองส่งข้อความใหม่ครับ');
+      await sendToChannel(groupJid, '❌ Cannot process after 5 attempts. Please try sending the message again.');
     } catch (err) {
       logger.warn({ groupJid, err }, 'Failed to send max-retries notification');
     }
@@ -851,7 +851,7 @@ async function main(): Promise<void> {
     // Skip virtual JIDs used by the scheduler — no user to notify
     if (groupJid.startsWith('_sched_')) return;
     try {
-      await sendToChannel(groupJid, `📥 ได้รับแล้วครับ กำลังเข้าคิว (ตำแหน่ง #${position})...`);
+      await sendToChannel(groupJid, `📥 set schedule to queue (#${position})...`);
     } catch (err) {
       logger.warn({ groupJid, err }, 'Failed to send queue-position notification');
     }

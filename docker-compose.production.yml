@@ -83,13 +83,10 @@ services:
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
-      # Thai NLP disabled — Oracle has graceful fallback (whitespace tokenization)
-      # - THAI_NLP_URL=http://thai-nlp:8000
       - NODE_ENV=production
     depends_on:
       chromadb:
         condition: service_healthy
-      # thai-nlp dependency removed — Oracle falls back gracefully
     deploy:
       resources:
         limits:
@@ -179,37 +176,7 @@ services:
     networks:
       - jellycore-internal
 
-  # ========================================
-  # Thai NLP Sidecar — DISABLED to save resources
-  # Oracle has graceful fallback: uses whitespace tokenization instead of PyThaiNLP.
-  # Thai search quality slightly reduced but functional.
-  # ========================================
-  # thai-nlp:
-  #   build: ./thai-nlp-sidecar
-  #   container_name: jellycore-thai-nlp
-  #   restart: unless-stopped
-  #   environment:
-  #     - PYTHAINLP_DATA_DIR=/data/pythainlp
-  #   volumes:
-  #     - thai-nlp-data:/data/pythainlp
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         memory: 256M
-  #         cpus: '0.25'
-  #   healthcheck:
-  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-  #     interval: 15s
-  #     timeout: 5s
-  #     retries: 5
-  #     start_period: 45s
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "50m"
-  #       max-file: "3"
-  #   networks:
-  #     - jellycore-internal
+  # Thai NLP sidecar removed — Oracle uses whitespace tokenization fallback. See git history to restore.
 
 # ========================================
 # Volumes
@@ -225,8 +192,6 @@ volumes:
     driver: local
   nanoclaw-data:
     driver: local
-  # thai-nlp-data:
-  #   driver: local
 
 # ========================================
 # Networks

@@ -12,7 +12,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, cancelTask, getTaskById, updateTask, findDuplicateTask, createHeartbeatJob, getHeartbeatJob, getAllHeartbeatJobs, updateHeartbeatJob, deleteHeartbeatJob } from './db.js';
+import { createTask, cancelTask, getTaskById, updateTask, findDuplicateTask, createHeartbeatJob, getHeartbeatJob, getActiveHeartbeatJobs, getAllHeartbeatJobs, updateHeartbeatJob, deleteHeartbeatJob } from './db.js';
 import { verifyIpcMessage } from './ipc-signing.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, HeartbeatJob } from './types.js';
@@ -530,6 +530,28 @@ export async function processTaskIpc(
     case 'heartbeat_add_job': {
       if (!data.label || !data.prompt || !data.category) {
         logger.warn({ data }, 'heartbeat_add_job: missing required fields');
+        break;
+      }
+      // Duplicate guard: prevent creating the same job label twice in the same group
+      const existingActive = getActiveHeartbeatJobs().filter(
+        (j) => j.label.toLowerCase() === String(data.label).toLowerCase() && j.created_by === sourceGroup,
+      );
+      if (existingActive.length > 0) {
+        logger.warn({ label: data.label, sourceGroup }, 'heartbeat_add_job: duplicate label, skipping');
+        // Write feedback so container knows creation was skipped
+        try {
+          const feedbackDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'feedback');
+          fs.mkdirSync(feedbackDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(feedbackDir, `hbjob-created-${Date.now()}.json`),
+            JSON.stringify({
+              type: 'heartbeat_job_duplicate',
+              label: data.label,
+              existingJobId: existingActive[0].id,
+              message: `Job "${data.label}" already exists (ID: ${existingActive[0].id.slice(0, 8)}). Use heartbeat_update_job to modify it.`,
+            }),
+          );
+        } catch { /* non-fatal */ }
         break;
       }
       const jobId = `hb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

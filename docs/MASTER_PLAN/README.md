@@ -4,8 +4,8 @@
 
 **Version:** 2.1 — Full Power Edition (Improved)  
 **Created:** 2026-02-14  
-**Updated:** 2025-07-14  
-**Status:** Planning  
+**Updated:** 2026-02-22  
+**Status:** In Progress — Phases 0–5 complete, Phase 6 complete  
 **Total Phases:** 7 (Phase 0–6)  
 **Total Items:** 47 (เดิม 40 + Phase 6 ใหม่ 7)  
 **Estimated Timeline:** 12 สัปดาห์  
@@ -74,15 +74,15 @@
 
 ## 📁 Phase Structure
 
-| Phase | สัปดาห์ | Focus | Items | จุดอ่อนที่แก้ |
-|-------|---------|-------|-------|-------------|
-| [Phase 0](Phase_0_Security_Foundation/) | 1 | Security Foundation | 8 | S1–S8 |
-| [Phase 1](Phase_1_Performance_Upgrade/) | 2–3 | Performance Upgrade | 9 (+2 ใหม่) | P1–P8, W6, W9 |
-| [Phase 2](Phase_2_Architecture_Hardening/) | 3–4 | Architecture Hardening | 7 | A1–A7 |
-| [Phase 3](Phase_3_Reliability_Resilience/) | 4–5 | Reliability & Resilience | 5 | R1–R5, S6 |
-| [Phase 4](Phase_4_Integration_Channels/) | 5–8 | Integration & Intelligence | 13 (+8 ใหม่) | W4, W8, W9, W11, W15 |
-| [Phase 5](Phase_5_Production_Polish/) | 8–10 | Production Polish | 6 (+1 ใหม่) | W11 |
-| [Phase 6](Phase_6_Scheduler_Heartbeat/) | 10–12 | Scheduler Hardening + Heartbeat | 7 | B1–B6 + HB |
+| Phase | สัปดาห์ | Focus | Items | Status |
+|-------|---------|-------|-------|--------|
+| [Phase 0](Phase_0_Security_Foundation/) | 1 | Security Foundation | 8 | ✅ Complete (v0.5.0) |
+| [Phase 1](Phase_1_Performance_Upgrade/) | 2–3 | Performance Upgrade | 9 (+2 ใหม่) | ✅ Complete (v0.6.0) |
+| [Phase 2](Phase_2_Architecture_Hardening/) | 3–4 | Architecture Hardening | 7 | ✅ Complete (v0.7.0) |
+| [Phase 3](Phase_3_Reliability_Resilience/) | 4–5 | Reliability & Resilience | 5 | ✅ Complete (v0.7.1) |
+| [Phase 4](Phase_4_Integration_Channels/) | 5–8 | Integration & Intelligence | 13 (+8 ใหม่) | ✅ Complete (v0.8.0) |
+| [Phase 5](Phase_5_Production_Polish/) | 8–10 | Production Polish | 6 (+1 ใหม่) | ✅ Complete (v0.8.0) |
+| [Phase 6](Phase_6_Scheduler_Heartbeat/) | 10–12 | Scheduler Hardening + Heartbeat | 7 | ✅ Complete (v0.8.1+) |
 
 ### 🆕 New Items Added (v2.1)
 

@@ -384,6 +384,7 @@ Results are sent to this chat and included in heartbeat reports.`,
     // processing the IPC file. We wait up to 4 seconds.
     const feedbackDir = path.join(IPC_DIR, 'feedback');
     let confirmedJobId: string | null = null;
+    let duplicateMessage: string | null = null;
     const deadline = clientTs + 4000;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 200));
@@ -395,13 +396,26 @@ Results are sent to this chat and included in heartbeat reports.`,
           if (entryTs >= clientTs) {
             try {
               const feedback = JSON.parse(fs.readFileSync(path.join(feedbackDir, entry), 'utf-8'));
-              confirmedJobId = feedback.jobId ?? null;
+              if (feedback.type === 'heartbeat_job_duplicate') {
+                duplicateMessage = feedback.message ?? `Job "${args.label}" already exists.`;
+              } else {
+                confirmedJobId = feedback.jobId ?? null;
+              }
             } catch { /* ignore parse errors */ }
             break;
           }
         }
       } catch { /* ignore readdir errors */ }
-      if (confirmedJobId) break;
+      if (confirmedJobId || duplicateMessage) break;
+    }
+
+    if (duplicateMessage) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `⚠️ ${duplicateMessage}\n\nUse \`list_heartbeat_jobs\` to see existing jobs, or \`heartbeat_update_job\` to modify the existing one.`,
+        }],
+      };
     }
 
     if (confirmedJobId) {

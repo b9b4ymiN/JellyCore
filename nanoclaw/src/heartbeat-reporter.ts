@@ -25,6 +25,27 @@ import {
 } from './heartbeat-config.js';
 import { getRecentJobResults } from './heartbeat-jobs.js';
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Format interval ms as "Xชม. Xน." (Thai units). */
+function formatIntervalMs(ms: number): string {
+  const totalMin = Math.round(ms / 60_000);
+  if (totalMin < 60) return `${totalMin}น.`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m > 0 ? `${h}ชม. ${m}น.` : `${h}ชม.`;
+}
+
+/** Format a task's label for display when label is missing. */
+function formatTaskLabel(label: string | null | undefined, scheduleType: string, scheduleValue: string): string {
+  if (label) return label;
+  if (scheduleType === 'interval') {
+    const ms = Number(scheduleValue);
+    if (!isNaN(ms) && ms > 0) return `ทุก ${formatIntervalMs(ms)}`;
+  }
+  return scheduleValue;
+}
+
 // ── Oracle integration ────────────────────────────────────────────────────────
 
 interface OracleHealth {
@@ -158,7 +179,7 @@ async function buildHeartbeatMessage(
     const nextTime = next.next_run
       ? new Date(next.next_run).toLocaleString('th-TH', { timeZone: TIMEZONE, timeStyle: 'short' })
       : '?';
-    lines.push(`   ถัดไป: "${next.label ?? next.schedule_value}" เวลา ${nextTime}`);
+    lines.push(`   ถัดไป: "${formatTaskLabel(next.label, next.schedule_type, next.schedule_value)}" เวลา ${nextTime}`);
   } else {
     lines.push('   ไม่มี tasks ใน 24h');
   }
@@ -189,17 +210,21 @@ async function buildHeartbeatMessage(
     lines.push(`🧠 *Smart Jobs* (${activeJobs.length} active)`);
     for (const job of activeJobs.slice(0, 5)) {
       const emoji = categoryEmoji[job.category] ?? '🔧';
-      let lastResult: string;
-      if (job.last_result === '__RUNNING__') {
-        lastResult = ' ⏳ กำลังทำงาน…';
-      } else if (job.last_result) {
-        const truncated = job.last_result.slice(0, 60);
-        lastResult = ` → ${truncated}${job.last_result.length > 60 ? '…' : ''}`;
-      } else {
-        lastResult = ' (ยังไม่เคยทำงาน)';
-      }
       const intervalMin = (job.interval_ms ?? HEARTBEAT_JOB_DEFAULT_INTERVAL_MS) / 60000;
-      lines.push(`   ${emoji} ${job.label} (ทุก ${intervalMin}น.)${lastResult}`);
+      const intervalLabel = intervalMin < 60 ? `${intervalMin}น.` : formatIntervalMs(job.interval_ms ?? HEARTBEAT_JOB_DEFAULT_INTERVAL_MS);
+      let lastResultDisplay: string;
+      if (job.last_result === '__RUNNING__') {
+        lastResultDisplay = ' ⏳ กำลังทำงาน…';
+      } else if (job.last_result?.startsWith('Error:') || job.last_result?.startsWith('❌')) {
+        const msg = job.last_result.replace(/^Error:\s*/, '').replace(/^❌\s*/, '');
+        lastResultDisplay = ` ❌ ${msg.slice(0, 55)}${msg.length > 55 ? '…' : ''}`;
+      } else if (job.last_result) {
+        const truncated = job.last_result.slice(0, 55);
+        lastResultDisplay = ` → ${truncated}${job.last_result.length > 55 ? '…' : ''}`;
+      } else {
+        lastResultDisplay = ' (ยังไม่เคยทำงาน)';
+      }
+      lines.push(`   ${emoji} ${job.label} (ทุก ${intervalLabel})${lastResultDisplay}`);
     }
     if (activeJobs.length > 5) {
       lines.push(`   … และอีก ${activeJobs.length - 5} งาน`);
