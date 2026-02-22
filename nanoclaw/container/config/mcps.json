@@ -1,0 +1,15 @@
+{
+  "_comment": "External MCP servers loaded at agent startup. Add entries here + install in Dockerfile to enable new MCPs.",
+  "servers": [
+    {
+      "name": "oura",
+      "description": "Oura Ring health data — sleep, readiness, daily activity, HRV, SpO2, workouts, stress",
+      "command": "node",
+      "args": ["/opt/oura-mcp/build/index.js"],
+      "requiredEnv": ["OURA_PERSONAL_ACCESS_TOKEN"],
+      "env": {
+        "OURA_PERSONAL_ACCESS_TOKEN": "OURA_PERSONAL_ACCESS_TOKEN"
+      }
+    }
+  ]
+}

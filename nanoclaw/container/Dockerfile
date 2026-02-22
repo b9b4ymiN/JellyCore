@@ -67,13 +67,13 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # Install agent-browser, claude-code, and PM2 globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code pm2
 
-# Oura Ring MCP server (optional — enabled when OURA_PERSONAL_ACCESS_TOKEN is set in env)
+# External MCP servers — installed from config/mcps.json
+# node_modules are intentionally kept: oura-mcp uses standard tsc output (not bundled)
 # Token is NOT baked into the image; it flows through secrets at runtime
 RUN git clone --depth=1 https://github.com/elizabethtrykin/oura-mcp /opt/oura-mcp \
     && cd /opt/oura-mcp \
     && npm install \
     && npm run build \
-    && rm -rf /opt/oura-mcp/node_modules \
     && rm -rf /opt/oura-mcp/.git
 
 # Install PM2 log rotate module
@@ -89,6 +89,9 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
+
+# Copy MCP server configuration (read at runtime to build mcpServers config)
+COPY config/ /app/config/
 
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input

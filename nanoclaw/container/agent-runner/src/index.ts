@@ -63,6 +63,54 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_PROMPT_FILE = path.join(IPC_INPUT_DIR, '_prompt.txt');
 const IPC_POLL_MS = 500;
 
+// ── External MCP server config ──────────────────────────────────────────────
+// Add entries to /app/config/mcps.json (rebuild image to pick up new installs).
+
+interface ExternalMcpServer {
+  name: string;          // becomes mcp__<name>__* prefix
+  description?: string;
+  command: string;
+  args: string[];
+  requiredEnv: string[]; // ALL must be truthy in sdkEnv for this server to load
+  env: Record<string, string>; // { envVarInServer: envVarInSdkEnv }
+}
+
+interface ExternalMcpsConfig {
+  servers: ExternalMcpServer[];
+}
+
+function loadExternalMcps(): ExternalMcpsConfig {
+  try {
+    const cfgPath = path.join('/app/config/mcps.json');
+    return JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as ExternalMcpsConfig;
+  } catch {
+    return { servers: [] };
+  }
+}
+
+const externalMcps = loadExternalMcps();
+
+function buildExternalMcpServers(
+  sdkEnv: Record<string, string | undefined>,
+): Record<string, { command: string; args: string[]; env: Record<string, string> }> {
+  const result: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {};
+  for (const server of externalMcps.servers) {
+    if (!server.requiredEnv.every(v => sdkEnv[v])) continue;
+    result[server.name] = {
+      command: server.command,
+      args: server.args,
+      env: Object.fromEntries(
+        Object.entries(server.env).map(([k, v]) => [k, sdkEnv[v] as string]),
+      ),
+    };
+  }
+  return result;
+}
+
+function externalMcpAllowedTools(): string[] {
+  return externalMcps.servers.map(s => `mcp__${s.name}__*`);
+}
+
 /**
  * Push-based async iterable for streaming user messages to the SDK.
  * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
@@ -444,7 +492,7 @@ async function runQuery(
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
-        'mcp__oura__*'
+        ...externalMcpAllowedTools(),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -469,16 +517,9 @@ async function runQuery(
             ORACLE_READ_ONLY: containerInput.isMain ? 'false' : 'true',
           },
         },
-        // Oura Ring MCP — only activated when token is present
-        ...(sdkEnv.OURA_PERSONAL_ACCESS_TOKEN ? {
-          oura: {
-            command: 'node',
-            args: ['/opt/oura-mcp/build/index.js'],
-            env: {
-              OURA_PERSONAL_ACCESS_TOKEN: sdkEnv.OURA_PERSONAL_ACCESS_TOKEN,
-            },
-          },
-        } : {}),
+        // External MCP servers — loaded from /app/config/mcps.json
+        // Each server is activated only when its requiredEnv vars are present
+        ...buildExternalMcpServers(sdkEnv),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook()] }],
