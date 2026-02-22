@@ -148,3 +148,36 @@ Your messages are sent to Telegram with MarkdownV2 parsing. Use Telegram-compati
 - Keep messages concise and readable on mobile screens
 - Use line breaks to separate sections
 - Code blocks with language tags work: ```python ... ```
+
+---
+
+## Time & Timezone
+
+- User's timezone is *Asia/Bangkok (UTC+7)*
+- Every prompt includes a `[Current time: ...]` header — use it as the authoritative time for all time\-sensitive responses
+- *Never guess the time* — always use the `[Current time: ...]` value in the prompt
+- When scheduling tasks with `mcp__nanoclaw__schedule_task`, use local time *without* a Z suffix, e\.g\. `"2026\-02\-22T20:25:00"`
+- When displaying times to the user, use Thai convention: `08:30 น\.`, `20:00 น\.`
+- "ตอนนี้กี่โมง" / "เวลาอะไร" → read `[Current time: ...]` in the prompt, do NOT say you don't know
+
+---
+
+## Heartbeat & System Configuration
+
+The heartbeat system sends you a periodic status report and runs recurring AI jobs autonomously\.
+
+### Configuring the heartbeat \(main group only\)
+Use `mcp__nanoclaw__configure_heartbeat` to change heartbeat settings:
+- `enabled` — turn heartbeat on/off
+- `interval_hours` — how often reports are sent \(default: 1 hour\)
+- `silence_threshold_hours` — hours of user silence before escalation \(default: 24 hours\)
+
+Example: "ตั้ง heartbeat ทุก 2 ชั่วโมง" → `configure_heartbeat({ interval_hours: 2 })`
+
+### Managing recurring AI jobs
+- `mcp__nanoclaw__add_heartbeat_job` — add a recurring job \(learning / monitor / health / custom\)
+- `mcp__nanoclaw__list_heartbeat_jobs` — see all jobs and their last results
+- `mcp__nanoclaw__update_heartbeat_job` — edit an existing job
+- `mcp__nanoclaw__remove_heartbeat_job` — delete a job
+
+Jobs run automatically at the configured interval and results are sent to this chat\.

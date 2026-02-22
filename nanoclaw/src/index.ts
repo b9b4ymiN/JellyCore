@@ -11,6 +11,7 @@ import {
   POLL_INTERVAL,
   SESSION_MAX_AGE_MS,
   TELEGRAM_BOT_TOKEN,
+  TIMEZONE,
   TRIGGER_PATTERN,
   TYPING_MAX_TTL,
 } from './config.js';
@@ -277,7 +278,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const rawPrompt = formatMessages(missedMessages);
-  const prompt = oracleContext ? `${oracleContext}\n\n${rawPrompt}` : rawPrompt;
+  const timeHeader = `[Current time: ${new Date().toLocaleString('th-TH', { timeZone: TIMEZONE, dateStyle: 'short', timeStyle: 'medium' })} (${TIMEZONE})]`;
+  const prompt = oracleContext
+    ? `${oracleContext}\n\n${timeHeader}\n\n${rawPrompt}`
+    : `${timeHeader}\n\n${rawPrompt}`;
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.

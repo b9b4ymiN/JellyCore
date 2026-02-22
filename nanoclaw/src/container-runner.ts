@@ -352,6 +352,9 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string): strin
     args.push('--network', dockerNetwork);
   }
 
+  // Pass timezone so container's Node.js uses correct local time (not UTC)
+  args.push('-e', `TZ=${process.env.TZ || 'Asia/Bangkok'}`);
+
   // Docker: -v with :ro suffix for readonly
   // Resolve container-internal paths to Docker host paths for DinD compatibility
   for (const mount of mounts) {

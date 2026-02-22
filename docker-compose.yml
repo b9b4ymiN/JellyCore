@@ -104,7 +104,7 @@ services:
       - ORACLE_API_URL=http://oracle:47778
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
       # Oura Ring MCP (optional) — set in .env to enable health/sleep/activity tools
-      # - OURA_PERSONAL_ACCESS_TOKEN=${OURA_PERSONAL_ACCESS_TOKEN}
+      - OURA_PERSONAL_ACCESS_TOKEN=${OURA_PERSONAL_ACCESS_TOKEN}
       # Security
       - JELLYCORE_AUTH_PASSPHRASE=${JELLYCORE_AUTH_PASSPHRASE}
       - JELLYCORE_IPC_SECRET=${JELLYCORE_IPC_SECRET}

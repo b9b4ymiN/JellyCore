@@ -288,6 +288,62 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+// ── Heartbeat Configuration ───────────────────────────────────────────────────
+
+server.tool(
+  'configure_heartbeat',
+  `Configure the heartbeat system settings. Main group only.
+
+• enabled: turn heartbeat on/off
+• interval_hours: how often heartbeat reports are sent (default 1 hour)
+• silence_threshold_hours: how long of user silence triggers an alert (default 24 hours)
+
+Example: "ตั้ง heartbeat ทุก 2 ชั่วโมง" → configure_heartbeat({ interval_hours: 2 })`,
+  {
+    enabled: z.boolean().optional().describe('Enable or disable the heartbeat system'),
+    interval_hours: z.number().positive().optional().describe('Heartbeat report interval in hours (e.g. 1, 2, 6)'),
+    silence_threshold_hours: z.number().positive().optional().describe('Hours of user silence before escalation alert (e.g. 24, 48)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: '❌ configure_heartbeat can only be used from the main group.' }],
+        isError: true,
+      };
+    }
+
+    const heartbeat: Record<string, unknown> = {};
+    if (args.enabled !== undefined) heartbeat.enabled = args.enabled;
+    if (args.interval_hours !== undefined) heartbeat.intervalMs = args.interval_hours * 60 * 60 * 1000;
+    if (args.silence_threshold_hours !== undefined) heartbeat.silenceThresholdMs = args.silence_threshold_hours * 60 * 60 * 1000;
+
+    if (Object.keys(heartbeat).length === 0) {
+      return {
+        content: [{ type: 'text' as const, text: '⚠️ No changes specified. Provide at least one of: enabled, interval_hours, silence_threshold_hours.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'heartbeat_config',
+      heartbeat,
+      timestamp: new Date().toISOString(),
+    };
+
+    const filename = writeIpcFile(TASKS_DIR, data);
+
+    const changes = [
+      args.enabled !== undefined ? `enabled: ${args.enabled}` : null,
+      args.interval_hours !== undefined ? `interval: ${args.interval_hours}h` : null,
+      args.silence_threshold_hours !== undefined ? `silence threshold: ${args.silence_threshold_hours}h` : null,
+    ].filter(Boolean).join(', ');
+
+    return {
+      content: [{ type: 'text' as const, text: `✅ Heartbeat configured (${filename}): ${changes}` }],
+    };
+  },
+);
+
 // ── Smart Heartbeat Job Tools ────────────────────────────────────────────────
 
 server.tool(
