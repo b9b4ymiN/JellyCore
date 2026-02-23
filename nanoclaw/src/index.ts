@@ -723,9 +723,9 @@ function ensureDockerRunning(): void {
     throw new Error('Docker is required but not running');
   }
 
-  // Auto-build the agent image if it is missing.
-  // This is the most common cause of the "Unable to find image" error when
-  // only `docker compose up` was run without first running `./nanoclaw/container/build.sh`.
+  // Check if agent image exists. If missing, try to auto-build from mounted container/ dir.
+  // This is NON-FATAL: NanoClaw starts regardless so inline/oracle commands still work.
+  // Only container-tier requests (tier 3/4) will fail if the image is truly missing.
   const agentImage = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
   try {
     const imageId = execSync(`docker images -q ${agentImage}`, {
@@ -735,37 +735,39 @@ function ensureDockerRunning(): void {
     }).trim();
 
     if (!imageId) {
-      // Image doesn't exist — auto-build it.
-      // The container/ directory is mounted at /app/nanoclaw/container (docker-compose)
-      // or available at ./container/ when running on the host.
+      // Image doesn't exist — try auto-build if build context is available
       const containerBuildDir = path.join(process.cwd(), 'container');
-      if (!fs.existsSync(containerBuildDir)) {
-        throw new Error(
-          `Agent image '${agentImage}' not found and build context '${containerBuildDir}' is missing. ` +
-          `Mount ./nanoclaw/container into the container or build manually: ` +
-          `docker build -t ${agentImage} ./nanoclaw/container`,
+      if (fs.existsSync(path.join(containerBuildDir, 'Dockerfile'))) {
+        logger.info(
+          { image: agentImage, buildDir: containerBuildDir },
+          'Agent image not found — building automatically (first-time setup)...',
         );
+        console.log(`\n⏳  Building agent image '${agentImage}' (this takes ~2-5 minutes on first run)...\n`);
+        execSync(`docker build -t ${agentImage} ${containerBuildDir}`, {
+          stdio: 'inherit',  // stream build output to console
+          timeout: 600_000,  // 10 min build timeout
+        });
+        logger.info({ image: agentImage }, 'Agent image built successfully');
+        console.log(`\n✅  Agent image '${agentImage}' ready.\n`);
+      } else {
+        // No build context available — warn loudly but DON'T crash.
+        // Inline (/start, /help, /clear) and oracle-only commands will still work.
+        logger.error(
+          { image: agentImage, buildDir: containerBuildDir },
+          '⚠️  Agent image missing! Container-tier messages will fail. ' +
+          'Build it manually: docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/container/',
+        );
+        console.error(`\n⚠️  WARNING: Agent image '${agentImage}' not found!`);
+        console.error(`   Inline commands (/start, /help, /clear) will work.`);
+        console.error(`   But AI responses (container tier) will fail until you build it:`);
+        console.error(`   docker build -t ${agentImage} -f nanoclaw/container/Dockerfile nanoclaw/container/\n`);
       }
-      logger.info(
-        { image: agentImage, buildDir: containerBuildDir },
-        'Agent image not found — building automatically (first-time setup)...',
-      );
-      console.log(`\n⏳  Building agent image '${agentImage}' (this takes ~2-5 minutes on first run)...\n`);
-      execSync(`docker build -t ${agentImage} ${containerBuildDir}`, {
-        stdio: 'inherit',  // stream build output to console
-        timeout: 600_000,  // 10 min build timeout
-      });
-      logger.info({ image: agentImage }, 'Agent image built successfully');
-      console.log(`\n✅  Agent image '${agentImage}' ready.\n`);
     } else {
       logger.debug({ image: agentImage, imageId }, 'Agent image verified');
     }
   } catch (err) {
-    // Re-throw build failures as fatal — the system cannot work without the agent image
-    if (err instanceof Error && err.message.includes('not found and build context')) {
-      throw err;
-    }
-    logger.warn({ image: agentImage, err }, 'Agent image check/build failed — will fail at runtime if image is missing');
+    // Build failed — warn but don't crash
+    logger.warn({ image: agentImage, err }, 'Agent image check/build failed — container-tier messages may fail');
   }
 
   // Kill running orphans + prune exited NanoClaw containers from previous runs.
