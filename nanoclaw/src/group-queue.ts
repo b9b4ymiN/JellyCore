@@ -29,7 +29,7 @@ export class GroupQueue {
   private groups = new Map<string, GroupState>();
   private activeCount = 0;
   private waitingGroups: string[] = [];
-  private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
+  private processMessagesFn: ((groupJid: string, retryCount: number) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
   private onQueuedCallback: ((groupJid: string, position: number) => void) | null = null;
@@ -89,7 +89,7 @@ export class GroupQueue {
     return state;
   }
 
-  setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
+  setProcessMessagesFn(fn: (groupJid: string, retryCount: number) => Promise<boolean>): void {
     this.processMessagesFn = fn;
   }
 
@@ -237,7 +237,7 @@ export class GroupQueue {
 
     try {
       if (this.processMessagesFn) {
-        const success = await this.processMessagesFn(groupJid);
+        const success = await this.processMessagesFn(groupJid, state.retryCount);
         if (success) {
           state.retryCount = 0;
         } else {

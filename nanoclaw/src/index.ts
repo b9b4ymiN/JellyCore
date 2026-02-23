@@ -162,8 +162,9 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
+ * retryCount: 0 = first attempt, 1+ = automatic retry (silent — don't spam user)
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
+async function processGroupMessages(chatJid: string, retryCount: number = 0): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -419,38 +420,41 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       trackUsage(classification.tier, classification.model, Date.now() - startTime);
       return true;
     }
-    // Notify user about the error so they know something went wrong
-    try {
-      await sendToChannel(chatJid, formatOutbound(ch, '⚠️ ขอโทษครับ ระบบมีปัญหาชั่วคราว กำลัง retry ให้ครับ...'));
-    } catch (notifyErr) {
-      logger.warn({ group: group.name, err: notifyErr }, 'Failed to send error notification');
-    }
     recordError(`Agent error for group ${group.name}`, group.name);
+    // Only notify the user on the FIRST failure — retries (retryCount > 0) are silent.
+    // This prevents spam like 5× "⚠️ ระบบมีปัญหา" for a single failed message.
+    if (retryCount === 0) {
+      try {
+        await sendToChannel(chatJid, formatOutbound(ch, '⚠️ ขอโทษครับ ระบบมีปัญหาชั่วคราว กำลังลองใหม่อัตโนมัติค่ะ...'));
+      } catch (notifyErr) {
+        logger.warn({ group: group.name, err: notifyErr }, 'Failed to send error notification');
+      }
+    } else {
+      logger.info({ group: group.name, retryCount }, 'Agent error on retry — silent (no user notification)');
+    }
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
-    logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    logger.warn({ group: group.name, retryCount }, 'Agent error, rolled back message cursor for retry');
     return false;
   }
 
   // Guard against silent "success with no output" runs.
   // Without this, the cursor advances and the user gets no reply.
   if (!outputSentToUser) {
-    try {
-      await sendToChannel(
-        chatJid,
-        formatOutbound(
-          ch,
-          '⚠️ I could not generate a reply this time. Retrying automatically...',
-        ),
-      );
-    } catch (notifyErr) {
-      logger.warn({ group: group.name, err: notifyErr }, 'Failed to send no-output notification');
-    }
     recordError(`Agent produced no output for group ${group.name}`, group.name);
+    if (retryCount === 0) {
+      try {
+        await sendToChannel(chatJid, formatOutbound(ch, '⚠️ ขอโทษครับ ไม่ได้รับข้อความตอบกลับ กำลังลองใหม่อัตโนมัติค่ะ...'));
+      } catch (notifyErr) {
+        logger.warn({ group: group.name, err: notifyErr }, 'Failed to send no-output notification');
+      }
+    } else {
+      logger.info({ group: group.name, retryCount }, 'No output on retry — silent');
+    }
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
-    logger.warn({ group: group.name }, 'Agent completed with no output, rolled back message cursor for retry');
+    logger.warn({ group: group.name, retryCount }, 'Agent completed with no output, rolled back message cursor for retry');
     return false;
   }
 
@@ -890,12 +894,12 @@ async function main(): Promise<void> {
     patchHeartbeatConfig: (patch) => patchHeartbeatConfig(patch as Parameters<typeof patchHeartbeatConfig>[0]),
     runTaskNow: (taskId) => updateTask(taskId, { next_run: new Date().toISOString() }),
   });
-  queue.setProcessMessagesFn(processGroupMessages);
+  queue.setProcessMessagesFn((jid, retryCount) => processGroupMessages(jid, retryCount));
 
   // Wire queue feedback callbacks to notify users
   queue.onRejected(async (groupJid) => {
     try {
-      await sendToChannel(groupJid, '⏳ Queue full, please wait a moment and try again.');
+      await sendToChannel(groupJid, '⏳ ระบบบ่ายงานเต็มค่ะ กรุณารอสักครู่แล้วลองอีกครั้งนะค่ะ');
     } catch (err) {
       logger.warn({ groupJid, err }, 'Failed to send queue-full notification');
     }
@@ -903,7 +907,7 @@ async function main(): Promise<void> {
 
   queue.onMaxRetriesExceeded(async (groupJid) => {
     try {
-      await sendToChannel(groupJid, '❌ Cannot process after 5 attempts. Please try sending the message again.');
+      await sendToChannel(groupJid, '❌ ไม่สามารถประมวลผลได้ในขณะนี้ (ลองแล้ว 5 ครั้ง) กรุณาพิมพ์คำถามใหม่อีกครั้งนะค่ะ');
     } catch (err) {
       logger.warn({ groupJid, err }, 'Failed to send max-retries notification');
     }
