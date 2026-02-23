@@ -132,21 +132,40 @@ export class TelegramChannel implements Channel {
       drop_pending_updates: true,
     });
 
-    // Health monitor: detect if polling silently died
+    // Health monitor: detect if polling silently died and auto-reconnect.
     // grammY's internal retry handles transient errors, but if the bot
-    // object becomes completely unresponsive we need to know.
+    // object becomes completely unresponsive we self-heal by restarting.
     this.pollingHealthTimer = setInterval(async () => {
-      if (!this.connected) return;
       try {
         await this.bot.api.getMe();
         this.lastUpdateTime = Date.now();
+        if (!this.connected) {
+          // Recovered — mark connected again
+          this.connected = true;
+          logger.info('Telegram bot reconnected successfully');
+        }
       } catch (err) {
         const silentMs = Date.now() - this.lastUpdateTime;
         logger.warn({ err, silentMs }, 'Telegram health check failed');
         if (silentMs > 120_000) {
-          // Bot has been unresponsive for >2 min — mark disconnected
-          logger.error('Telegram bot appears dead, marking disconnected');
+          // Bot has been unresponsive for >2 min — attempt full restart
+          logger.error('Telegram bot appears dead, attempting auto-reconnect...');
           this.connected = false;
+          try {
+            await this.bot.stop();
+          } catch { /* ignore stop errors */ }
+          // Recreate bot instance and restart polling
+          this.bot = new Bot(this.opts.token);
+          this.setupHandlers();
+          await this.bot.init();
+          this.bot.start({
+            onStart: () => {
+              this.connected = true;
+              this.lastUpdateTime = Date.now();
+              logger.info('Telegram bot polling restarted after auto-reconnect');
+            },
+            drop_pending_updates: false, // keep messages that arrived while dead
+          });
         }
       }
     }, 60_000);

@@ -54,7 +54,11 @@ export function routeOutbound(
   jid: string,
   text: string,
 ): Promise<void> {
-  const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
+  // Prefer a connected owner, but fall back to any owner so channel-level
+  // buffering/retry logic can still run while reconnecting.
+  const channel =
+    channels.find((c) => c.ownsJid(jid) && c.isConnected()) ||
+    channels.find((c) => c.ownsJid(jid));
   if (!channel) throw new Error(`No channel for JID: ${jid}`);
   return channel.sendMessage(jid, text);
 }

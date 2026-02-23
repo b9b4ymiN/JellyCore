@@ -72,7 +72,7 @@ export const MAX_QUEUE_SIZE = Math.max(
 
 // Container Warm Pool
 export const POOL_MIN_SIZE = Math.max(0, parseInt(process.env.POOL_MIN_SIZE || '1', 10) || 1);
-export const POOL_MAX_SIZE = Math.max(1, parseInt(process.env.POOL_MAX_SIZE || '3', 10) || 3);
+export const POOL_MAX_SIZE = Math.max(1, parseInt(process.env.POOL_MAX_SIZE || '5', 10) || 3);
 export const POOL_IDLE_TIMEOUT = parseInt(process.env.POOL_IDLE_TIMEOUT || '300000', 10); // 5 min
 export const POOL_WARMUP_INTERVAL = parseInt(process.env.POOL_WARMUP_INTERVAL || '30000', 10); // 30s
 export const POOL_MAX_REUSE = Math.max(1, parseInt(process.env.POOL_MAX_REUSE || '10', 10) || 10);

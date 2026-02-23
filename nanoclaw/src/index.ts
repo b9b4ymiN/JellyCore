@@ -241,8 +241,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Budget enforcement: check before spawning container
   const budget = checkBudget(classification.model, group.folder);
   if (budget.action === 'offline') {
-    const ch = channelFor(chatJid);
-    await sendToChannel(chatJid, formatOutbound(ch, budget.message || 'ขออภัย budget เดือนนี้หมดแล้วค่ะ'));
+    try {
+      const ch = channelFor(chatJid);
+      await sendToChannel(chatJid, formatOutbound(ch, budget.message || 'ขออภัย budget เดือนนี้หมดแล้วค่ะ'));
+    } catch (sendErr) {
+      // R6 fix: advance cursor regardless — prevents message being re-processed indefinitely
+      logger.warn({ group: group.name, err: sendErr }, 'Failed to send budget-offline message (advancing cursor anyway)');
+    }
     lastAgentTimestamp[chatJid] = lastMsg.timestamp;
     saveState();
     trackUsage(classification.tier, classification.model, Date.now() - startTime);
@@ -313,11 +318,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Keep typing indicator alive (Telegram expires after 5s)
   // Auto-expires after TYPING_MAX_TTL to prevent permanent typing indicators
   const typingStartTime = Date.now();
+  let ttlNoticeSent = false;
   const typingInterval = setInterval(() => {
     if (Date.now() - typingStartTime > TYPING_MAX_TTL) {
       clearInterval(typingInterval);
       activeTypingIntervals.delete(typingInterval);
       logger.info({ group: group.name, chatJid, ttlMs: TYPING_MAX_TTL }, 'Typing indicator TTL expired, auto-stopped');
+      // Notify user we are still working — prevents silent-looking stall
+      if (!outputSentToUser && !ttlNoticeSent) {
+        ttlNoticeSent = true;
+        sendToChannel(chatJid, '⏳ ยังทำงานอยู่ครับ งานนี้ใช้เวลานานหน่อย กรุณารอสักครู่นะครับ...').catch(() => {});
+      }
       return;
     }
     setTypingOnChannel(chatJid, true).catch(() => {});
@@ -374,6 +385,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (result.status === 'error') {
           hadError = true;
         }
+
+        // R14: Container completed with status=success but result is null and nothing was sent
+        // This means the agent ran but produced no output — send a fallback so user isn't left in silence
+        if (result.status === 'success' && result.result === null && !outputSentToUser) {
+          logger.warn({ group: group.name }, 'Container completed with null result and no prior output — sending fallback');
+          try {
+            await sendToChannel(chatJid, formatOutbound(ch, '✅ ดำเนินการเสร็จสิ้นครับ (ไม่มีข้อความตอบกลับ)'));
+            outputSentToUser = true;
+          } catch (fbErr) {
+            logger.warn({ group: group.name, err: fbErr }, 'Failed to send null-result fallback');
+          }
+        }
       } catch (cbErr) {
         logger.warn({ group: group.name, err: cbErr }, 'Streaming callback error (non-fatal)');
         hadError = true;
@@ -407,6 +430,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
     logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    return false;
+  }
+
+  // Guard against silent "success with no output" runs.
+  // Without this, the cursor advances and the user gets no reply.
+  if (!outputSentToUser) {
+    try {
+      await sendToChannel(
+        chatJid,
+        formatOutbound(
+          ch,
+          '⚠️ I could not generate a reply this time. Retrying automatically...',
+        ),
+      );
+    } catch (notifyErr) {
+      logger.warn({ group: group.name, err: notifyErr }, 'Failed to send no-output notification');
+    }
+    recordError(`Agent produced no output for group ${group.name}`, group.name);
+    lastAgentTimestamp[chatJid] = previousCursor;
+    saveState();
+    logger.warn({ group: group.name }, 'Agent completed with no output, rolled back message cursor for retry');
     return false;
   }
 

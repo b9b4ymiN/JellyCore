@@ -1,10 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from './config.js';
 import {
   escapeXml,
   formatMessages,
   formatOutbound,
+  routeOutbound,
   stripInternalTags,
 } from './router.js';
 import { Channel, NewMessage } from './types.js';
@@ -239,6 +240,57 @@ describe('formatOutbound', () => {
     expect(
       formatOutbound(waChannel, '<internal>thinking</internal>The answer is 42'),
     ).toBe(`${ASSISTANT_NAME}: The answer is 42`);
+  });
+});
+
+describe('routeOutbound', () => {
+  it('prefers connected channel owner when available', async () => {
+    const connectedSend = vi.fn().mockResolvedValue(undefined);
+    const disconnectedSend = vi.fn().mockResolvedValue(undefined);
+    const channels: Channel[] = [
+      {
+        name: 'wa',
+        prefixAssistantName: true,
+        connect: async () => {},
+        sendMessage: disconnectedSend,
+        isConnected: () => false,
+        ownsJid: (jid: string) => jid.endsWith('@g.us'),
+        disconnect: async () => {},
+      },
+      {
+        name: 'tg',
+        prefixAssistantName: false,
+        connect: async () => {},
+        sendMessage: connectedSend,
+        isConnected: () => true,
+        ownsJid: (jid: string) => jid.startsWith('tg:'),
+        disconnect: async () => {},
+      },
+    ];
+
+    await routeOutbound(channels, 'tg:123', 'hello');
+
+    expect(connectedSend).toHaveBeenCalledWith('tg:123', 'hello');
+    expect(disconnectedSend).not.toHaveBeenCalled();
+  });
+
+  it('falls back to owning channel even when disconnected', async () => {
+    const disconnectedSend = vi.fn().mockResolvedValue(undefined);
+    const channels: Channel[] = [
+      {
+        name: 'wa',
+        prefixAssistantName: true,
+        connect: async () => {},
+        sendMessage: disconnectedSend,
+        isConnected: () => false,
+        ownsJid: (jid: string) => jid.endsWith('@g.us'),
+        disconnect: async () => {},
+      },
+    ];
+
+    await routeOutbound(channels, 'group@g.us', 'queued');
+
+    expect(disconnectedSend).toHaveBeenCalledWith('group@g.us', 'queued');
   });
 });
 

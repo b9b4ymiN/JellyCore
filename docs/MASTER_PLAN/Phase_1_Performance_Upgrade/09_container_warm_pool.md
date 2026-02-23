@@ -69,7 +69,7 @@
   ```typescript
   export const POOL_CONFIG = {
     MIN_SIZE: parseInt(process.env.POOL_MIN_SIZE || '1'),
-    MAX_SIZE: parseInt(process.env.POOL_MAX_SIZE || '3'),
+    MAX_SIZE: parseInt(process.env.POOL_MAX_SIZE || '5'),
     IDLE_TIMEOUT: parseInt(process.env.POOL_IDLE_TIMEOUT || '300000'), // 5 min
     SESSION_TIMEOUT: parseInt(process.env.POOL_SESSION_TIMEOUT || '600000'), // 10 min
     WARMUP_INTERVAL: parseInt(process.env.POOL_WARMUP_INTERVAL || '30000'), // 30s check
