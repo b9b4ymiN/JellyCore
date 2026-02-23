@@ -719,21 +719,39 @@ function ensureDockerRunning(): void {
     throw new Error('Docker is required but not running');
   }
 
-  // Kill and clean up orphaned NanoClaw containers from previous runs
+  // Kill running orphans + prune exited NanoClaw containers from previous runs.
+  // Running orphans: stop them first (blocks), then let --rm remove them.
+  // Exited orphans: directly remove (handles transition from pre-–rm builds and Docker-crash leftovers).
   try {
-    const output = execSync('docker ps --filter name=nanoclaw- --format {{.Names}}', {
+    // 1. Stop any still-running agent containers
+    const runningOut = execSync('docker ps --filter name=nanoclaw- --format {{.Names}}', {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
-    const orphans = output.trim().split('\n').filter(Boolean);
-    for (const name of orphans) {
+    const running = runningOut.trim().split('\n').filter(Boolean);
+    for (const name of running) {
       try {
         execSync(`docker stop ${name}`, { stdio: 'pipe', timeout: 15000 });
-        execSync(`docker rm ${name}`, { stdio: 'pipe', timeout: 10000 });
+        execSync(`docker rm -f ${name}`, { stdio: 'pipe', timeout: 10000 });
       } catch { /* already stopped/removed */ }
     }
-    if (orphans.length > 0) {
-      logger.info({ count: orphans.length, names: orphans }, 'Stopped orphaned containers');
+
+    // 2. Prune leftover Exited containers (e.g. from builds without --rm, or Docker-daemon crashes)
+    const exitedOut = execSync(
+      'docker ps -a --filter name=nanoclaw- --filter status=exited --format {{.Names}}',
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+    );
+    const exited = exitedOut.trim().split('\n').filter(Boolean);
+    if (exited.length > 0) {
+      try {
+        execSync(`docker rm -f ${exited.join(' ')}`, { stdio: 'pipe', timeout: 30000 });
+      } catch { /* best effort */ }
+      logger.info({ count: exited.length }, 'Pruned exited orphan containers');
+    }
+
+    const total = running.length + exited.length;
+    if (total > 0) {
+      logger.info({ running: running.length, exited: exited.length }, 'Orphan container cleanup complete');
     }
   } catch (err) {
     logger.warn({ err }, 'Failed to clean up orphaned containers');

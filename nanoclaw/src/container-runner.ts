@@ -347,7 +347,9 @@ function readSecrets(): Record<string, string> {
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
-  const args: string[] = ['run', '-i', '--name', containerName];
+  // --rm: auto-remove the container when it exits (prevents Exited container accumulation).
+  // This is the standard practice for ephemeral task containers.
+  const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Resource limits: prevent runaway agents from consuming all host resources
   const memLimit = process.env.CONTAINER_MEMORY_LIMIT || '512m';
