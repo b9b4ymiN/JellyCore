@@ -41,7 +41,6 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_messages_timestamp_epoch ON messages(timestamp_epoch);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -161,9 +160,23 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE messages ADD COLUMN timestamp_epoch INTEGER`,
     );
-  } catch {
-    /* column already exists */
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+    if (!msg.includes('duplicate column name')) throw err;
   }
+
+  // Ensure migration really exists (legacy DBs can skip CREATE TABLE IF NOT EXISTS path).
+  const hasTimestampEpoch = database
+    .prepare(`SELECT 1 as ok FROM pragma_table_info('messages') WHERE name = 'timestamp_epoch'`)
+    .get() as { ok: number } | undefined;
+  if (!hasTimestampEpoch) {
+    throw new Error('Schema migration failed: messages.timestamp_epoch is missing');
+  }
+
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_messages_timestamp_epoch ON messages(timestamp_epoch)`,
+  );
+
   try {
     database.exec(`
       UPDATE messages
