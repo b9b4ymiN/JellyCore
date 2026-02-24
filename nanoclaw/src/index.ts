@@ -309,7 +309,10 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   if (budget.action === 'offline') {
     try {
       const ch = channelFor(chatJid);
-      await sendToChannel(chatJid, formatOutbound(ch, budget.message || 'à¸‚à¸­à¸­à¸ à¸±à¸¢ budget à¹€à¸”à¸·à¸­à¸™à¸™à¸µà¹‰à¸«à¸¡à¸”à¹à¸¥à¹‰à¸§à¸„à¹ˆà¸°'));
+      await sendToChannel(
+        chatJid,
+        formatOutbound(ch, budget.message || 'ขออภัย งบประมาณเดือนนี้หมดแล้วค่ะ'),
+      );
     } catch (sendErr) {
       // R6 fix: advance cursor regardless â€” prevents message being re-processed indefinitely
       logger.warn({ group: group.name, err: sendErr }, 'Failed to send budget-offline message (advancing cursor anyway)');
@@ -396,7 +399,8 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
       // Notify user we are still working â€” prevents silent-looking stall
       if (!outputSentToUser && !ttlNoticeSent) {
         ttlNoticeSent = true;
-        sendToChannel(chatJid, 'â³ à¸¢à¸±à¸‡à¸—à¸³à¸‡à¸²à¸™à¸­à¸¢à¸¹à¹ˆà¸„à¸£à¸±à¸š à¸‡à¸²à¸™à¸™à¸µà¹‰à¹ƒà¸Šà¹‰à¹€à¸§à¸¥à¸²à¸™à¸²à¸™à¸«à¸™à¹ˆà¸­à¸¢ à¸à¸£à¸¸à¸“à¸²à¸£à¸­à¸ªà¸±à¸à¸„à¸£à¸¹à¹ˆà¸™à¸°à¸„à¸£à¸±à¸š...').catch(() => {});
+        sendToChannel(chatJid, '⏳ ยังทำงานอยู่นะครับ งานนี้ใช้เวลานานหน่อย กรุณารอสักครู่...')
+          .catch(() => {});
       }
       return;
     }
@@ -414,9 +418,9 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     }, delayMs));
   };
   const [p1, p2, p3] = USER_PROGRESS_INTERVALS_MS;
-  if (p1) scheduleProgress(p1, 'â³ à¸à¸³à¸¥à¸±à¸‡à¸„à¸´à¸”à¸­à¸¢à¸¹à¹ˆà¸„à¹ˆà¸° à¸£à¸­à¸ªà¸±à¸à¸„à¸£à¸¹à¹ˆà¸™à¸°à¸„à¸°...');
-  if (p2) scheduleProgress(p2, 'â³ à¸¢à¸±à¸‡à¸›à¸£à¸°à¸¡à¸§à¸¥à¸œà¸¥à¸­à¸¢à¸¹à¹ˆà¸„à¸£à¸±à¸š...');
-  if (p3) scheduleProgress(p3, 'â³ à¸‡à¸²à¸™à¸™à¸µà¹‰à¹ƒà¸Šà¹‰à¹€à¸§à¸¥à¸²à¸™à¸²à¸™à¸à¸§à¹ˆà¸²à¸›à¸à¸•à¸´à¹€à¸¥à¹‡à¸à¸™à¹‰à¸­à¸¢à¸„à¸£à¸±à¸š...');
+  if (p1) scheduleProgress(p1, '⏳ กำลังคิดอยู่นะคะ รอสักครู่นะคะ...');
+  if (p2) scheduleProgress(p2, '⏳ ยังประมวลผลอยู่นะครับ...');
+  if (p3) scheduleProgress(p3, '⏳ งานนี้ใช้เวลานานกว่าปกติเล็กน้อยนะครับ...');
 
   let ch: Channel;
   try {
@@ -460,7 +464,10 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
         if (result.status === 'success' && result.result === null && !outputSentToUser) {
           logger.warn({ group: group.name }, 'Container completed with null result and no prior output â€” sending fallback');
           try {
-            await sendToChannel(chatJid, formatOutbound(ch, 'âœ… à¸”à¸³à¹€à¸™à¸´à¸™à¸à¸²à¸£à¹€à¸ªà¸£à¹‡à¸ˆà¸ªà¸´à¹‰à¸™à¸„à¸£à¸±à¸š (à¹„à¸¡à¹ˆà¸¡à¸µà¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡à¸•à¸­à¸šà¸à¸¥à¸±à¸š)'));
+            await sendToChannel(
+              chatJid,
+              formatOutbound(ch, '✅ ดำเนินการเสร็จสิ้นครับ (ไม่มีข้อความตอบกลับ)'),
+            );
             outputSentToUser = true;
           } catch (fbErr) {
             logger.warn({ group: group.name, err: fbErr }, 'Failed to send null-result fallback');
@@ -497,10 +504,13 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     });
     recordError(`Agent error for group ${group.name}`, group.name);
     // Only notify the user on the FIRST failure â€” retries (retryCount > 0) are silent.
-    // This prevents spam like 5Ã— "âš ï¸ à¸£à¸°à¸šà¸šà¸¡à¸µà¸›à¸±à¸à¸«à¸²" for a single failed message.
+    // This prevents spam like 5x "system is having issues" for one failed message.
     if (retryCount === 0) {
       try {
-        await sendToChannel(chatJid, formatOutbound(ch, 'âš ï¸ à¸‚à¸­à¹‚à¸—à¸©à¸„à¸£à¸±à¸š à¸£à¸°à¸šà¸šà¸¡à¸µà¸›à¸±à¸à¸«à¸²à¸Šà¸±à¹ˆà¸§à¸„à¸£à¸²à¸§ à¸à¸³à¸¥à¸±à¸‡à¸¥à¸­à¸‡à¹ƒà¸«à¸¡à¹ˆà¸­à¸±à¸•à¹‚à¸™à¸¡à¸±à¸•à¸´à¸„à¹ˆà¸°...'));
+        await sendToChannel(
+          chatJid,
+          formatOutbound(ch, '⚠️ ขอโทษครับ ระบบมีปัญหาชั่วคราว กำลังลองใหม่อัตโนมัติ...'),
+        );
       } catch (notifyErr) {
         logger.warn({ group: group.name, err: notifyErr }, 'Failed to send error notification');
       }
@@ -525,7 +535,10 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     recordError(`Agent produced no output for group ${group.name}`, group.name);
     if (retryCount === 0) {
       try {
-        await sendToChannel(chatJid, formatOutbound(ch, 'âš ï¸ à¸‚à¸­à¹‚à¸—à¸©à¸„à¸£à¸±à¸š à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸£à¸±à¸šà¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡à¸•à¸­à¸šà¸à¸¥à¸±à¸š à¸à¸³à¸¥à¸±à¸‡à¸¥à¸­à¸‡à¹ƒà¸«à¸¡à¹ˆà¸­à¸±à¸•à¹‚à¸™à¸¡à¸±à¸•à¸´à¸„à¹ˆà¸°...'));
+        await sendToChannel(
+          chatJid,
+          formatOutbound(ch, '⚠️ ขอโทษครับ ไม่ได้รับข้อความตอบกลับ กำลังลองใหม่อัตโนมัติ...'),
+        );
       } catch (notifyErr) {
         logger.warn({ group: group.name, err: notifyErr }, 'Failed to send no-output notification');
       }
@@ -753,7 +766,7 @@ async function checkAndProcessMessages(): Promise<void> {
           latestRejectedTracesByGroup.delete(chatJid);
           markTraceStatus(traceIds, 'QUEUED');
           try {
-            await sendToChannel(chatJid, 'ðŸ“¥ à¸£à¸±à¸šà¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡à¹à¸¥à¹‰à¸§ à¸à¸³à¸¥à¸±à¸‡à¸ˆà¸±à¸”à¸„à¸´à¸§à¸›à¸£à¸°à¸¡à¸§à¸¥à¸œà¸¥à¹ƒà¸«à¹‰à¸™à¸°à¸„à¸£à¸±à¸š');
+            await sendToChannel(chatJid, '📥 รับข้อความแล้ว กำลังจัดคิวประมวลผลให้นะครับ');
           } catch (err) {
             logger.debug({ chatJid, err }, 'Soft ACK send failed (non-fatal)');
           }
@@ -775,7 +788,7 @@ async function checkAndProcessMessages(): Promise<void> {
           try {
             await sendToChannel(
               chatJid,
-              `â³ à¸£à¸°à¸šà¸šà¸‡à¸²à¸™à¹€à¸•à¹‡à¸¡à¸Šà¸±à¹ˆà¸§à¸„à¸£à¸²à¸§ à¸à¸£à¸¸à¸“à¸²à¸¥à¸­à¸‡à¹ƒà¸«à¸¡à¹ˆà¸­à¸µà¸à¸„à¸£à¸±à¹‰à¸‡ (trace: ${traceHint})`,
+              `⏳ ระบบงานเต็มชั่วคราว กรุณาลองใหม่อีกครั้ง (trace: ${traceHint})`,
             );
           } catch (err) {
             logger.warn({ chatJid, err }, 'Failed to send queue-full DLQ notification');
@@ -898,22 +911,22 @@ function ensureDockerRunning(): void {
           { image: agentImage, buildDir: containerBuildDir },
           'Agent image not found â€” building automatically (first-time setup)...',
         );
-        console.log(`\nâ³  Building agent image '${agentImage}' (this takes ~2-5 minutes on first run)...\n`);
+        console.log(`\n⏳  Building agent image '${agentImage}' (this takes ~2-5 minutes on first run)...\n`);
         execSync(`docker build -t ${agentImage} ${containerBuildDir}`, {
           stdio: 'inherit',  // stream build output to console
           timeout: 600_000,  // 10 min build timeout
         });
         logger.info({ image: agentImage }, 'Agent image built successfully');
-        console.log(`\nâœ…  Agent image '${agentImage}' ready.\n`);
+        console.log(`\n✅  Agent image '${agentImage}' ready.\n`);
       } else {
         // No build context available â€” warn loudly but DON'T crash.
         // Inline (/start, /help, /clear) and oracle-only commands will still work.
         logger.error(
           { image: agentImage, buildDir: containerBuildDir },
-          'âš ï¸  Agent image missing! Container-tier messages will fail. ' +
+          '⚠️  Agent image missing! Container-tier messages will fail. ' +
           'Build it manually: docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/container/',
         );
-        console.error(`\nâš ï¸  WARNING: Agent image '${agentImage}' not found!`);
+        console.error(`\n⚠️  WARNING: Agent image '${agentImage}' not found!`);
         console.error(`   Inline commands (/start, /help, /clear) will work.`);
         console.error(`   But AI responses (container tier) will fail until you build it:`);
         console.error(`   docker build -t ${agentImage} -f nanoclaw/container/Dockerfile nanoclaw/container/\n`);
