@@ -14,6 +14,8 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  IPC_SECRET: 'test-secret',
+  POOL_ENABLED: false,
 }));
 
 // Mock logger
@@ -47,6 +49,14 @@ vi.mock('fs', async () => {
 // Mock mount-security
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
+}));
+
+vi.mock('./docker-resilience.js', () => ({
+  dockerResilience: {
+    canSpawn: vi.fn(() => ({ allowed: true })),
+    recordSpawnSuccess: vi.fn(),
+    recordSpawnFailure: vi.fn(),
+  },
 }));
 
 // Create a controllable fake ChildProcess

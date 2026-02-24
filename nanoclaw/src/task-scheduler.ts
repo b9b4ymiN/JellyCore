@@ -153,6 +153,7 @@ async function runTask(
         chatJid: task.chat_jid,
         isMain,
         isScheduledTask: true,
+        lane: 'scheduler',
       },
       (proc, containerName) => deps.onProcess('_sched_' + task.id, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
@@ -313,6 +314,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           '_sched_' + currentTask.id,
           currentTask.id,
           () => runTask(currentTask, deps),
+          'scheduler',
         );
       }
 

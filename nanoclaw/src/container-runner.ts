@@ -15,11 +15,13 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   IPC_SECRET,
+  POOL_ENABLED,
 } from './config.js';
+import { dockerResilience } from './docker-resilience.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { containerPool } from './container-pool.js';
-import { RegisteredGroup } from './types.js';
+import { LaneType, RegisteredGroup } from './types.js';
 
 /** Format milliseconds as human-readable duration (e.g., "30 min", "1h 30 min"). */
 function formatMs(ms: number): string {
@@ -133,6 +135,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  lane?: LaneType;
   secrets?: Record<string, string>;
 }
 
@@ -346,10 +349,18 @@ function readSecrets(): Record<string, string> {
   return secrets;
 }
 
-function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+function buildContainerArgs(
+  mounts: VolumeMount[],
+  containerName: string,
+  groupFolder?: string,
+): string[] {
   // --rm: auto-remove the container when it exits (prevents Exited container accumulation).
   // This is the standard practice for ephemeral task containers.
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  args.push('--label', 'jellycore.managed=true');
+  if (groupFolder) {
+    args.push('--label', `jellycore.group=${groupFolder}`);
+  }
 
   // Resource limits: prevent runaway agents from consuming all host resources
   const memLimit = process.env.CONTAINER_MEMORY_LIMIT || '512m';
@@ -389,12 +400,22 @@ export async function runContainerAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  const lane: LaneType = input.lane || 'user';
+
+  const spawnCheck = dockerResilience.canSpawn(lane);
+  if (!spawnCheck.allowed) {
+    return {
+      status: 'error',
+      result: null,
+      error: spawnCheck.reason || 'Container spawn blocked by runtime health policy',
+    };
+  }
 
   const groupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
   // Try to acquire a warm container from the pool
-  const pooled = containerPool.acquire(group.folder);
+  const pooled = POOL_ENABLED ? containerPool.acquire(group.folder) : null;
   if (pooled) {
     return runPooledContainer(pooled, group, input, onProcess, onOutput, startTime);
   }
@@ -404,7 +425,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, group.folder);
 
   logger.debug(
     {
@@ -453,6 +474,7 @@ export async function runContainerAgent(
     const container = spawn('docker', containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    dockerResilience.recordSpawnSuccess();
 
     onProcess(container, containerName);
 
@@ -584,6 +606,11 @@ export async function runContainerAgent(
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
+      if (code === 125) {
+        dockerResilience.recordSpawnFailure(
+          `docker_exit_125:${stderr.slice(-200) || 'unknown docker run failure'}`,
+        );
+      }
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -782,6 +809,7 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
+      dockerResilience.recordSpawnFailure(`spawn_error:${err.message}`);
       logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
       resolve({
         status: 'error',
@@ -932,6 +960,10 @@ async function runPooledContainer(
  * Call this at startup after container system is verified.
  */
 export function initContainerPool(): void {
+  if (!POOL_ENABLED) {
+    logger.info('Container pool disabled via POOL_ENABLED=false');
+    return;
+  }
   containerPool.init(buildVolumeMounts, buildContainerArgs);
   containerPool.start();
 }

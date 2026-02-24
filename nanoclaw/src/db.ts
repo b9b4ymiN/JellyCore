@@ -1,9 +1,23 @@
 import Database from 'better-sqlite3';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, STORE_DIR } from './config.js';
-import { HeartbeatJob, HeartbeatJobLog, NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
+import {
+  DeadLetterMessage,
+  HeartbeatJob,
+  HeartbeatJobLog,
+  LaneType,
+  MessageAttempt,
+  MessageReceipt,
+  MessageStatus,
+  NewMessage,
+  RegisteredGroup,
+  ScheduledTask,
+  TaskRunLog,
+  TraceContext,
+} from './types.js';
 
 let db: Database.Database;
 
@@ -21,11 +35,13 @@ function createSchema(database: Database.Database): void {
       sender_name TEXT,
       content TEXT,
       timestamp TEXT,
+      timestamp_epoch INTEGER,
       is_from_me INTEGER,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_messages_timestamp_epoch ON messages(timestamp_epoch);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -72,6 +88,54 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS message_receipts (
+      trace_id TEXT PRIMARY KEY,
+      external_message_id TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      lane TEXT NOT NULL DEFAULT 'user',
+      status TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      error_code TEXT,
+      error_detail TEXT,
+      received_at TEXT NOT NULL,
+      queued_at TEXT,
+      started_at TEXT,
+      replied_at TEXT,
+      timeout_at TEXT,
+      dead_lettered_at TEXT,
+      UNIQUE (external_message_id, chat_jid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_receipts_chat_status ON message_receipts(chat_jid, status);
+    CREATE INDEX IF NOT EXISTS idx_receipts_received_at ON message_receipts(received_at);
+
+    CREATE TABLE IF NOT EXISTS message_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id TEXT NOT NULL,
+      attempt_no INTEGER NOT NULL,
+      container_name TEXT,
+      spawn_started_at TEXT,
+      spawn_failed_at TEXT,
+      run_started_at TEXT,
+      run_ended_at TEXT,
+      exit_code INTEGER,
+      timeout_hit INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_attempts_trace ON message_attempts(trace_id, attempt_no);
+
+    CREATE TABLE IF NOT EXISTS dead_letter_messages (
+      trace_id TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      external_message_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      final_error TEXT,
+      retryable INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL,
+      retried_at TEXT,
+      retried_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_dlq_status_created ON dead_letter_messages(status, created_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -90,6 +154,24 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* column already exists */
+  }
+
+  // Add timestamp_epoch for robust ordering/replay handling
+  try {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN timestamp_epoch INTEGER`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(`
+      UPDATE messages
+      SET timestamp_epoch = CAST(strftime('%s', timestamp) AS INTEGER) * 1000
+      WHERE timestamp_epoch IS NULL
+    `);
+  } catch {
+    /* best-effort backfill */
   }
 
   // --- Phase 6 migrations: retry, timeout, label ---
@@ -166,6 +248,331 @@ export function _initTestDatabase(): void {
 export function getDb(): Database.Database {
   if (!db) throw new Error('Database not initialized — call initDatabase() first');
   return db;
+}
+
+function toEpochMs(timestamp: string): number {
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : Math.floor(Date.now());
+}
+
+function buildTraceId(chatJid: string, externalMessageId: string): string {
+  return crypto
+    .createHash('sha1')
+    .update(`${chatJid}:${externalMessageId}`)
+    .digest('hex');
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+export function ensureMessageReceipt(
+  chatJid: string,
+  externalMessageId: string,
+  lane: LaneType = 'user',
+  receivedAt: string = nowIso(),
+): TraceContext {
+  const traceId = buildTraceId(chatJid, externalMessageId);
+  db.prepare(
+    `INSERT OR IGNORE INTO message_receipts (
+      trace_id, external_message_id, chat_jid, lane, status, received_at
+    ) VALUES (?, ?, ?, ?, 'RECEIVED', ?)`,
+  ).run(traceId, externalMessageId, chatJid, lane, receivedAt);
+
+  return {
+    trace_id: traceId,
+    chat_jid: chatJid,
+    external_message_id: externalMessageId,
+    lane,
+  };
+}
+
+export function getMessageReceipt(traceId: string): MessageReceipt | undefined {
+  return db.prepare(`SELECT * FROM message_receipts WHERE trace_id = ?`).get(traceId) as
+    | MessageReceipt
+    | undefined;
+}
+
+export function getMessageReceiptByExternal(
+  chatJid: string,
+  externalMessageId: string,
+): MessageReceipt | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM message_receipts WHERE chat_jid = ? AND external_message_id = ?`,
+    )
+    .get(chatJid, externalMessageId) as MessageReceipt | undefined;
+}
+
+export function getMessageAttempts(traceId: string): MessageAttempt[] {
+  return db
+    .prepare(
+      `SELECT * FROM message_attempts WHERE trace_id = ? ORDER BY attempt_no ASC, id ASC`,
+    )
+    .all(traceId) as MessageAttempt[];
+}
+
+export function getOpenDeadLetters(): DeadLetterMessage[] {
+  return db
+    .prepare(
+      `SELECT * FROM dead_letter_messages WHERE status = 'open' ORDER BY created_at DESC`,
+    )
+    .all() as DeadLetterMessage[];
+}
+
+export function getDeadLettersByStatus(
+  status: 'open' | 'retrying' | 'resolved',
+): DeadLetterMessage[] {
+  return db
+    .prepare(
+      `SELECT * FROM dead_letter_messages WHERE status = ? ORDER BY created_at DESC`,
+    )
+    .all(status) as DeadLetterMessage[];
+}
+
+export function getDeadLetterByTrace(traceId: string): DeadLetterMessage | undefined {
+  return db
+    .prepare(`SELECT * FROM dead_letter_messages WHERE trace_id = ?`)
+    .get(traceId) as DeadLetterMessage | undefined;
+}
+
+export function getDlqCounts(): { open24h: number; open1h: number; retrying: number } {
+  const now = Date.now();
+  const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
+  const dayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+
+  const open1h =
+    (db
+      .prepare(
+        `SELECT COUNT(*) as c FROM dead_letter_messages WHERE status = 'open' AND created_at >= ?`,
+      )
+      .get(oneHourAgo) as { c: number }).c || 0;
+
+  const open24h =
+    (db
+      .prepare(
+        `SELECT COUNT(*) as c FROM dead_letter_messages WHERE status = 'open' AND created_at >= ?`,
+      )
+      .get(dayAgo) as { c: number }).c || 0;
+
+  const retrying =
+    (db
+      .prepare(
+        `SELECT COUNT(*) as c FROM dead_letter_messages WHERE status = 'retrying'`,
+      )
+      .get() as { c: number }).c || 0;
+
+  return { open24h, open1h, retrying };
+}
+
+export function markDeadLetterRetrying(traceId: string, retriedBy: string): boolean {
+  const now = nowIso();
+  const tx = db.transaction(() => {
+    const receiptUpdated = db.prepare(
+      `UPDATE message_receipts
+       SET status = 'RETRYING', error_code = NULL, error_detail = NULL
+       WHERE trace_id = ?`,
+    ).run(traceId);
+
+    const dlqUpdated = db.prepare(
+      `UPDATE dead_letter_messages
+       SET status = 'retrying', retried_at = ?, retried_by = ?
+       WHERE trace_id = ?`,
+    ).run(now, retriedBy, traceId);
+
+    return receiptUpdated.changes > 0 && dlqUpdated.changes > 0;
+  });
+  return tx();
+}
+
+export function resolveDeadLetter(traceId: string): void {
+  db.prepare(
+    `UPDATE dead_letter_messages SET status = 'resolved' WHERE trace_id = ?`,
+  ).run(traceId);
+}
+
+export function transitionMessageStatus(
+  traceId: string,
+  status: MessageStatus,
+  options?: {
+    attemptIncrement?: boolean;
+    containerName?: string | null;
+    errorCode?: string | null;
+    errorDetail?: string | null;
+    timeoutHit?: boolean;
+    exitCode?: number | null;
+  },
+): void {
+  const now = nowIso();
+  const tx = db.transaction(() => {
+    const setParts = ['status = ?'];
+    const values: unknown[] = [status];
+
+    if (status === 'QUEUED') {
+      setParts.push('queued_at = COALESCE(queued_at, ?)');
+      values.push(now);
+    }
+    if (status === 'RUNNING') {
+      setParts.push('started_at = ?');
+      values.push(now);
+    }
+    if (status === 'REPLIED') {
+      setParts.push('replied_at = ?');
+      values.push(now);
+      setParts.push('error_code = NULL');
+      setParts.push('error_detail = NULL');
+    }
+    if (status === 'TIMEOUT') {
+      setParts.push('timeout_at = ?');
+      values.push(now);
+    }
+    if (status === 'DEAD_LETTERED') {
+      setParts.push('dead_lettered_at = ?');
+      values.push(now);
+    }
+    if (options?.errorCode !== undefined) {
+      setParts.push('error_code = ?');
+      values.push(options.errorCode);
+    }
+    if (options?.errorDetail !== undefined) {
+      setParts.push('error_detail = ?');
+      values.push(options.errorDetail);
+    }
+    if (options?.attemptIncrement) {
+      setParts.push('attempt_count = attempt_count + 1');
+    }
+
+    values.push(traceId);
+    db.prepare(
+      `UPDATE message_receipts SET ${setParts.join(', ')} WHERE trace_id = ?`,
+    ).run(...values);
+
+    if (options?.attemptIncrement) {
+      const attempt = db.prepare(
+        `SELECT attempt_count FROM message_receipts WHERE trace_id = ?`,
+      ).get(traceId) as { attempt_count?: number } | undefined;
+      const attemptNo = attempt?.attempt_count ?? 1;
+      db.prepare(
+        `INSERT INTO message_attempts (
+          trace_id, attempt_no, container_name, run_started_at
+        ) VALUES (?, ?, ?, ?)`,
+      ).run(traceId, attemptNo, options.containerName || null, now);
+    }
+
+    if (status === 'TIMEOUT' || status === 'FAILED' || status === 'DEAD_LETTERED') {
+      db.prepare(
+        `UPDATE message_attempts
+         SET run_ended_at = COALESCE(run_ended_at, ?),
+             timeout_hit = CASE WHEN ? THEN 1 ELSE timeout_hit END,
+             exit_code = COALESCE(exit_code, ?)
+         WHERE id = (
+           SELECT id FROM message_attempts
+           WHERE trace_id = ?
+           ORDER BY attempt_no DESC, id DESC
+           LIMIT 1
+         )`,
+      ).run(now, options?.timeoutHit ? 1 : 0, options?.exitCode ?? null, traceId);
+    }
+
+    if (status === 'REPLIED') {
+      db.prepare(
+        `UPDATE message_attempts
+         SET run_ended_at = COALESCE(run_ended_at, ?)
+         WHERE id = (
+           SELECT id FROM message_attempts
+           WHERE trace_id = ?
+           ORDER BY attempt_no DESC, id DESC
+           LIMIT 1
+         )`,
+      ).run(now, traceId);
+    }
+  });
+
+  tx();
+}
+
+export function moveToDeadLetter(
+  traceId: string,
+  reason: string,
+  finalError: string,
+  retryable = true,
+): void {
+  const receipt = getMessageReceipt(traceId);
+  if (!receipt) return;
+
+  const now = nowIso();
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT OR REPLACE INTO dead_letter_messages (
+        trace_id, chat_jid, external_message_id, reason, final_error, retryable, status, created_at, retried_at, retried_by
+      ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL, NULL)`,
+    ).run(
+      traceId,
+      receipt.chat_jid,
+      receipt.external_message_id,
+      reason,
+      finalError,
+      retryable ? 1 : 0,
+      now,
+    );
+
+    db.prepare(
+      `UPDATE message_receipts
+       SET status = 'DEAD_LETTERED',
+           error_code = ?,
+           error_detail = ?,
+           dead_lettered_at = ?
+       WHERE trace_id = ?`,
+    ).run(reason, finalError, now, traceId);
+  });
+
+  tx();
+}
+
+export function getRetryingMessages(chatJid: string, botPrefix: string): NewMessage[] {
+  const sql = `
+    SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp
+    FROM message_receipts r
+    JOIN messages m
+      ON m.chat_jid = r.chat_jid AND m.id = r.external_message_id
+    WHERE r.chat_jid = ?
+      AND r.status = 'RETRYING'
+      AND m.content NOT LIKE ?
+    ORDER BY COALESCE(m.timestamp_epoch, CAST(strftime('%s', m.timestamp) AS INTEGER) * 1000)
+    LIMIT 50
+  `;
+
+  return db.prepare(sql).all(chatJid, `${botPrefix}:%`) as NewMessage[];
+}
+
+export interface RecoverableReceipt {
+  trace_id: string;
+  chat_jid: string;
+  external_message_id: string;
+  status: MessageStatus;
+  content: string;
+  timestamp: string;
+}
+
+export function getRecoverableReceipts(): RecoverableReceipt[] {
+  return db
+    .prepare(
+      `
+      SELECT
+        r.trace_id,
+        r.chat_jid,
+        r.external_message_id,
+        r.status,
+        m.content,
+        m.timestamp
+      FROM message_receipts r
+      JOIN messages m
+        ON m.chat_jid = r.chat_jid AND m.id = r.external_message_id
+      WHERE r.status IN ('RECEIVED', 'QUEUED', 'RUNNING')
+      ORDER BY COALESCE(m.timestamp_epoch, CAST(strftime('%s', m.timestamp) AS INTEGER) * 1000), m.id
+    `,
+    )
+    .all() as RecoverableReceipt[];
 }
 
 /**
@@ -261,7 +668,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, timestamp_epoch, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -269,6 +676,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.sender_name,
     msg.content,
     msg.timestamp,
+    toEpochMs(msg.timestamp),
     msg.is_from_me ? 1 : 0,
   );
 }
@@ -286,7 +694,7 @@ export function storeMessageDirect(msg: {
   is_from_me: boolean;
 }): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, timestamp_epoch, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -294,6 +702,7 @@ export function storeMessageDirect(msg: {
     msg.sender_name,
     msg.content,
     msg.timestamp,
+    toEpochMs(msg.timestamp),
     msg.is_from_me ? 1 : 0,
   );
 }
@@ -306,18 +715,21 @@ export function getNewMessages(
   if (jids.length === 0) return { messages: [], newTimestamp: lastTimestamp };
 
   const placeholders = jids.map(() => '?').join(',');
+  const lastEpoch = lastTimestamp ? toEpochMs(lastTimestamp) : 0;
   // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
   const sql = `
     SELECT id, chat_jid, sender, sender_name, content, timestamp
     FROM messages
-    WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
-    ORDER BY timestamp
+    WHERE COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) > ?
+      AND chat_jid IN (${placeholders})
+      AND content NOT LIKE ?
+    ORDER BY COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000), id
     LIMIT 200
   `;
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`) as NewMessage[];
+    .all(lastEpoch, ...jids, `${botPrefix}:%`) as NewMessage[];
 
   let newTimestamp = lastTimestamp;
   for (const row of rows) {
@@ -333,20 +745,23 @@ export function getMessagesSince(
   botPrefix: string,
   limit = 50,
 ): NewMessage[] {
+  const sinceEpoch = sinceTimestamp ? toEpochMs(sinceTimestamp) : 0;
   // Filter out bot's own messages by checking content prefix
   // Use subquery to get the MOST RECENT N messages, then re-order ascending
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) AS ts_epoch
       FROM messages
-      WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
-      ORDER BY timestamp DESC
+      WHERE chat_jid = ?
+        AND COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) > ?
+        AND content NOT LIKE ?
+      ORDER BY COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) DESC, id DESC
       LIMIT ?
-    ) sub ORDER BY timestamp ASC
+    ) sub ORDER BY ts_epoch ASC, id ASC
   `;
   return db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(chatJid, sinceEpoch, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
 export function createTask(

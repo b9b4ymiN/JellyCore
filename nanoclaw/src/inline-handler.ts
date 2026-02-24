@@ -124,7 +124,7 @@ function cmdStatus(): string {
   let containerNames: string[] = [];
   try {
     const output = execSync(
-      'docker ps --filter name=nanoclaw- --format {{.Names}} 2>/dev/null',
+      'docker ps --filter name=nanoclaw- --format "{{.Names}}" 2>/dev/null',
       { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     containerNames = output.trim().split('\n').filter(Boolean);
@@ -414,7 +414,7 @@ function cmdHealth(): string {
   let containerCount = 0;
   try {
     const output = execSync(
-      'docker ps --filter name=nanoclaw- --format {{.Names}} 2>/dev/null',
+      'docker ps --filter name=nanoclaw- --format "{{.Names}}" 2>/dev/null',
       { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     containerCount = output.trim().split('\n').filter(Boolean).length;
@@ -440,7 +440,7 @@ function cmdQueue(): string {
   let containerCount = 0;
   try {
     const output = execSync(
-      'docker ps --filter name=nanoclaw- --format {{.Names}} 2>/dev/null',
+      'docker ps --filter name=nanoclaw- --format "{{.Names}}" 2>/dev/null',
       { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     containerCount = output.trim().split('\n').filter(Boolean).length;

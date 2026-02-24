@@ -51,6 +51,64 @@ export interface NewMessage {
   is_from_me?: boolean;
 }
 
+export type LaneType = 'user' | 'scheduler' | 'heartbeat';
+
+export type MessageStatus =
+  | 'RECEIVED'
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'REPLIED'
+  | 'RETRYING'
+  | 'TIMEOUT'
+  | 'FAILED'
+  | 'DEAD_LETTERED';
+
+export interface TraceContext {
+  trace_id: string;
+  chat_jid: string;
+  external_message_id: string;
+  lane: LaneType;
+}
+
+export interface MessageReceipt extends TraceContext {
+  status: MessageStatus;
+  attempt_count: number;
+  error_code: string | null;
+  error_detail: string | null;
+  received_at: string;
+  queued_at: string | null;
+  started_at: string | null;
+  replied_at: string | null;
+  timeout_at: string | null;
+  dead_lettered_at: string | null;
+}
+
+export interface MessageAttempt {
+  id: number;
+  trace_id: string;
+  attempt_no: number;
+  container_name: string | null;
+  spawn_started_at: string | null;
+  spawn_failed_at: string | null;
+  run_started_at: string | null;
+  run_ended_at: string | null;
+  exit_code: number | null;
+  timeout_hit: number;
+}
+
+export interface DeadLetterMessage {
+  trace_id: string;
+  chat_jid: string;
+  external_message_id: string;
+  reason: string;
+  final_error: string | null;
+  retryable: number;
+  status: 'open' | 'retrying' | 'resolved';
+  created_at: string;
+  retried_at: string | null;
+  retried_by: string | null;
+}
+
 export interface ScheduledTask {
   id: string;
   group_folder: string;

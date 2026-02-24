@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+﻿import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -9,11 +9,13 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  POOL_ENABLED,
   SESSION_MAX_AGE_MS,
   TELEGRAM_BOT_TOKEN,
   TIMEZONE,
   TRIGGER_PATTERN,
   TYPING_MAX_TTL,
+  USER_PROGRESS_INTERVALS_MS,
 } from './config.js';
 import { messageBus } from './message-bus.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
@@ -34,13 +36,25 @@ import { initCostTracking, trackUsage } from './cost-tracker.js';
 import { initCostIntelligence, checkBudget, trackUsageEnhanced } from './cost-intelligence.js';
 import {
   getAllChats,
+  getDlqCounts,
+  getDeadLetterByTrace,
+  getDeadLettersByStatus,
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getMessageAttempts,
+  getMessageReceipt,
   getMessagesSince,
   getNewMessages,
+  getRecoverableReceipts,
+  getRetryingMessages,
   getRouterState,
   getSessionAge,
+  markDeadLetterRetrying,
+  ensureMessageReceipt,
+  moveToDeadLetter,
+  resolveDeadLetter,
+  transitionMessageStatus,
   clearSession,
   initDatabase,
   setRegisteredGroup,
@@ -54,11 +68,12 @@ import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher, writeHeartbeatJobsSnapshot } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound, routeOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { Channel, LaneType, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { startHealthServer, setStatusProvider, setHeartbeatProvider, recordError } from './health-server.js';
+import { startHealthServer, setOpsProvider, setStatusProvider, setHeartbeatProvider, recordError } from './health-server.js';
 import { resourceMonitor } from './resource-monitor.js';
 import { startHeartbeat, startHeartbeatJobRunner, patchHeartbeatConfig, recordActivity } from './heartbeat.js';
+import { dockerResilience } from './docker-resilience.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -71,9 +86,43 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+const latestFailedTracesByGroup = new Map<string, string[]>();
+const latestRejectedTracesByGroup = new Map<string, string[]>();
 
-// Global registry of active typing intervals — cleared on shutdown
+// Global registry of active typing intervals â€” cleared on shutdown
 const activeTypingIntervals = new Set<ReturnType<typeof setInterval>>();
+
+function traceMessages(
+  messages: NewMessage[],
+  lane: LaneType = 'user',
+): Array<{ message: NewMessage; traceId: string }> {
+  return messages.map((message) => {
+    const trace = ensureMessageReceipt(
+      message.chat_jid,
+      message.id,
+      lane,
+      new Date().toISOString(),
+    );
+    return { message, traceId: trace.trace_id };
+  });
+}
+
+function markTraceStatus(
+  traces: string[],
+  status: import('./types.js').MessageStatus,
+  options?: {
+    attemptIncrement?: boolean;
+    containerName?: string | null;
+    errorCode?: string | null;
+    errorDetail?: string | null;
+    timeoutHit?: boolean;
+    exitCode?: number | null;
+  },
+): void {
+  for (const traceId of traces) {
+    transitionMessageStatus(traceId, status, options);
+  }
+}
 
 /** Find the channel that owns a JID, or throw */
 function channelFor(jid: string): Channel {
@@ -87,7 +136,7 @@ async function sendToChannel(jid: string, text: string): Promise<void> {
   await routeOutbound(channels, jid, text);
 }
 
-/** Set typing indicator on the right channel (safe — never throws) */
+/** Set typing indicator on the right channel (safe â€” never throws) */
 async function setTypingOnChannel(jid: string, isTyping: boolean): Promise<void> {
   try {
     const ch = findChannel(channels, jid);
@@ -162,7 +211,7 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
- * retryCount: 0 = first attempt, 1+ = automatic retry (silent — don't spam user)
+ * retryCount: 0 = first attempt, 1+ = automatic retry (silent â€” don't spam user)
  */
 async function processGroupMessages(chatJid: string, retryCount: number = 0): Promise<boolean> {
   const group = registeredGroups[chatJid];
@@ -176,28 +225,40 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     sinceTimestamp,
     ASSISTANT_NAME,
   );
+  const retryingMessages = getRetryingMessages(chatJid, ASSISTANT_NAME);
+  const mergedMessages = [...missedMessages];
+  const existingIds = new Set(missedMessages.map((m) => m.id));
+  for (const m of retryingMessages) {
+    if (!existingIds.has(m.id)) mergedMessages.push(m);
+  }
+  mergedMessages.sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  );
 
-  if (missedMessages.length === 0) return true;
+  if (mergedMessages.length === 0) return true;
+  const tracedMessages = traceMessages(mergedMessages, 'user');
+  const traceIds = tracedMessages.map((t) => t.traceId);
+  markTraceStatus(traceIds, 'QUEUED');
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
-    const hasTrigger = missedMessages.some((m) =>
+    const hasTrigger = mergedMessages.some((m) =>
       TRIGGER_PATTERN.test(m.content.trim()),
     );
-    if (!hasTrigger) return true;
+    if (!hasTrigger && retryingMessages.length === 0) return true;
   }
 
   // --- Smart Query Router: classify the latest message ---
-  const lastMsg = missedMessages[missedMessages.length - 1];
+  const lastMsg = mergedMessages[mergedMessages.length - 1];
   const classification = classifyQuery(lastMsg.content);
   const startTime = Date.now();
 
   logger.info(
-    { group: group.name, tier: classification.tier, reason: classification.reason, messageCount: missedMessages.length },
+    { group: group.name, tier: classification.tier, reason: classification.reason, messageCount: mergedMessages.length, retryingCount: retryingMessages.length },
     'Query classified',
   );
 
-  // Tier 1: Inline — template response, no container/API
+  // Tier 1: Inline â€” template response, no container/API
   if (classification.tier === 'inline') {
     const result = handleInline(classification.reason, lastMsg.content, chatJid, group.name);
     const reply = typeof result === 'string' ? result : result.reply;
@@ -205,6 +266,8 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
 
     const ch = channelFor(chatJid);
     await sendToChannel(chatJid, formatOutbound(ch, reply));
+    markTraceStatus(traceIds, 'REPLIED');
+    for (const traceId of traceIds) resolveDeadLetter(traceId);
     lastAgentTimestamp[chatJid] = lastMsg.timestamp;
     saveState();
 
@@ -222,33 +285,37 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     return true;
   }
 
-  // Tier 2: Oracle-only — direct Oracle API call, no container
+  // Tier 2: Oracle-only â€” direct Oracle API call, no container
   if (classification.tier === 'oracle-only') {
     const reply = await handleOracleOnly(classification.reason, lastMsg.content);
     if (reply) {
       const ch = channelFor(chatJid);
       await sendToChannel(chatJid, formatOutbound(ch, reply));
+      markTraceStatus(traceIds, 'REPLIED');
+      for (const traceId of traceIds) resolveDeadLetter(traceId);
       lastAgentTimestamp[chatJid] = lastMsg.timestamp;
       saveState();
       trackUsage(classification.tier, classification.model, Date.now() - startTime);
       logger.info({ group: group.name, tier: 'oracle-only', ms: Date.now() - startTime }, 'Oracle response sent');
       return true;
     }
-    // Empty reply means Oracle failed — fall through to container
+    // Empty reply means Oracle failed â€” fall through to container
     logger.warn({ group: group.name }, 'Oracle handler returned empty, falling through to container');
   }
 
-  // Tier 3 & 4: Container-light / Container-full — spawn container
+  // Tier 3 & 4: Container-light / Container-full â€” spawn container
   // Budget enforcement: check before spawning container
   const budget = checkBudget(classification.model, group.folder);
   if (budget.action === 'offline') {
     try {
       const ch = channelFor(chatJid);
-      await sendToChannel(chatJid, formatOutbound(ch, budget.message || 'ขออภัย budget เดือนนี้หมดแล้วค่ะ'));
+      await sendToChannel(chatJid, formatOutbound(ch, budget.message || 'à¸‚à¸­à¸­à¸ à¸±à¸¢ budget à¹€à¸”à¸·à¸­à¸™à¸™à¸µà¹‰à¸«à¸¡à¸”à¹à¸¥à¹‰à¸§à¸„à¹ˆà¸°'));
     } catch (sendErr) {
-      // R6 fix: advance cursor regardless — prevents message being re-processed indefinitely
+      // R6 fix: advance cursor regardless â€” prevents message being re-processed indefinitely
       logger.warn({ group: group.name, err: sendErr }, 'Failed to send budget-offline message (advancing cursor anyway)');
     }
+    markTraceStatus(traceIds, 'REPLIED');
+    for (const traceId of traceIds) resolveDeadLetter(traceId);
     lastAgentTimestamp[chatJid] = lastMsg.timestamp;
     saveState();
     trackUsage(classification.tier, classification.model, Date.now() - startTime);
@@ -283,7 +350,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     logger.warn({ group: group.name, err }, 'Oracle context injection failed, continuing without');
   }
 
-  const rawPrompt = formatMessages(missedMessages);
+  const rawPrompt = formatMessages(mergedMessages);
   const timeHeader = `[Current time: ${new Date().toLocaleString('th-TH', { timeZone: TIMEZONE, dateStyle: 'short', timeStyle: 'medium' })} (${TIMEZONE})]`;
   const prompt = oracleContext
     ? `${oracleContext}\n\n${timeHeader}\n\n${rawPrompt}`
@@ -293,13 +360,14 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
   lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+    mergedMessages[mergedMessages.length - 1].timestamp;
   saveState();
 
   logger.info(
-    { group: group.name, tier: classification.tier, model: classification.model, messageCount: missedMessages.length },
+    { group: group.name, tier: classification.tier, model: classification.model, messageCount: mergedMessages.length },
     'Processing via container',
   );
+  markTraceStatus(traceIds, 'RUNNING', { attemptIncrement: true });
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -325,10 +393,10 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
       clearInterval(typingInterval);
       activeTypingIntervals.delete(typingInterval);
       logger.info({ group: group.name, chatJid, ttlMs: TYPING_MAX_TTL }, 'Typing indicator TTL expired, auto-stopped');
-      // Notify user we are still working — prevents silent-looking stall
+      // Notify user we are still working â€” prevents silent-looking stall
       if (!outputSentToUser && !ttlNoticeSent) {
         ttlNoticeSent = true;
-        sendToChannel(chatJid, '⏳ ยังทำงานอยู่ครับ งานนี้ใช้เวลานานหน่อย กรุณารอสักครู่นะครับ...').catch(() => {});
+        sendToChannel(chatJid, 'â³ à¸¢à¸±à¸‡à¸—à¸³à¸‡à¸²à¸™à¸­à¸¢à¸¹à¹ˆà¸„à¸£à¸±à¸š à¸‡à¸²à¸™à¸™à¸µà¹‰à¹ƒà¸Šà¹‰à¹€à¸§à¸¥à¸²à¸™à¸²à¸™à¸«à¸™à¹ˆà¸­à¸¢ à¸à¸£à¸¸à¸“à¸²à¸£à¸­à¸ªà¸±à¸à¸„à¸£à¸¹à¹ˆà¸™à¸°à¸„à¸£à¸±à¸š...').catch(() => {});
       }
       return;
     }
@@ -345,16 +413,16 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
       }
     }, delayMs));
   };
-  scheduleProgress(20_000,       '⏳ กำลังคิดอยู่ค่ะ รอสักครู่นะคะ...');
-  scheduleProgress(3 * 60_000,   '⏳ ยังประมวลผลอยู่ครับ (3 นาที)...');
-  scheduleProgress(6 * 60_000,   '⏳ งานนี้ใช้เวลาหน่อยนะครับ (6 นาที)...');
-  scheduleProgress(10 * 60_000,  '⏳ กำลังทำงานอยู่ครับ ซับซ้อนหน่อย (10 นาที)...');
+  const [p1, p2, p3] = USER_PROGRESS_INTERVALS_MS;
+  if (p1) scheduleProgress(p1, 'â³ à¸à¸³à¸¥à¸±à¸‡à¸„à¸´à¸”à¸­à¸¢à¸¹à¹ˆà¸„à¹ˆà¸° à¸£à¸­à¸ªà¸±à¸à¸„à¸£à¸¹à¹ˆà¸™à¸°à¸„à¸°...');
+  if (p2) scheduleProgress(p2, 'â³ à¸¢à¸±à¸‡à¸›à¸£à¸°à¸¡à¸§à¸¥à¸œà¸¥à¸­à¸¢à¸¹à¹ˆà¸„à¸£à¸±à¸š...');
+  if (p3) scheduleProgress(p3, 'â³ à¸‡à¸²à¸™à¸™à¸µà¹‰à¹ƒà¸Šà¹‰à¹€à¸§à¸¥à¸²à¸™à¸²à¸™à¸à¸§à¹ˆà¸²à¸›à¸à¸•à¸´à¹€à¸¥à¹‡à¸à¸™à¹‰à¸­à¸¢à¸„à¸£à¸±à¸š...');
 
   let ch: Channel;
   try {
     ch = channelFor(chatJid);
   } catch (err) {
-    // Channel disconnected before we could start — clean up timers and bail
+    // Channel disconnected before we could start â€” clean up timers and bail
     clearInterval(typingInterval);
     activeTypingIntervals.delete(typingInterval);
     progressTimers.forEach(clearTimeout);
@@ -366,11 +434,11 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   let output: 'success' | 'error';
   try {
     output = await runAgent(group, prompt, chatJid, async (result) => {
-      // Streaming output callback — called for each agent result
+      // Streaming output callback â€” called for each agent result
       try {
         if (result.result) {
           const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
-          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+          // Strip <internal>...</internal> blocks â€” agent uses these for internal reasoning
           const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
           logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
           if (text) {
@@ -388,11 +456,11 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
         }
 
         // R14: Container completed with status=success but result is null and nothing was sent
-        // This means the agent ran but produced no output — send a fallback so user isn't left in silence
+        // This means the agent ran but produced no output â€” send a fallback so user isn't left in silence
         if (result.status === 'success' && result.result === null && !outputSentToUser) {
-          logger.warn({ group: group.name }, 'Container completed with null result and no prior output — sending fallback');
+          logger.warn({ group: group.name }, 'Container completed with null result and no prior output â€” sending fallback');
           try {
-            await sendToChannel(chatJid, formatOutbound(ch, '✅ ดำเนินการเสร็จสิ้นครับ (ไม่มีข้อความตอบกลับ)'));
+            await sendToChannel(chatJid, formatOutbound(ch, 'âœ… à¸”à¸³à¹€à¸™à¸´à¸™à¸à¸²à¸£à¹€à¸ªà¸£à¹‡à¸ˆà¸ªà¸´à¹‰à¸™à¸„à¸£à¸±à¸š (à¹„à¸¡à¹ˆà¸¡à¸µà¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡à¸•à¸­à¸šà¸à¸¥à¸±à¸š)'));
             outputSentToUser = true;
           } catch (fbErr) {
             logger.warn({ group: group.name, err: fbErr }, 'Failed to send null-result fallback');
@@ -404,7 +472,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
       }
     });
   } finally {
-    // ALWAYS clean up timers — even if runAgent() throws
+    // ALWAYS clean up timers â€” even if runAgent() throws
     clearInterval(typingInterval);
     activeTypingIntervals.delete(typingInterval);
     progressTimers.forEach(clearTimeout);
@@ -413,24 +481,31 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   }
 
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
+    // If we already sent output to the user, don't roll back the cursor â€”
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
       logger.warn({ group: group.name }, 'Agent error after output was sent, skipping cursor rollback to prevent duplicates');
+      markTraceStatus(traceIds, 'REPLIED');
+      for (const traceId of traceIds) resolveDeadLetter(traceId);
       trackUsage(classification.tier, classification.model, Date.now() - startTime);
       return true;
     }
+    latestFailedTracesByGroup.set(chatJid, traceIds);
+    markTraceStatus(traceIds, 'RETRYING', {
+      errorCode: 'AGENT_ERROR',
+      errorDetail: 'Container execution failed, retrying',
+    });
     recordError(`Agent error for group ${group.name}`, group.name);
-    // Only notify the user on the FIRST failure — retries (retryCount > 0) are silent.
-    // This prevents spam like 5× "⚠️ ระบบมีปัญหา" for a single failed message.
+    // Only notify the user on the FIRST failure â€” retries (retryCount > 0) are silent.
+    // This prevents spam like 5Ã— "âš ï¸ à¸£à¸°à¸šà¸šà¸¡à¸µà¸›à¸±à¸à¸«à¸²" for a single failed message.
     if (retryCount === 0) {
       try {
-        await sendToChannel(chatJid, formatOutbound(ch, '⚠️ ขอโทษครับ ระบบมีปัญหาชั่วคราว กำลังลองใหม่อัตโนมัติค่ะ...'));
+        await sendToChannel(chatJid, formatOutbound(ch, 'âš ï¸ à¸‚à¸­à¹‚à¸—à¸©à¸„à¸£à¸±à¸š à¸£à¸°à¸šà¸šà¸¡à¸µà¸›à¸±à¸à¸«à¸²à¸Šà¸±à¹ˆà¸§à¸„à¸£à¸²à¸§ à¸à¸³à¸¥à¸±à¸‡à¸¥à¸­à¸‡à¹ƒà¸«à¸¡à¹ˆà¸­à¸±à¸•à¹‚à¸™à¸¡à¸±à¸•à¸´à¸„à¹ˆà¸°...'));
       } catch (notifyErr) {
         logger.warn({ group: group.name, err: notifyErr }, 'Failed to send error notification');
       }
     } else {
-      logger.info({ group: group.name, retryCount }, 'Agent error on retry — silent (no user notification)');
+      logger.info({ group: group.name, retryCount }, 'Agent error on retry â€” silent (no user notification)');
     }
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
@@ -442,15 +517,20 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   // Guard against silent "success with no output" runs.
   // Without this, the cursor advances and the user gets no reply.
   if (!outputSentToUser) {
+    latestFailedTracesByGroup.set(chatJid, traceIds);
+    markTraceStatus(traceIds, 'RETRYING', {
+      errorCode: 'NO_OUTPUT',
+      errorDetail: 'Container completed without user-visible output',
+    });
     recordError(`Agent produced no output for group ${group.name}`, group.name);
     if (retryCount === 0) {
       try {
-        await sendToChannel(chatJid, formatOutbound(ch, '⚠️ ขอโทษครับ ไม่ได้รับข้อความตอบกลับ กำลังลองใหม่อัตโนมัติค่ะ...'));
+        await sendToChannel(chatJid, formatOutbound(ch, 'âš ï¸ à¸‚à¸­à¹‚à¸—à¸©à¸„à¸£à¸±à¸š à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸£à¸±à¸šà¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡à¸•à¸­à¸šà¸à¸¥à¸±à¸š à¸à¸³à¸¥à¸±à¸‡à¸¥à¸­à¸‡à¹ƒà¸«à¸¡à¹ˆà¸­à¸±à¸•à¹‚à¸™à¸¡à¸±à¸•à¸´à¸„à¹ˆà¸°...'));
       } catch (notifyErr) {
         logger.warn({ group: group.name, err: notifyErr }, 'Failed to send no-output notification');
       }
     } else {
-      logger.info({ group: group.name, retryCount }, 'No output on retry — silent');
+      logger.info({ group: group.name, retryCount }, 'No output on retry â€” silent');
     }
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
@@ -458,6 +538,9 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     return false;
   }
 
+  markTraceStatus(traceIds, 'REPLIED');
+  for (const traceId of traceIds) resolveDeadLetter(traceId);
+  latestFailedTracesByGroup.delete(chatJid);
   trackUsage(classification.tier, classification.model, Date.now() - startTime);
   return true;
 }
@@ -531,6 +614,7 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        lane: 'user',
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
@@ -631,6 +715,8 @@ async function checkAndProcessMessages(): Promise<void> {
     for (const [chatJid, groupMessages] of messagesByGroup) {
       const group = registeredGroups[chatJid];
       if (!group) continue;
+      const traced = traceMessages(groupMessages, 'user');
+      const traceIds = traced.map((t) => t.traceId);
 
       const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
       const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
@@ -656,11 +742,45 @@ async function checkAndProcessMessages(): Promise<void> {
           { chatJid, count: messagesToSend.length },
           'Piped messages to active container',
         );
+        latestRejectedTracesByGroup.delete(chatJid);
+        markTraceStatus(traceIds, 'RUNNING');
         lastAgentTimestamp[chatJid] =
           messagesToSend[messagesToSend.length - 1].timestamp;
         saveState();
       } else {
-        queue.enqueueMessageCheck(chatJid);
+        const accepted = queue.enqueueMessageCheck(chatJid);
+        if (accepted) {
+          latestRejectedTracesByGroup.delete(chatJid);
+          markTraceStatus(traceIds, 'QUEUED');
+          try {
+            await sendToChannel(chatJid, 'ðŸ“¥ à¸£à¸±à¸šà¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡à¹à¸¥à¹‰à¸§ à¸à¸³à¸¥à¸±à¸‡à¸ˆà¸±à¸”à¸„à¸´à¸§à¸›à¸£à¸°à¸¡à¸§à¸¥à¸œà¸¥à¹ƒà¸«à¹‰à¸™à¸°à¸„à¸£à¸±à¸š');
+          } catch (err) {
+            logger.debug({ chatJid, err }, 'Soft ACK send failed (non-fatal)');
+          }
+        } else {
+          latestRejectedTracesByGroup.set(chatJid, traceIds);
+          markTraceStatus(traceIds, 'FAILED', {
+            errorCode: 'FAILED_QUEUE_FULL',
+            errorDetail: 'Queue rejected due to capacity limit',
+          });
+          for (const traceId of traceIds) {
+            moveToDeadLetter(
+              traceId,
+              'FAILED_QUEUE_FULL',
+              'Queue full while attempting to enqueue message',
+              true,
+            );
+          }
+          const traceHint = traceIds[0] ? traceIds[0].slice(0, 10) : 'n/a';
+          try {
+            await sendToChannel(
+              chatJid,
+              `â³ à¸£à¸°à¸šà¸šà¸‡à¸²à¸™à¹€à¸•à¹‡à¸¡à¸Šà¸±à¹ˆà¸§à¸„à¸£à¸²à¸§ à¸à¸£à¸¸à¸“à¸²à¸¥à¸­à¸‡à¹ƒà¸«à¸¡à¹ˆà¸­à¸µà¸à¸„à¸£à¸±à¹‰à¸‡ (trace: ${traceHint})`,
+            );
+          } catch (err) {
+            logger.warn({ chatJid, err }, 'Failed to send queue-full DLQ notification');
+          }
+        }
       }
     }
   }
@@ -684,6 +804,42 @@ function recoverPendingMessages(): void {
   }
 }
 
+function reconcileUnfinishedReceipts(): void {
+  const recoverable = getRecoverableReceipts();
+  if (recoverable.length === 0) return;
+
+  const queuedGroups = new Set<string>();
+  let reconciled = 0;
+
+  for (const item of recoverable) {
+    const group = registeredGroups[item.chat_jid];
+    if (!group) continue;
+
+    // Keep non-trigger chatter in RECEIVED for groups that require explicit mention.
+    if (item.status === 'RECEIVED' && group.requiresTrigger !== false && group.folder !== MAIN_GROUP_FOLDER) {
+      if (!TRIGGER_PATTERN.test(item.content.trim())) continue;
+    }
+
+    transitionMessageStatus(item.trace_id, 'RETRYING', {
+      errorCode: 'RECOVERED_AFTER_RESTART',
+      errorDetail: `Recovered unfinished state ${item.status}`,
+    });
+    queuedGroups.add(item.chat_jid);
+    reconciled += 1;
+  }
+
+  for (const jid of queuedGroups) {
+    queue.enqueueMessageCheck(jid);
+  }
+
+  if (reconciled > 0) {
+    logger.warn(
+      { reconciled, groups: queuedGroups.size },
+      'Recovered unfinished message receipts after restart',
+    );
+  }
+}
+
 function ensureDockerRunning(): void {
   try {
     execSync('docker info', { stdio: 'pipe', timeout: 10000 });
@@ -691,34 +847,34 @@ function ensureDockerRunning(): void {
   } catch {
     logger.error('Docker daemon is not running');
     console.error(
-      '\n╔════════════════════════════════════════════════════════════════╗',
+      '\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—',
     );
     console.error(
-      '║  FATAL: Docker is not running                                  ║',
+      'â•‘  FATAL: Docker is not running                                  â•‘',
     );
     console.error(
-      '║                                                                ║',
+      'â•‘                                                                â•‘',
     );
     console.error(
-      '║  Agents cannot run without Docker. To fix:                     ║',
+      'â•‘  Agents cannot run without Docker. To fix:                     â•‘',
     );
     console.error(
-      '║  Windows: Start Docker Desktop                                 ║',
+      'â•‘  Windows: Start Docker Desktop                                 â•‘',
     );
     console.error(
-      '║  macOS:   Start Docker Desktop                                 ║',
+      'â•‘  macOS:   Start Docker Desktop                                 â•‘',
     );
     console.error(
-      '║  Linux:   sudo systemctl start docker                          ║',
+      'â•‘  Linux:   sudo systemctl start docker                          â•‘',
     );
     console.error(
-      '║                                                                ║',
+      'â•‘                                                                â•‘',
     );
     console.error(
-      '║  Install from: https://docker.com/products/docker-desktop      ║',
+      'â•‘  Install from: https://docker.com/products/docker-desktop      â•‘',
     );
     console.error(
-      '╚════════════════════════════════════════════════════════════════╝\n',
+      'â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n',
     );
     throw new Error('Docker is required but not running');
   }
@@ -735,29 +891,29 @@ function ensureDockerRunning(): void {
     }).trim();
 
     if (!imageId) {
-      // Image doesn't exist — try auto-build if build context is available
+      // Image doesn't exist â€” try auto-build if build context is available
       const containerBuildDir = path.join(process.cwd(), 'container');
       if (fs.existsSync(path.join(containerBuildDir, 'Dockerfile'))) {
         logger.info(
           { image: agentImage, buildDir: containerBuildDir },
-          'Agent image not found — building automatically (first-time setup)...',
+          'Agent image not found â€” building automatically (first-time setup)...',
         );
-        console.log(`\n⏳  Building agent image '${agentImage}' (this takes ~2-5 minutes on first run)...\n`);
+        console.log(`\nâ³  Building agent image '${agentImage}' (this takes ~2-5 minutes on first run)...\n`);
         execSync(`docker build -t ${agentImage} ${containerBuildDir}`, {
           stdio: 'inherit',  // stream build output to console
           timeout: 600_000,  // 10 min build timeout
         });
         logger.info({ image: agentImage }, 'Agent image built successfully');
-        console.log(`\n✅  Agent image '${agentImage}' ready.\n`);
+        console.log(`\nâœ…  Agent image '${agentImage}' ready.\n`);
       } else {
-        // No build context available — warn loudly but DON'T crash.
+        // No build context available â€” warn loudly but DON'T crash.
         // Inline (/start, /help, /clear) and oracle-only commands will still work.
         logger.error(
           { image: agentImage, buildDir: containerBuildDir },
-          '⚠️  Agent image missing! Container-tier messages will fail. ' +
+          'âš ï¸  Agent image missing! Container-tier messages will fail. ' +
           'Build it manually: docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/container/',
         );
-        console.error(`\n⚠️  WARNING: Agent image '${agentImage}' not found!`);
+        console.error(`\nâš ï¸  WARNING: Agent image '${agentImage}' not found!`);
         console.error(`   Inline commands (/start, /help, /clear) will work.`);
         console.error(`   But AI responses (container tier) will fail until you build it:`);
         console.error(`   docker build -t ${agentImage} -f nanoclaw/container/Dockerfile nanoclaw/container/\n`);
@@ -766,16 +922,16 @@ function ensureDockerRunning(): void {
       logger.debug({ image: agentImage, imageId }, 'Agent image verified');
     }
   } catch (err) {
-    // Build failed — warn but don't crash
-    logger.warn({ image: agentImage, err }, 'Agent image check/build failed — container-tier messages may fail');
+    // Build failed â€” warn but don't crash
+    logger.warn({ image: agentImage, err }, 'Agent image check/build failed â€” container-tier messages may fail');
   }
 
   // Kill running orphans + prune exited NanoClaw containers from previous runs.
   // Running orphans: stop them first (blocks), then let --rm remove them.
-  // Exited orphans: directly remove (handles transition from pre-–rm builds and Docker-crash leftovers).
+  // Exited orphans: directly remove (handles transition from pre-â€“rm builds and Docker-crash leftovers).
   try {
     // 1. Stop any still-running agent containers
-    const runningOut = execSync('docker ps --filter name=nanoclaw- --format {{.Names}}', {
+    const runningOut = execSync('docker ps --filter name=nanoclaw- --format "{{.Names}}"', {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
@@ -789,7 +945,7 @@ function ensureDockerRunning(): void {
 
     // 2. Prune leftover Exited containers (e.g. from builds without --rm, or Docker-daemon crashes)
     const exitedOut = execSync(
-      'docker ps -a --filter name=nanoclaw- --filter status=exited --format {{.Names}}',
+      'docker ps -a --filter name=nanoclaw- --filter status=exited --format "{{.Names}}"',
       { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
     );
     const exited = exitedOut.trim().split('\n').filter(Boolean);
@@ -817,6 +973,8 @@ async function main(): Promise<void> {
   initContainerPool();
   logger.info('Database initialized');
   loadState();
+  reconcileUnfinishedReceipts();
+  dockerResilience.init(() => queue.getActiveContainerNames());
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
@@ -831,11 +989,12 @@ async function main(): Promise<void> {
     // 2. Shutdown container pool and queue
     await containerPool.shutdown();
     await queue.shutdown(10000);
+    dockerResilience.stop();
 
     // 3. Kill ALL orphan nanoclaw-* agent containers so Docker network can be freed
     try {
       const { execSync } = await import('child_process');
-      const output = execSync('docker ps --filter name=nanoclaw- --format {{.Names}}', {
+      const output = execSync('docker ps --filter name=nanoclaw- --format "{{.Names}}"', {
         stdio: ['pipe', 'pipe', 'pipe'],
         encoding: 'utf-8',
         timeout: 10000,
@@ -866,6 +1025,8 @@ async function main(): Promise<void> {
   const channelCallbacks = {
     onMessage: (chatJid: string, msg: NewMessage) => {
       storeMessage(msg);
+      const trace = ensureMessageReceipt(chatJid, msg.id, 'user', new Date().toISOString());
+      transitionMessageStatus(trace.trace_id, 'RECEIVED');
       recordActivity(); // track for silence heartbeat
     },
     onChatMetadata: (chatJid: string, timestamp: string, name?: string) => storeChatMetadata(chatJid, timestamp, name),
@@ -898,7 +1059,7 @@ async function main(): Promise<void> {
     await telegram.connect();
     logger.info('Telegram channel enabled');
   } else {
-    logger.info('No TELEGRAM_BOT_TOKEN — Telegram disabled');
+    logger.info('No TELEGRAM_BOT_TOKEN â€” Telegram disabled');
   }
 
   // Create WhatsApp channel (only if enabled)
@@ -910,7 +1071,7 @@ async function main(): Promise<void> {
       await whatsapp.connect();
       logger.info('WhatsApp channel enabled');
     } catch (err) {
-      logger.warn({ err }, 'WhatsApp connection failed — continuing without WhatsApp');
+      logger.warn({ err }, 'WhatsApp connection failed â€” continuing without WhatsApp');
     }
   } else {
     logger.info('WhatsApp disabled via ENABLED_CHANNELS');
@@ -944,27 +1105,36 @@ async function main(): Promise<void> {
   queue.setProcessMessagesFn((jid, retryCount) => processGroupMessages(jid, retryCount));
 
   // Wire queue feedback callbacks to notify users
-  queue.onRejected(async (groupJid) => {
-    try {
-      await sendToChannel(groupJid, '⏳ ระบบบ่ายงานเต็มค่ะ กรุณารอสักครู่แล้วลองอีกครั้งนะค่ะ');
-    } catch (err) {
-      logger.warn({ groupJid, err }, 'Failed to send queue-full notification');
-    }
+  queue.onRejected((groupJid) => {
+    // User-path queue-full responses are sent at ingress (checkAndProcessMessages)
+    // where we have exact trace IDs and can write DLQ before notifying.
+    logger.warn({ groupJid }, 'Queue rejected by policy');
   });
 
   queue.onMaxRetriesExceeded(async (groupJid) => {
+    const traces = latestFailedTracesByGroup.get(groupJid) || [];
+    for (const traceId of traces) {
+      moveToDeadLetter(
+        traceId,
+        'MAX_RETRIES_EXCEEDED',
+        'Message processing retries exhausted',
+        true,
+      );
+    }
+    const traceHint = traces[0] ? traces[0].slice(0, 10) : 'n/a';
     try {
-      await sendToChannel(groupJid, '❌ ไม่สามารถประมวลผลได้ในขณะนี้ (ลองแล้ว 5 ครั้ง) กรุณาพิมพ์คำถามใหม่อีกครั้งนะค่ะ');
+      await sendToChannel(groupJid, `❌ งานนี้ล้มเหลวหลัง retry อัตโนมัติแล้ว กรุณาลองใหม่ (trace: ${traceHint})`);
     } catch (err) {
       logger.warn({ groupJid, err }, 'Failed to send max-retries notification');
     }
+    latestFailedTracesByGroup.delete(groupJid);
   });
 
   queue.onQueued(async (groupJid, position) => {
     // Skip virtual JIDs used by the scheduler — no user to notify
-    if (groupJid.startsWith('_sched_')) return;
+    if (groupJid.startsWith('_sched_') || groupJid.startsWith('_hb_')) return;
     try {
-      await sendToChannel(groupJid, `📥 set schedule to queue (#${position})...`);
+      await sendToChannel(groupJid, `📥 รับข้อความแล้ว กำลังเข้าคิว (#${position})`);
     } catch (err) {
       logger.warn({ groupJid, err }, 'Failed to send queue-position notification');
     }
@@ -974,7 +1144,7 @@ async function main(): Promise<void> {
 
   // Pre-warm pool containers for the main group
   const mainJid = Object.entries(registeredGroups).find(([, g]) => g.folder === MAIN_GROUP_FOLDER);
-  if (mainJid) {
+  if (POOL_ENABLED && mainJid) {
     containerPool.warmForGroup(mainJid[1], true).catch((err) => {
       logger.warn({ err }, 'Failed to pre-warm main group container');
     });
@@ -994,12 +1164,61 @@ async function main(): Promise<void> {
   setStatusProvider({
     getActiveContainers: () => queue.getActiveCount(),
     getQueueDepth: () => queue.getQueueDepth(),
+    getLaneStats: () => queue.getLaneStats(),
     getRegisteredGroups: () => Object.values(registeredGroups).map(g => g.name),
     getResourceStats: () => {
       const stats = resourceMonitor.stats;
       return { currentMax: stats.currentMax, cpuUsage: stats.cpuUsage, memoryFree: stats.memoryFree };
     },
+    getDockerResilience: () => dockerResilience.getState(),
+    getDlqStats: () => getDlqCounts(),
     getUptimeMs: () => Date.now() - appStartTime,
+  });
+  setOpsProvider({
+    getMessageTrace: (traceId: string) => ({
+      receipt: getMessageReceipt(traceId) ?? null,
+      attempts: getMessageAttempts(traceId),
+      deadLetter: getDeadLetterByTrace(traceId) ?? null,
+    }),
+    listDeadLetters: (status: 'open' | 'retrying' | 'resolved') =>
+      getDeadLettersByStatus(status),
+    retryDeadLetter: (traceId: string, retriedBy: string) => {
+      const deadLetter = getDeadLetterByTrace(traceId);
+      if (!deadLetter) return false;
+      const updated = markDeadLetterRetrying(traceId, retriedBy || 'ops');
+      if (!updated) return false;
+      const accepted = queue.enqueueMessageCheck(deadLetter.chat_jid);
+      if (!accepted) {
+        moveToDeadLetter(
+          traceId,
+          'FAILED_QUEUE_FULL',
+          'Queue full while retrying dead-letter message',
+          true,
+        );
+        return false;
+      }
+      return true;
+    },
+    retryDeadLetterBatch: (limit: number, retriedBy: string) => {
+      const targets = getDeadLettersByStatus('open').slice(0, Math.max(1, limit || 10));
+      let retried = 0;
+      for (const item of targets) {
+        const ok = markDeadLetterRetrying(item.trace_id, retriedBy || 'ops');
+        if (!ok) continue;
+        const accepted = queue.enqueueMessageCheck(item.chat_jid);
+        if (!accepted) {
+          moveToDeadLetter(
+            item.trace_id,
+            'FAILED_QUEUE_FULL',
+            'Queue full while batch-retrying dead-letter message',
+            true,
+          );
+          continue;
+        }
+        retried += 1;
+      }
+      return { retried, requested: targets.length };
+    },
   });
   setHeartbeatProvider(heartbeatStatusProvider);
   startHealthServer();
@@ -1033,30 +1252,44 @@ async function main(): Promise<void> {
 
       const isMain = group.folder === MAIN_GROUP_FOLDER;
       const targetJid = job.chat_jid || mainEntry?.[0] || '';
+      const taskId = `hbjob-${job.id}-${Date.now()}`;
+      const virtualJid = `_hb_${job.id}`;
 
-      // Run container DIRECTLY — intentionally bypassing the user message queue.
-      // Heartbeat jobs use their own concurrency control (BATCH_CONCURRENCY in
-      // heartbeat-jobs.ts) and must not block nor be blocked by user messages.
-      const { runContainerAgent } = await import('./container-runner.js');
-      const output = await runContainerAgent(
-        group,
-        {
-          prompt: `[Heartbeat Job: ${job.label}]\n\n${job.prompt}\n\nRespond with a concise summary of your findings/actions. Keep it brief and actionable.`,
-          groupFolder: group.folder,
-          chatJid: targetJid,
-          isMain,
-          isScheduledTask: true,
-        },
-        (_proc, _containerName) => {
-          // Heartbeat containers are not registered in the user queue;
-          // they are managed by the container-runner's own lifecycle.
-        },
-      );
+      return await new Promise<string>((resolve, reject) => {
+        const accepted = queue.enqueueTask(
+          virtualJid,
+          taskId,
+          async () => {
+            try {
+              const output = await runContainerAgent(
+                group,
+                {
+                  prompt: `[Heartbeat Job: ${job.label}]\n\n${job.prompt}\n\nRespond with a concise summary of your findings/actions. Keep it brief and actionable.`,
+                  groupFolder: group.folder,
+                  chatJid: targetJid,
+                  isMain,
+                  isScheduledTask: true,
+                  lane: 'heartbeat',
+                },
+                (proc, containerName) => queue.registerProcess(virtualJid, proc, containerName, group.folder),
+              );
 
-      if (output.status === 'error') {
-        throw new Error(output.error || 'Container agent failed');
-      }
-      return output.result || 'Completed (no output)';
+              if (output.status === 'error') {
+                reject(new Error(output.error || 'Container agent failed'));
+                return;
+              }
+              resolve(output.result || 'Completed (no output)');
+            } catch (err) {
+              reject(err instanceof Error ? err : new Error(String(err)));
+            }
+          },
+          'heartbeat',
+        );
+
+        if (!accepted) {
+          reject(new Error('Heartbeat task rejected by queue policy'));
+        }
+      });
     },
     sendMessage: (jid, text) => sendToChannel(jid, text),
   });

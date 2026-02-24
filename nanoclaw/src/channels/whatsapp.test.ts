@@ -6,6 +6,7 @@ import { EventEmitter } from 'events';
 // Mock config
 vi.mock('../config.js', () => ({
   STORE_DIR: '/tmp/nanoclaw-test-store',
+  AUTH_PASSPHRASE: 'test-passphrase-1234',
 }));
 
 // Mock logger
@@ -32,7 +33,7 @@ vi.mock('fs', async () => {
     ...actual,
     default: {
       ...actual,
-      existsSync: vi.fn(() => true),
+      existsSync: vi.fn(() => false),
       mkdirSync: vi.fn(),
     },
   };
@@ -41,6 +42,15 @@ vi.mock('fs', async () => {
 // Mock child_process (used for osascript notification)
 vi.mock('child_process', () => ({
   exec: vi.fn(),
+}));
+
+// Mock encrypted auth wrapper (focus these tests on channel behavior)
+vi.mock('../encrypted-auth.js', () => ({
+  validatePassphrase: vi.fn(),
+  createEncryptedAuthState: vi.fn(async () => ({
+    state: { creds: {}, keys: {} },
+    saveCreds: vi.fn(),
+  })),
 }));
 
 // Build a fake WASocket that's an EventEmitter with the methods we need
@@ -218,28 +228,32 @@ describe('WhatsAppChannel', () => {
   // --- QR code and auth ---
 
   describe('authentication', () => {
-    it('exits process when QR code is emitted (no auth state)', async () => {
+    it('enters logged_out mode when QR code is emitted (no auth state)', async () => {
       vi.useFakeTimers();
-      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+      const mockExit = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(() => undefined as never);
+      try {
+        const opts = createTestOpts();
+        const channel = new WhatsAppChannel(opts);
 
-      const opts = createTestOpts();
-      const channel = new WhatsAppChannel(opts);
+        const connectPromise = channel.connect();
 
-      // Start connect but don't await (it won't resolve - process exits)
-      channel.connect().catch(() => {});
+        // Flush microtasks so connectInternal registers handlers
+        await vi.advanceTimersByTimeAsync(0);
 
-      // Flush microtasks so connectInternal registers handlers
-      await vi.advanceTimersByTimeAsync(0);
+        // Emit QR code event
+        fakeSocket._ev.emit('connection.update', { qr: 'some-qr-data' });
+        await vi.advanceTimersByTimeAsync(0);
 
-      // Emit QR code event
-      fakeSocket._ev.emit('connection.update', { qr: 'some-qr-data' });
-
-      // Advance timer past the 1000ms setTimeout before exit
-      await vi.advanceTimersByTimeAsync(1500);
-
-      expect(mockExit).toHaveBeenCalledWith(1);
-      mockExit.mockRestore();
-      vi.useRealTimers();
+        await expect(connectPromise).resolves.toBeUndefined();
+        expect(channel.getConnectionState()).toBe('logged_out');
+        expect(channel.isConnected()).toBe(false);
+        expect(mockExit).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -261,9 +275,7 @@ describe('WhatsAppChannel', () => {
       // The channel should attempt to reconnect (calls connectInternal again)
     });
 
-    it('exits on loggedOut disconnect', async () => {
-      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-
+    it('enters logged_out state on loggedOut disconnect', async () => {
       const opts = createTestOpts();
       const channel = new WhatsAppChannel(opts);
 
@@ -273,8 +285,7 @@ describe('WhatsAppChannel', () => {
       triggerDisconnect(401);
 
       expect(channel.isConnected()).toBe(false);
-      expect(mockExit).toHaveBeenCalledWith(0);
-      mockExit.mockRestore();
+      expect(channel.getConnectionState()).toBe('logged_out');
     });
 
     it('retries reconnection after 5s on failure', async () => {

@@ -243,7 +243,7 @@ describe('cancel_task authorization', () => {
     });
 
     await processTaskIpc({ type: 'cancel_task', taskId: 'task-to-cancel' }, 'main', true, deps);
-    expect(getTaskById('task-to-cancel')).toBeUndefined();
+    expect(getTaskById('task-to-cancel')?.status).toBe('cancelled');
   });
 
   it('non-main group can cancel its own task', async () => {
@@ -261,7 +261,7 @@ describe('cancel_task authorization', () => {
     });
 
     await processTaskIpc({ type: 'cancel_task', taskId: 'task-own' }, 'other-group', false, deps);
-    expect(getTaskById('task-own')).toBeUndefined();
+    expect(getTaskById('task-own')?.status).toBe('cancelled');
   });
 
   it('non-main group cannot cancel another groups task', async () => {

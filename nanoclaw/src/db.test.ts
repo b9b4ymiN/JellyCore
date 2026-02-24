@@ -5,15 +5,18 @@ import {
   createTask,
   deleteTask,
   getAllChats,
+  getRecoverableReceipts,
   getMessagesSince,
   getNewMessages,
   getSession,
   getSessionAge,
   getTaskById,
+  ensureMessageReceipt,
   clearSession,
   setSession,
   storeChatMetadata,
   storeMessage,
+  transitionMessageStatus,
   updateTask,
 } from './db.js';
 
@@ -222,6 +225,57 @@ describe('getNewMessages', () => {
     const { messages, newTimestamp } = getNewMessages([], '', 'Andy');
     expect(messages).toHaveLength(0);
     expect(newTimestamp).toBe('');
+  });
+
+  it('lists only recoverable receipts (RECEIVED/QUEUED/RUNNING)', () => {
+    store({
+      id: 'r1',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'one',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+    store({
+      id: 'r2',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'two',
+      timestamp: '2024-01-01T00:00:02.000Z',
+    });
+    store({
+      id: 'r3',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'three',
+      timestamp: '2024-01-01T00:00:03.000Z',
+    });
+    store({
+      id: 'r4',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'four',
+      timestamp: '2024-01-01T00:00:04.000Z',
+    });
+
+    const t1 = ensureMessageReceipt('group1@g.us', 'r1');
+    const t2 = ensureMessageReceipt('group1@g.us', 'r2');
+    const t3 = ensureMessageReceipt('group1@g.us', 'r3');
+    const t4 = ensureMessageReceipt('group1@g.us', 'r4');
+
+    transitionMessageStatus(t2.trace_id, 'QUEUED');
+    transitionMessageStatus(t3.trace_id, 'RUNNING');
+    transitionMessageStatus(t4.trace_id, 'REPLIED');
+
+    const recoverable = getRecoverableReceipts();
+    expect(recoverable.map((r) => r.external_message_id)).toEqual([
+      'r1',
+      'r2',
+      'r3',
+    ]);
   });
 });
 

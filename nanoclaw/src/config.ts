@@ -28,7 +28,7 @@ export const MAIN_GROUP_FOLDER = 'main';
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(
-  process.env.CONTAINER_TIMEOUT || '1800000',
+  process.env.CONTAINER_TIMEOUT || '720000',
   10,
 );
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
@@ -51,9 +51,9 @@ export const SESSION_MAX_AGE_MS = parseInt(
 ) * 60 * 60 * 1000; // Session rotation age (default 24h)
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(
-  process.env.IDLE_TIMEOUT || '1800000',
+  process.env.IDLE_TIMEOUT || '240000',
   10,
-); // 30min default — how long to keep container alive after last result
+); // 4min default - how long to keep container alive after last result
 
 // Maximum time to show typing indicator per request (safety net)
 // Even if the container is still running, stop sending typing after this
@@ -71,11 +71,59 @@ export const MAX_QUEUE_SIZE = Math.max(
 );
 
 // Container Warm Pool
+export const POOL_ENABLED =
+  (process.env.POOL_ENABLED || 'false').toLowerCase() === 'true';
 export const POOL_MIN_SIZE = Math.max(0, parseInt(process.env.POOL_MIN_SIZE || '1', 10) || 1);
 export const POOL_MAX_SIZE = Math.max(1, parseInt(process.env.POOL_MAX_SIZE || '5', 10) || 3);
 export const POOL_IDLE_TIMEOUT = parseInt(process.env.POOL_IDLE_TIMEOUT || '300000', 10); // 5 min
 export const POOL_WARMUP_INTERVAL = parseInt(process.env.POOL_WARMUP_INTERVAL || '30000', 10); // 30s
 export const POOL_MAX_REUSE = Math.max(1, parseInt(process.env.POOL_MAX_REUSE || '10', 10) || 10);
+
+// User message retry policy (soft guarantee)
+export const USER_MESSAGE_RETRY_SCHEDULE_MS = (
+  process.env.USER_MESSAGE_RETRY_SCHEDULE_MS || '5000,30000'
+)
+  .split(',')
+  .map((v) => parseInt(v.trim(), 10))
+  .filter((v) => Number.isFinite(v) && v > 0);
+export const USER_MESSAGE_RETRY_JITTER_PCT = Math.max(
+  0,
+  Math.min(100, parseInt(process.env.USER_MESSAGE_RETRY_JITTER_PCT || '20', 10) || 20),
+);
+
+// User-facing status timings
+export const USER_ACK_TARGET_MS = parseInt(
+  process.env.USER_ACK_TARGET_MS || '5000',
+  10,
+);
+export const USER_PROGRESS_INTERVALS_MS = (
+  process.env.USER_PROGRESS_INTERVALS_MS || '20000,120000,300000'
+)
+  .split(',')
+  .map((v) => parseInt(v.trim(), 10))
+  .filter((v) => Number.isFinite(v) && v > 0);
+
+// Spawn circuit breaker + docker runtime watchdog
+export const SPAWN_CIRCUIT_THRESHOLD = Math.max(
+  1,
+  parseInt(process.env.SPAWN_CIRCUIT_THRESHOLD || '3', 10) || 3,
+);
+export const SPAWN_CIRCUIT_WINDOW_MS = parseInt(
+  process.env.SPAWN_CIRCUIT_WINDOW_MS || '120000',
+  10,
+);
+export const SPAWN_CIRCUIT_COOLDOWN_MS = parseInt(
+  process.env.SPAWN_CIRCUIT_COOLDOWN_MS || '60000',
+  10,
+);
+export const DOCKER_HEALTH_PROBE_INTERVAL_MS = parseInt(
+  process.env.DOCKER_HEALTH_PROBE_INTERVAL_MS || '30000',
+  10,
+);
+export const ORPHAN_SWEEP_INTERVAL_MS = parseInt(
+  process.env.ORPHAN_SWEEP_INTERVAL_MS || '120000',
+  10,
+);
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -169,3 +217,4 @@ export const IPC_SECRET = (() => {
   fs.writeFileSync(secretFile, secret, { mode: 0o600 });
   return secret;
 })();
+

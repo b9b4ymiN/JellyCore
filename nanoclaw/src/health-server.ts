@@ -1,21 +1,21 @@
-/**
+﻿/**
  * NanoClaw Health & Status HTTP Server (v1.0-phase6)
  *
  * Lightweight Node.js built-in HTTP server for monitoring and task management.
  * Port: 47779 (internal only, not exposed outside Docker network)
  *
  * Endpoints:
- *   GET  /health                     → { status, uptime, version }
- *   GET  /status                     → { activeContainers, queueDepth, groups, resources, recentErrors }
- *   GET  /scheduler/tasks            → list tasks (qs: status, group)
- *   GET  /scheduler/tasks/:id        → get task + recent run logs
- *   POST /scheduler/tasks/:id/pause  → pause task
- *   POST /scheduler/tasks/:id/resume → resume task
- *   POST /scheduler/tasks/:id/cancel → cancel task (soft delete)
- *   POST /scheduler/tasks/:id/run    → trigger immediate run
- *   GET  /scheduler/stats            → scheduler statistics
- *   GET  /heartbeat/config           → current heartbeat config
- *   POST /heartbeat/ping             → trigger manual heartbeat
+ *   GET  /health                     â†’ { status, uptime, version }
+ *   GET  /status                     â†’ { activeContainers, queueDepth, groups, resources, recentErrors }
+ *   GET  /scheduler/tasks            â†’ list tasks (qs: status, group)
+ *   GET  /scheduler/tasks/:id        â†’ get task + recent run logs
+ *   POST /scheduler/tasks/:id/pause  â†’ pause task
+ *   POST /scheduler/tasks/:id/resume â†’ resume task
+ *   POST /scheduler/tasks/:id/cancel â†’ cancel task (soft delete)
+ *   POST /scheduler/tasks/:id/run    â†’ trigger immediate run
+ *   GET  /scheduler/stats            â†’ scheduler statistics
+ *   GET  /heartbeat/config           â†’ current heartbeat config
+ *   POST /heartbeat/ping             â†’ trigger manual heartbeat
  */
 
 import http from 'http';
@@ -56,13 +56,42 @@ export function recordError(message: string, group?: string): void {
 export interface StatusProvider {
   getActiveContainers: () => number;
   getQueueDepth: () => number;
+  getLaneStats?: () => {
+    active: { user: number; scheduler: number; heartbeat: number };
+    queueDepth: { user: number; scheduler: number; heartbeat: number };
+    reservedUserSlots: number;
+    maxConcurrency: number;
+  };
   getRegisteredGroups: () => string[];
   getResourceStats: () => { currentMax: number; cpuUsage: string | number; memoryFree: string | number };
+  getDockerResilience?: () => {
+    healthy: boolean;
+    errorStreak: number;
+    lastProbeAt: number;
+    lastHealthyAt: number;
+    spawnFailureStreak: number;
+    circuitOpen: boolean;
+    circuitOpenUntil: number;
+    circuitLastError: string | null;
+    orphanSweepKills: number;
+  };
+  getDlqStats?: () => { open24h: number; open1h: number; retrying: number };
   getUptimeMs: () => number;
+}
+
+export interface OpsProvider {
+  getMessageTrace: (traceId: string) => unknown;
+  listDeadLetters: (status: 'open' | 'retrying' | 'resolved') => unknown;
+  retryDeadLetter: (traceId: string, retriedBy: string) => boolean;
+  retryDeadLetterBatch: (
+    limit: number,
+    retriedBy: string,
+  ) => { retried: number; requested: number };
 }
 
 let statusProvider: StatusProvider | null = null;
 let heartbeatProvider: HeartbeatStatusProvider | null = null;
+let opsProvider: OpsProvider | null = null;
 
 /** Register the status provider (called from main) */
 export function setStatusProvider(provider: StatusProvider): void {
@@ -74,7 +103,12 @@ export function setHeartbeatProvider(provider: HeartbeatStatusProvider): void {
   heartbeatProvider = provider;
 }
 
-// ── Response helpers ──────────────────────────────────────────────────────────
+/** Register ops provider for trace/dead-letter endpoints. */
+export function setOpsProvider(provider: OpsProvider): void {
+  opsProvider = provider;
+}
+
+// â”€â”€ Response helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -105,7 +139,7 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
-// ── /health ───────────────────────────────────────────────────────────────────
+// â”€â”€ /health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function handleHealth(_req: http.IncomingMessage, res: http.ServerResponse): void {
   json(res, 200, {
@@ -116,17 +150,28 @@ function handleHealth(_req: http.IncomingMessage, res: http.ServerResponse): voi
   });
 }
 
-// ── /status ───────────────────────────────────────────────────────────────────
+// â”€â”€ /status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): void {
   const stats = statusProvider
     ? {
         activeContainers: statusProvider.getActiveContainers(),
         queueDepth: statusProvider.getQueueDepth(),
+        laneStats: statusProvider.getLaneStats ? statusProvider.getLaneStats() : null,
         registeredGroups: statusProvider.getRegisteredGroups(),
         resources: statusProvider.getResourceStats(),
+        docker: statusProvider.getDockerResilience ? statusProvider.getDockerResilience() : null,
+        dlq: statusProvider.getDlqStats ? statusProvider.getDlqStats() : null,
       }
-    : { activeContainers: 0, queueDepth: 0, registeredGroups: [], resources: null };
+    : {
+        activeContainers: 0,
+        queueDepth: 0,
+        laneStats: null,
+        registeredGroups: [],
+        resources: null,
+        docker: null,
+        dlq: null,
+      };
 
   json(res, 200, {
     ...stats,
@@ -137,7 +182,7 @@ function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): voi
   });
 }
 
-// ── /scheduler/* ─────────────────────────────────────────────────────────────
+// â”€â”€ /scheduler/* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function handleSchedulerTasks(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
   const statusFilter = url.searchParams.get('status'); // e.g. ?status=active
@@ -232,7 +277,7 @@ function handleSchedulerStats(_req: http.IncomingMessage, res: http.ServerRespon
   json(res, 200, stats);
 }
 
-// ── /heartbeat/* ──────────────────────────────────────────────────────────────
+// â”€â”€ /heartbeat/* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function handleHeartbeatConfig(req: http.IncomingMessage, res: http.ServerResponse): void {
   if (req.method === 'GET') {
@@ -264,7 +309,81 @@ async function handleHeartbeatPing(_req: http.IncomingMessage, res: http.ServerR
   }
 }
 
-// ── Router ────────────────────────────────────────────────────────────────────
+// â”€â”€ Router â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function handleOpsMessageTrace(res: http.ServerResponse, traceId: string): void {
+  if (!opsProvider) {
+    json(res, 503, { error: 'Ops provider not registered' });
+    return;
+  }
+  json(res, 200, opsProvider.getMessageTrace(traceId));
+}
+
+function handleOpsDlqList(res: http.ServerResponse, url: URL): void {
+  if (!opsProvider) {
+    json(res, 503, { error: 'Ops provider not registered' });
+    return;
+  }
+
+  const statusParam = (url.searchParams.get('status') || 'open') as
+    | 'open'
+    | 'retrying'
+    | 'resolved';
+  if (!['open', 'retrying', 'resolved'].includes(statusParam)) {
+    badRequest(res, 'Invalid status. Use open|retrying|resolved');
+    return;
+  }
+  json(res, 200, { status: statusParam, items: opsProvider.listDeadLetters(statusParam) });
+}
+
+async function handleOpsDlqRetry(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  traceId: string,
+): Promise<void> {
+  if (!opsProvider) {
+    json(res, 503, { error: 'Ops provider not registered' });
+    return;
+  }
+
+  let retriedBy = 'ops-api';
+  try {
+    const body = await readBody(req) as { retriedBy?: string };
+    if (body.retriedBy) retriedBy = body.retriedBy;
+  } catch {
+    // body optional
+  }
+
+  const success = opsProvider.retryDeadLetter(traceId, retriedBy);
+  if (!success) {
+    json(res, 409, { success: false, traceId });
+    return;
+  }
+  json(res, 200, { success: true, traceId });
+}
+
+async function handleOpsDlqRetryBatch(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  if (!opsProvider) {
+    json(res, 503, { error: 'Ops provider not registered' });
+    return;
+  }
+
+  let limit = 10;
+  let retriedBy = 'ops-api';
+  try {
+    const body = await readBody(req) as { limit?: number; retriedBy?: string };
+    if (typeof body.limit === 'number') limit = body.limit;
+    if (body.retriedBy) retriedBy = body.retriedBy;
+  } catch {
+    // body optional
+  }
+
+  const result = opsProvider.retryDeadLetterBatch(limit, retriedBy);
+  json(res, 200, { success: true, ...result });
+}
+
 
 /** Start the health/status HTTP server */
 export function startHealthServer(): void {
@@ -320,6 +439,22 @@ export function startHealthServer(): void {
       // POST /heartbeat/ping
       if (parts[0] === 'heartbeat' && parts[1] === 'ping' && req.method === 'POST') {
         await handleHeartbeatPing(req, res); return;
+      }
+      // GET /ops/messages/:traceId
+      if (parts[0] === 'ops' && parts[1] === 'messages' && parts[2] && req.method === 'GET') {
+        handleOpsMessageTrace(res, parts[2]); return;
+      }
+      // GET /ops/dlq?status=open
+      if (parts[0] === 'ops' && parts[1] === 'dlq' && !parts[2] && req.method === 'GET') {
+        handleOpsDlqList(res, url); return;
+      }
+      // POST /ops/dlq/retry-batch
+      if (parts[0] === 'ops' && parts[1] === 'dlq' && parts[2] === 'retry-batch' && req.method === 'POST') {
+        await handleOpsDlqRetryBatch(req, res); return;
+      }
+      // POST /ops/dlq/:traceId/retry
+      if (parts[0] === 'ops' && parts[1] === 'dlq' && parts[2] && parts[3] === 'retry' && req.method === 'POST') {
+        await handleOpsDlqRetry(req, res, parts[2]); return;
       }
 
       notFound(res);

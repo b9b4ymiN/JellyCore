@@ -122,6 +122,9 @@ services:
     volumes:
       # Docker socket — NanoClaw spawns agent containers
       - /var/run/docker.sock:/var/run/docker.sock
+      # Agent container image source — mounted so NanoClaw can auto-build nanoclaw-agent:latest on first start
+      # (read-only: NanoClaw never needs to write to the build context)
+      - ./nanoclaw/container:/app/nanoclaw/container:ro
       # Persistent state (sessions, database, auth)
       - nanoclaw-store:/app/nanoclaw/store
       - nanoclaw-data:/app/nanoclaw/data

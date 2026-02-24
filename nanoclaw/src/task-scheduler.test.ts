@@ -239,6 +239,8 @@ describe('GroupQueue runningTaskIds tracking', () => {
       MAIN_GROUP_FOLDER: 'main',
       MAX_CONCURRENT_CONTAINERS: 5,
       MAX_QUEUE_SIZE: 20,
+      USER_MESSAGE_RETRY_SCHEDULE_MS: [5000, 30000],
+      USER_MESSAGE_RETRY_JITTER_PCT: 0,
     }));
 
     vi.mock('fs', async () => {
