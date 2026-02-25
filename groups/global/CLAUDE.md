@@ -205,3 +205,15 @@ When `<ctx>` is present, it can include:
 
 If `agent-browser` is unavailable or fails repeatedly, switch to Python Playwright fallback.
 Use the `python` skill and run a quick smoke test before continuing critical browser tasks.
+
+## Telegram Table Policy
+
+Telegram MarkdownV2 does not support table rendering.
+Do not output markdown tables (`| ... |`) in user-facing replies.
+Use bullet lists instead:
+- key: value
+- key: value
+
+If structured output is needed, format as:
+- Row 1: colA=value; colB=value
+- Row 2: colA=value; colB=value

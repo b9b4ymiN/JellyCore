@@ -58,6 +58,10 @@ export function toTelegramMarkdownV2(input: string): string {
   // Inline code `code`
   text = text.replace(/`([^`\n]+)`/g, (_m, code: string) => hold(`\`${code}\``));
 
+  // Normalize unsupported markdown tables into plain readable lines.
+  // Telegram MarkdownV2 has no table rendering.
+  text = convertMarkdownTables(text);
+
   // ── Phase 2: Protect links ──────────────────────────────────────────
 
   // [text](url) — escape the visible text but not the URL
@@ -106,6 +110,65 @@ export function toTelegramMarkdownV2(input: string): string {
   text = text.replace(/\uFFF9(\d+)\uFFFB/g, (_m, i: string) => slots[parseInt(i)]);
 
   return text;
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes('-') || !trimmed.includes('|')) return false;
+  // e.g. | --- | :---: | ---: |
+  return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed);
+}
+
+function parseTableCells(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  return trimmed.split('|').map((c) => c.trim());
+}
+
+function convertMarkdownTables(text: string): string {
+  const lines = text.split('\n');
+  const out: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const current = lines[i];
+    const next = i + 1 < lines.length ? lines[i + 1] : '';
+
+    const maybeHeader = current.includes('|');
+    const isSeparator = isMarkdownTableSeparator(next);
+    if (!maybeHeader || !isSeparator) {
+      out.push(current);
+      continue;
+    }
+
+    const headers = parseTableCells(current);
+    const rows: string[] = [];
+    i += 1; // consume separator
+
+    while (i + 1 < lines.length) {
+      const rowLine = lines[i + 1];
+      if (!rowLine.includes('|') || rowLine.trim() === '') break;
+      i += 1;
+      rows.push(rowLine);
+    }
+
+    if (headers.length === 0 || rows.length === 0) {
+      out.push(current);
+      continue;
+    }
+
+    out.push('Table converted from markdown for Telegram readability:');
+    for (const rowLine of rows) {
+      const cells = parseTableCells(rowLine);
+      const pairs: string[] = [];
+      for (let c = 0; c < headers.length; c++) {
+        const key = headers[c] || `column_${c + 1}`;
+        const value = cells[c] || '-';
+        pairs.push(`${key}: ${value}`);
+      }
+      out.push(`- ${pairs.join('; ')}`);
+    }
+  }
+
+  return out.join('\n');
 }
 
 /**
