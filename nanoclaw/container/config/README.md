@@ -1,6 +1,7 @@
 # Agent Container — MCP Configuration
 
 `mcps.json` defines which **external MCP servers** are activated inside the agent container.
+`oracle-write-policy.json` defines **Oracle write governance** by group and tool.
 
 Each server in the `servers` array is started automatically if all its `requiredEnv` vars are present in the container's runtime secrets.
 
@@ -78,3 +79,33 @@ docker compose up -d nanoclaw
 | Name | Description | Required Token |
 |------|-------------|----------------|
 | `oura` | Oura Ring — sleep, readiness, activity, HRV, SpO2 | `OURA_PERSONAL_ACCESS_TOKEN` |
+
+---
+
+## Oracle Write Governance
+
+`oracle-write-policy.json` shape:
+
+```json
+{
+  "default": {
+    "mode": "selected",
+    "allow": ["oracle_user_model_update"]
+  },
+  "groups": {
+    "main": {
+      "mode": "full",
+      "allow": ["*"]
+    }
+  }
+}
+```
+
+Modes:
+- `none` - no write tools
+- `selected` - only tools listed in `allow`
+- `full` - all write tools
+
+Runtime behavior:
+- Group mapping uses `group.folder` (for example `main`).
+- Every write call is appended to `/workspace/ipc/oracle-write-audit.log` as JSONL.

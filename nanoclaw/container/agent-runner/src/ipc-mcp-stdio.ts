@@ -125,10 +125,37 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
         };
       }
     } else if (args.schedule_type === 'once') {
+      // Enforce local time contract: timestamp must not include timezone suffix.
+      // Example accepted: 2026-02-01T15:30:00
+      // Examples rejected: 2026-02-01T15:30:00Z, 2026-02-01T15:30:00+07:00
+      if (/(Z|[+-]\d{2}:\d{2})$/i.test(args.schedule_value)) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Invalid timestamp: "${args.schedule_value}". Use LOCAL time without timezone suffix, e.g. "2026-02-01T15:30:00".`,
+          }],
+          isError: true,
+        };
+      }
+
+      // Strict local ISO-like format to avoid ambiguous parsing.
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?$/.test(args.schedule_value)) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Invalid timestamp: "${args.schedule_value}". Use format "YYYY-MM-DDTHH:mm:ss" (local time, no Z).`,
+          }],
+          isError: true,
+        };
+      }
+
       const date = new Date(args.schedule_value);
       if (isNaN(date.getTime())) {
         return {
-          content: [{ type: 'text' as const, text: `Invalid timestamp: "${args.schedule_value}". Use ISO 8601 format like "2026-02-01T15:30:00.000Z".` }],
+          content: [{
+            type: 'text' as const,
+            text: `Invalid timestamp: "${args.schedule_value}". Use a valid local timestamp like "2026-02-01T15:30:00" (no Z).`,
+          }],
           isError: true,
         };
       }

@@ -79,6 +79,18 @@ interface ExternalMcpsConfig {
   servers: ExternalMcpServer[];
 }
 
+type OracleWriteMode = 'none' | 'selected' | 'full';
+
+interface OracleWritePolicyEntry {
+  mode?: OracleWriteMode;
+  allow?: string[];
+}
+
+interface OracleWritePolicyConfig {
+  default?: OracleWritePolicyEntry;
+  groups?: Record<string, OracleWritePolicyEntry>;
+}
+
 function loadExternalMcps(): ExternalMcpsConfig {
   try {
     const cfgPath = path.join('/app/config/mcps.json');
@@ -88,7 +100,17 @@ function loadExternalMcps(): ExternalMcpsConfig {
   }
 }
 
+function loadOracleWritePolicy(): OracleWritePolicyConfig {
+  try {
+    const cfgPath = path.join('/app/config/oracle-write-policy.json');
+    return JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as OracleWritePolicyConfig;
+  } catch {
+    return {};
+  }
+}
+
 const externalMcps = loadExternalMcps();
+const oracleWritePolicy = loadOracleWritePolicy();
 
 function buildExternalMcpServers(
   sdkEnv: Record<string, string | undefined>,
@@ -109,6 +131,40 @@ function buildExternalMcpServers(
 
 function externalMcpAllowedTools(): string[] {
   return externalMcps.servers.map(s => `mcp__${s.name}__*`);
+}
+
+function normalizeOracleWriteMode(mode: string | undefined): OracleWriteMode {
+  if (mode === 'none' || mode === 'selected') return mode;
+  return 'full';
+}
+
+function defaultSelectedWriteTools(): string[] {
+  return [
+    'oracle_user_model_update',
+    'oracle_procedural_learn',
+    'oracle_procedural_usage',
+    'oracle_episodic_record',
+  ];
+}
+
+function resolveOracleWritePolicy(
+  groupFolder: string,
+  isMain: boolean,
+): { mode: OracleWriteMode; allow: string[] } {
+  const fallback: { mode: OracleWriteMode; allow: string[] } = isMain
+    ? { mode: 'full', allow: ['*'] }
+    : { mode: 'selected', allow: defaultSelectedWriteTools() };
+
+  const selected = oracleWritePolicy.groups?.[groupFolder]
+    || (isMain ? oracleWritePolicy.groups?.main : undefined)
+    || oracleWritePolicy.default;
+  if (!selected) return fallback;
+
+  const mode = normalizeOracleWriteMode(selected.mode);
+  const allow = Array.isArray(selected.allow)
+    ? selected.allow.filter((v) => typeof v === 'string' && v.trim().length > 0)
+    : fallback.allow;
+  return { mode, allow };
 }
 
 /**
@@ -473,6 +529,14 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  const resolvedOraclePolicy = resolveOracleWritePolicy(
+    containerInput.groupFolder,
+    containerInput.isMain,
+  );
+  log(
+    `Oracle write policy: mode=${resolvedOraclePolicy.mode} allow=${resolvedOraclePolicy.allow.join(',') || '(none)'}`,
+  );
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -492,6 +556,7 @@ async function runQuery(
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
+        'mcp__oracle__*',
         ...externalMcpAllowedTools(),
       ],
       env: sdkEnv,
@@ -514,7 +579,10 @@ async function runQuery(
           env: {
             ORACLE_API_URL: process.env.ORACLE_API_URL || 'http://oracle:47778',
             ORACLE_AUTH_TOKEN: process.env.ORACLE_AUTH_TOKEN || '',
-            ORACLE_READ_ONLY: containerInput.isMain ? 'false' : 'true',
+            ORACLE_WRITE_MODE: resolvedOraclePolicy.mode,
+            ORACLE_ALLOWED_WRITE_TOOLS: resolvedOraclePolicy.allow.join(','),
+            ORACLE_POLICY_GROUP: containerInput.groupFolder,
+            NANOCLAW_CHAT_JID: containerInput.chatJid,
           },
         },
         // External MCP servers — loaded from /app/config/mcps.json
@@ -566,13 +634,15 @@ async function runQuery(
  * Auto-record an episodic memory summary when conversation ends.
  * Fire-and-forget: Oracle failure doesn't block exit.
  */
-async function recordEpisode(groupFolder: string): Promise<void> {
+async function recordEpisode(groupFolder: string, isMain: boolean): Promise<void> {
   const oracleUrl = process.env.ORACLE_API_URL || 'http://oracle:47778';
   const oracleToken = process.env.ORACLE_AUTH_TOKEN || '';
-  const isReadOnly = process.env.ORACLE_READ_ONLY === 'true';
+  const policy = resolveOracleWritePolicy(groupFolder, isMain);
+  const canWriteEpisode = policy.mode === 'full'
+    || (policy.mode === 'selected' && policy.allow.includes('oracle_episodic_record'));
 
-  if (isReadOnly) {
-    log('Skipping auto-episodic: read-only mode');
+  if (!canWriteEpisode) {
+    log('Skipping auto-episodic: policy does not allow oracle_episodic_record');
     return;
   }
 
@@ -720,7 +790,7 @@ async function main(): Promise<void> {
       // idle timer and cause a 30-min delay before the next _close).
       if (queryResult.closedDuringQuery) {
         log('Close sentinel consumed during query, recording episode then exiting');
-        await recordEpisode(containerInput.groupFolder);
+        await recordEpisode(containerInput.groupFolder, containerInput.isMain);
         break;
       }
 
@@ -733,7 +803,7 @@ async function main(): Promise<void> {
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
         log('Close sentinel received, recording episode then exiting');
-        await recordEpisode(containerInput.groupFolder);
+        await recordEpisode(containerInput.groupFolder, containerInput.isMain);
         break;
       }
 

@@ -14,6 +14,7 @@
  *   POST /scheduler/tasks/:id/cancel â†’ cancel task (soft delete)
  *   POST /scheduler/tasks/:id/run    â†’ trigger immediate run
  *   GET  /scheduler/stats            â†’ scheduler statistics
+ *   GET  /ops/tools                  â†’ runtime tools/skills/MCP inventory
  *   GET  /heartbeat/config           â†’ current heartbeat config
  *   POST /heartbeat/ping             â†’ trigger manual heartbeat
  */
@@ -76,6 +77,7 @@ export interface StatusProvider {
     orphanSweepKills: number;
   };
   getDlqStats?: () => { open24h: number; open1h: number; retrying: number };
+  getCapabilityHealth?: () => unknown;
   getUptimeMs: () => number;
 }
 
@@ -89,9 +91,14 @@ export interface OpsProvider {
   ) => { retried: number; requested: number };
 }
 
+export interface ToolsProvider {
+  getToolsInventory: () => unknown;
+}
+
 let statusProvider: StatusProvider | null = null;
 let heartbeatProvider: HeartbeatStatusProvider | null = null;
 let opsProvider: OpsProvider | null = null;
+let toolsProvider: ToolsProvider | null = null;
 
 /** Register the status provider (called from main) */
 export function setStatusProvider(provider: StatusProvider): void {
@@ -106,6 +113,11 @@ export function setHeartbeatProvider(provider: HeartbeatStatusProvider): void {
 /** Register ops provider for trace/dead-letter endpoints. */
 export function setOpsProvider(provider: OpsProvider): void {
   opsProvider = provider;
+}
+
+/** Register tools provider for runtime inventory endpoint. */
+export function setToolsProvider(provider: ToolsProvider): void {
+  toolsProvider = provider;
 }
 
 // â”€â”€ Response helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -162,6 +174,7 @@ function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): voi
         resources: statusProvider.getResourceStats(),
         docker: statusProvider.getDockerResilience ? statusProvider.getDockerResilience() : null,
         dlq: statusProvider.getDlqStats ? statusProvider.getDlqStats() : null,
+        capabilities: statusProvider.getCapabilityHealth ? statusProvider.getCapabilityHealth() : null,
       }
     : {
         activeContainers: 0,
@@ -171,6 +184,7 @@ function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): voi
         resources: null,
         docker: null,
         dlq: null,
+        capabilities: null,
       };
 
   json(res, 200, {
@@ -384,6 +398,14 @@ async function handleOpsDlqRetryBatch(
   json(res, 200, { success: true, ...result });
 }
 
+function handleOpsTools(res: http.ServerResponse): void {
+  if (!toolsProvider) {
+    json(res, 503, { error: 'Tools provider not registered' });
+    return;
+  }
+  json(res, 200, toolsProvider.getToolsInventory());
+}
+
 
 /** Start the health/status HTTP server */
 export function startHealthServer(): void {
@@ -439,6 +461,10 @@ export function startHealthServer(): void {
       // POST /heartbeat/ping
       if (parts[0] === 'heartbeat' && parts[1] === 'ping' && req.method === 'POST') {
         await handleHeartbeatPing(req, res); return;
+      }
+      // GET /ops/tools
+      if (parts[0] === 'ops' && parts[1] === 'tools' && req.method === 'GET') {
+        handleOpsTools(res); return;
       }
       // GET /ops/messages/:traceId
       if (parts[0] === 'ops' && parts[1] === 'messages' && parts[2] && req.method === 'GET') {

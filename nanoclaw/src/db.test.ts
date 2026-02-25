@@ -6,6 +6,7 @@ import {
   deleteTask,
   getAllChats,
   getRecoverableReceipts,
+  getStableUserId,
   getMessagesSince,
   getNewMessages,
   getSession,
@@ -44,6 +45,25 @@ function store(overrides: {
     is_from_me: overrides.is_from_me ?? false,
   });
 }
+
+describe('stable user identity mapping', () => {
+  it('returns a deterministic userId per chat_jid', () => {
+    const chatA = 'tg:123456';
+    const chatB = 'tg:999999';
+
+    const a1 = getStableUserId(chatA);
+    const a2 = getStableUserId(chatA);
+    const b1 = getStableUserId(chatB);
+
+    expect(a1).toBe(a2);
+    expect(a1).not.toBe(b1);
+    expect(a1.startsWith('u_')).toBe(true);
+
+    _initTestDatabase();
+    const a3 = getStableUserId(chatA);
+    expect(a3).toBe(a1);
+  });
+});
 
 // --- storeMessage (NewMessage format) ---
 

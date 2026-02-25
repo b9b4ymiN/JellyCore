@@ -116,8 +116,12 @@ export class TelegramChannel implements Channel {
     // Register slash commands in Telegram's menu
     try {
       const { TELEGRAM_COMMANDS } = await import('../inline-handler.js');
-      await this.bot.api.setMyCommands(TELEGRAM_COMMANDS);
-      logger.info({ count: TELEGRAM_COMMANDS.length }, 'Telegram commands registered');
+      const commands = this.sanitizeTelegramCommands(TELEGRAM_COMMANDS);
+      await this.bot.api.setMyCommands(commands);
+      logger.info(
+        { count: commands.length, dropped: TELEGRAM_COMMANDS.length - commands.length },
+        'Telegram commands registered',
+      );
     } catch (err) {
       logger.warn({ err }, 'Failed to register Telegram commands');
     }
@@ -267,5 +271,23 @@ export class TelegramChannel implements Channel {
       remaining = remaining.slice(splitAt).trimStart();
     }
     return chunks;
+  }
+
+  private sanitizeTelegramCommands(
+    commands: Array<{ command: string; description: string }>,
+  ): Array<{ command: string; description: string }> {
+    const seen = new Set<string>();
+    const out: Array<{ command: string; description: string }> = [];
+
+    for (const item of commands) {
+      const command = (item.command || '').trim().toLowerCase();
+      const description = (item.description || '').trim();
+      if (!/^[a-z0-9_]{1,32}$/.test(command)) continue;
+      if (!description) continue;
+      if (seen.has(command)) continue;
+      seen.add(command);
+      out.push({ command, description: description.slice(0, 256) });
+    }
+    return out;
   }
 }

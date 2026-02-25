@@ -135,6 +135,14 @@ function createSchema(database: Database.Database): void {
       retried_by TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_dlq_status_created ON dead_letter_messages(status, created_at);
+
+    CREATE TABLE IF NOT EXISTS chat_user_identity (
+      chat_jid TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_user_identity_user_id ON chat_user_identity(user_id);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -275,8 +283,36 @@ function buildTraceId(chatJid: string, externalMessageId: string): string {
     .digest('hex');
 }
 
+function buildStableUserId(chatJid: string): string {
+  const digest = crypto
+    .createHash('sha1')
+    .update(`chat:${chatJid}`)
+    .digest('hex')
+    .slice(0, 16);
+  return `u_${digest}`;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+export function getStableUserId(chatJid: string): string {
+  const existing = db
+    .prepare(`SELECT user_id FROM chat_user_identity WHERE chat_jid = ?`)
+    .get(chatJid) as { user_id?: string } | undefined;
+  if (existing?.user_id) return existing.user_id;
+
+  const userId = buildStableUserId(chatJid);
+  const now = nowIso();
+  db.prepare(
+    `INSERT OR IGNORE INTO chat_user_identity (chat_jid, user_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(chatJid, userId, now, now);
+
+  const row = db
+    .prepare(`SELECT user_id FROM chat_user_identity WHERE chat_jid = ?`)
+    .get(chatJid) as { user_id?: string } | undefined;
+  return row?.user_id || userId;
 }
 
 export function ensureMessageReceipt(
@@ -285,6 +321,7 @@ export function ensureMessageReceipt(
   lane: LaneType = 'user',
   receivedAt: string = nowIso(),
 ): TraceContext {
+  getStableUserId(chatJid);
   const traceId = buildTraceId(chatJid, externalMessageId);
   db.prepare(
     `INSERT OR IGNORE INTO message_receipts (

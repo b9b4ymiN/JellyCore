@@ -181,3 +181,27 @@ Example: "ตั้ง heartbeat ทุก 2 ชั่วโมง" → `configu
 - `mcp__nanoclaw__remove_heartbeat_job` — delete a job
 
 Jobs run automatically at the configured interval and results are sent to this chat\.
+
+## Oracle Write Policy (Runtime)
+
+- Oracle write permissions are enforced by `container/config/oracle-write-policy.json`.
+- `main` group default policy is `full` (all write tools).
+- Non-main groups default policy is `selected` with only:
+  - `oracle_user_model_update`
+  - `oracle_procedural_learn`
+  - `oracle_procedural_usage`
+  - `oracle_episodic_record`
+- All Oracle write tool calls are audited to `/workspace/ipc/oracle-write-audit.log`.
+
+## Context Block Update
+
+When `<ctx>` is present, it can include:
+- `<user>`
+- `<procedural>`
+- `<recent>`
+- `<knowledge>`
+
+## Browser Fallback Rule
+
+If `agent-browser` is unavailable or fails repeatedly, switch to Python Playwright fallback.
+Use the `python` skill and run a quick smoke test before continuing critical browser tasks.

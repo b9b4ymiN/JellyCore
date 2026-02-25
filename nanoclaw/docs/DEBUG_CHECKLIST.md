@@ -11,6 +11,14 @@ Both timers fire at the same time, so containers always exit via hard SIGKILL (c
 ### 3. Cursor advanced before agent succeeds
 `processGroupMessages` advances `lastAgentTimestamp` before the agent runs. If the container times out, retries find no messages (cursor already past them). Messages are permanently lost on timeout.
 
+## Schedule Time Contract (Important)
+
+For `mcp__nanoclaw__schedule_task` with `schedule_type = "once"`:
+
+- Use local timestamp format: `YYYY-MM-DDTHH:mm:ss`
+- Example: `2026-03-01T09:30:00`
+- Do not include timezone suffix (`Z`, `+07:00`, etc.)
+
 ## Quick Status Check
 
 ```bash

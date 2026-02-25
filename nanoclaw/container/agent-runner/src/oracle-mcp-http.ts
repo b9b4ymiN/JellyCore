@@ -1,4 +1,4 @@
-/**
+﻿/**
  * MCP-HTTP Bridge for Oracle V2
  *
  * Translates MCP tool calls from Agent SDK into HTTP requests to Oracle service.
@@ -7,9 +7,15 @@
  * Environment Variables:
  *   - ORACLE_API_URL: Oracle service URL (default: http://oracle:47778)
  *   - ORACLE_AUTH_TOKEN: Optional Bearer token for authentication
- *   - ORACLE_READ_ONLY: If "true", hide write tools (learn, thread, decisions, etc.)
+ *   - ORACLE_WRITE_MODE: full | selected | none
+ *   - ORACLE_ALLOWED_WRITE_TOOLS: comma-separated write tool names when mode=selected
+ *   - ORACLE_POLICY_GROUP: group folder used for audit logs
+ *   - NANOCLAW_CHAT_JID: chat id used for audit logs
+ *   - ORACLE_READ_ONLY: legacy compatibility (maps to ORACLE_WRITE_MODE=none)
  *   - ORACLE_TIMEOUT: Request timeout in ms (default: 10000)
  */
+
+import fs from 'fs';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -22,8 +28,79 @@ import {
 // Configuration from environment
 const ORACLE_API_URL = process.env.ORACLE_API_URL || 'http://oracle:47778';
 const ORACLE_AUTH_TOKEN = process.env.ORACLE_AUTH_TOKEN;
-const ORACLE_READ_ONLY = process.env.ORACLE_READ_ONLY === 'true';
 const ORACLE_TIMEOUT = parseInt(process.env.ORACLE_TIMEOUT || '10000', 10);
+const ORACLE_WRITE_MODE_RAW = (
+  process.env.ORACLE_WRITE_MODE
+  || (process.env.ORACLE_READ_ONLY === 'true' ? 'none' : 'full')
+).toLowerCase();
+const ORACLE_WRITE_MODE =
+  ORACLE_WRITE_MODE_RAW === 'none' || ORACLE_WRITE_MODE_RAW === 'selected'
+    ? ORACLE_WRITE_MODE_RAW
+    : 'full';
+const ORACLE_ALLOWED_WRITE_TOOLS = new Set(
+  (process.env.ORACLE_ALLOWED_WRITE_TOOLS || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean),
+);
+const ORACLE_AUDIT_LOG_PATH =
+  process.env.ORACLE_AUDIT_LOG_PATH || '/workspace/ipc/oracle-write-audit.log';
+const ORACLE_POLICY_GROUP = process.env.ORACLE_POLICY_GROUP || 'unknown';
+const NANOCLAW_CHAT_JID = process.env.NANOCLAW_CHAT_JID || 'unknown';
+
+const ORACLE_WRITE_TOOL_NAMES = new Set([
+  'oracle_learn',
+  'oracle_thread_create',
+  'oracle_thread_update',
+  'oracle_decision_create',
+  'oracle_decision_update',
+  'oracle_supersede',
+  'oracle_user_model_update',
+  'oracle_procedural_learn',
+  'oracle_procedural_usage',
+  'oracle_episodic_record',
+]);
+
+function isWriteTool(name: string): boolean {
+  return ORACLE_WRITE_TOOL_NAMES.has(name);
+}
+
+function isWriteAllowed(name: string): boolean {
+  if (!isWriteTool(name)) return true;
+  if (ORACLE_WRITE_MODE === 'full') return true;
+  if (ORACLE_WRITE_MODE === 'none') return false;
+  if (ORACLE_ALLOWED_WRITE_TOOLS.has('*')) return true;
+  return ORACLE_ALLOWED_WRITE_TOOLS.has(name);
+}
+
+function policyFilteredTools(tools: Tool[]): Tool[] {
+  return tools.filter((tool) => isWriteAllowed(tool.name));
+}
+
+function enforceWritePolicy(name: string): void {
+  if (isWriteAllowed(name)) return;
+  throw new Error(`Write tool '${name}' is not allowed by policy (${ORACLE_WRITE_MODE})`);
+}
+
+function recordWriteAudit(name: string, args: unknown): void {
+  if (!isWriteTool(name)) return;
+
+  const payload = {
+    timestamp: new Date().toISOString(),
+    tool: name,
+    mode: ORACLE_WRITE_MODE,
+    groupFolder: ORACLE_POLICY_GROUP,
+    chatJid: NANOCLAW_CHAT_JID,
+    args: JSON.stringify(args || {}).slice(0, 1000),
+  };
+  const line = `${JSON.stringify(payload)}\n`;
+
+  try {
+    fs.appendFileSync(ORACLE_AUDIT_LOG_PATH, line, { encoding: 'utf-8' });
+  } catch {
+    // best-effort audit logging
+  }
+}
 
 // Tool definitions matching Oracle HTTP API endpoints
 const ORACLE_TOOLS: Tool[] = [
@@ -143,8 +220,8 @@ const ORACLE_TOOLS: Tool[] = [
       required: ['q'],
     },
   },
-  // Write tools (hidden in read-only mode)
-  ...(ORACLE_READ_ONLY ? [] : [
+  // Write tools (filtered by runtime policy)
+  ...([
     {
       name: 'oracle_learn',
       description: 'Add new pattern/learning to Oracle knowledge base. Use layer to target specific memory layer.',
@@ -510,13 +587,18 @@ const client = new OracleHttpClient(ORACLE_API_URL, ORACLE_AUTH_TOKEN, ORACLE_TI
 console.error(`[Oracle Bridge] Initialized`);
 console.error(`[Oracle Bridge] URL: ${ORACLE_API_URL}`);
 console.error(`[Oracle Bridge] Auth: ${ORACLE_AUTH_TOKEN ? 'enabled' : 'disabled'}`);
-console.error(`[Oracle Bridge] Read-only: ${ORACLE_READ_ONLY ? 'yes' : 'no'}`);
+console.error(`[Oracle Bridge] Write mode: ${ORACLE_WRITE_MODE}`);
+if (ORACLE_WRITE_MODE === 'selected') {
+  console.error(
+    `[Oracle Bridge] Allowed write tools: ${[...ORACLE_ALLOWED_WRITE_TOOLS].sort().join(', ') || '(none)'}`,
+  );
+}
 console.error(`[Oracle Bridge] Timeout: ${ORACLE_TIMEOUT}ms`);
 
 // List tools handler
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
-    tools: ORACLE_TOOLS,
+    tools: policyFilteredTools(ORACLE_TOOLS),
   };
 });
 
@@ -526,6 +608,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     let result: any;
+    if (isWriteTool(name)) {
+      enforceWritePolicy(name);
+      recordWriteAudit(name, args);
+    }
 
     switch (name) {
       // Search tools
@@ -577,9 +663,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Write tools (only if not read-only)
       case 'oracle_learn':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.post('/api/learn', {
           pattern: args.pattern,
           source: args.source,
@@ -592,9 +675,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case 'oracle_thread_create':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.post('/api/thread', {
           message: args.message,
           thread_id: args.thread_id,
@@ -608,9 +688,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case 'oracle_thread_update':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.patch(`/api/thread/${args.id}/status`, {
           status: args.status,
         });
@@ -639,9 +716,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case 'oracle_decision_create':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.post('/api/decisions', {
           title: args.title,
           context: args.context,
@@ -652,9 +726,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case 'oracle_decision_update':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.patch(`/api/decisions/${args.id}`, {
           title: args.title,
           context: args.context,
@@ -682,9 +753,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case 'oracle_supersede':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.post('/api/supersede', {
           old_path: args.old_path,
           old_id: args.old_id,
@@ -710,9 +778,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // User Model (Layer 1) - write
       case 'oracle_user_model_update':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         {
           const { userId, ...updates } = args as any;
           result = await client.post('/api/user-model', {
@@ -732,9 +797,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Procedural Memory (Layer 2) - write
       case 'oracle_procedural_learn':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.post('/api/procedural', {
           trigger: args.trigger,
           procedure: args.procedure,
@@ -744,9 +806,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Procedural Memory (Layer 2) - usage tracking
       case 'oracle_procedural_usage':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.post('/api/procedural/usage', {
           id: args.id,
         });
@@ -763,9 +822,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Episodic Memory (Layer 4) - write
       case 'oracle_episodic_record':
-        if (ORACLE_READ_ONLY) {
-          throw new Error('Write operations are disabled in read-only mode');
-        }
         result = await client.post('/api/episodic', {
           summary: args.summary,
           userId: args.userId,
@@ -813,3 +869,4 @@ main().catch((error) => {
   console.error('[Oracle Bridge] Fatal error:', error);
   process.exit(1);
 });
+

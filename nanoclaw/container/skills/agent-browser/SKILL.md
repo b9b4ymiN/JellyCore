@@ -157,3 +157,37 @@ agent-browser get text @e1  # Get product title
 agent-browser get attr @e2 href  # Get link URL
 agent-browser screenshot products.png
 ```
+
+## Fallback Path (Python + Playwright)
+
+If `agent-browser` fails to start or interactive refs are broken:
+
+1. Verify quickly:
+```bash
+command -v agent-browser || echo "agent-browser missing"
+python3 -c "import playwright; print('playwright ok')"
+```
+
+2. Switch to Python Playwright for the same task:
+```bash
+cat > /tmp/browser_fallback.py << 'PY'
+from playwright.sync_api import sync_playwright
+import os
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        executable_path=os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', '/usr/bin/chromium'),
+        headless=True,
+        args=['--no-sandbox', '--disable-gpu'],
+    )
+    page = browser.new_page()
+    page.goto('https://example.com', wait_until='domcontentloaded')
+    print(page.title())
+    browser.close()
+PY
+python3 /tmp/browser_fallback.py
+```
+
+3. Continue the task with Python if output is valid.
+
+This fallback should be used for critical browser tasks when `agent-browser` is unavailable.

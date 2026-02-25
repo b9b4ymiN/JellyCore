@@ -1,34 +1,28 @@
-/**
- * Prompt Builder - Compact Context Injection (v0.7.1)
+﻿/**
+ * Prompt Builder - Compact Context Injection (v0.8.0)
  *
- * Gathers relevant context from Oracle V2 and injects a compact
- * <ctx> block into the agent's prompt. Token-budgeted to ≤600 tokens.
- *
- * Sections (with char budgets → ~4 chars/token):
- *   <user>     ≤ 600 chars  (~150 tokens) — Layer 1: User Model
- *   <recent>   ≤ 800 chars  (~200 tokens) — Layer 4: Episodic
- *   <knowledge> ≤ 1000 chars (~250 tokens) — Layer 3: Semantic
- *
- * Features:
- * - 3 parallel Oracle queries with 3s total timeout
- * - LRU cache (50 entries, 5min TTL) per group
- * - Skip-if-empty: no XML block if section is empty
- * - Graceful degradation: Oracle down → empty context (0 tokens)
+ * Builds a compact <ctx> block from Oracle memory layers.
+ * Budget target: <=600 tokens (~2400 chars).
  */
+
+import { createHash } from 'crypto';
 
 import { logger } from './logger.js';
 
-// Character budgets per section (≈4 chars/token)
-const USER_MODEL_CHAR_LIMIT = 600;
-const EPISODES_CHAR_LIMIT = 800;
-const KNOWLEDGE_CHAR_LIMIT = 1000;
-const ORACLE_TIMEOUT_MS = 3000; // Total timeout for all parallel queries
+// Character budgets per section (~4 chars/token)
+const USER_MODEL_CHAR_LIMIT = 500;
+const PROCEDURAL_CHAR_LIMIT = 600;
+const EPISODES_CHAR_LIMIT = 600;
+const KNOWLEDGE_CHAR_LIMIT = 700;
+const TOTAL_CHAR_LIMIT = 2400;
+const ORACLE_TIMEOUT_MS = 3000;
 
 export interface CompactContext {
-  userModel: string;       // Compact user summary
-  recentEpisodes: string;  // Recent conversation summaries
-  relevantKnowledge: string; // Search results
-  tokenEstimate: number;   // Estimated token count
+  userModel: string;
+  proceduralGuidance: string;
+  recentEpisodes: string;
+  relevantKnowledge: string;
+  tokenEstimate: number;
   fromCache: boolean;
 }
 
@@ -44,9 +38,8 @@ interface CacheEntry {
   timestamp: number;
 }
 
-/**
- * LRU Cache for prompt contexts
- */
+type JsonObject = Record<string, unknown>;
+
 class ContextCache {
   private cache = new Map<string, CacheEntry>();
   private max: number;
@@ -64,7 +57,6 @@ class ContextCache {
       this.cache.delete(key);
       return undefined;
     }
-    // Move to end (LRU)
     this.cache.delete(key);
     this.cache.set(key, entry);
     return entry.context;
@@ -78,13 +70,15 @@ class ContextCache {
     this.cache.set(key, { context, timestamp: Date.now() });
   }
 
-  clear(): void { this.cache.clear(); }
-  get size(): number { return this.cache.size; }
+  clear(): void {
+    this.cache.clear();
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
 }
 
-/**
- * Compact Oracle V2 HTTP Client
- */
 class OracleClient {
   constructor(
     private baseUrl: string,
@@ -93,115 +87,211 @@ class OracleClient {
 
   private async request(
     path: string,
-    params?: Record<string, any>,
+    params?: Record<string, string | number | undefined>,
     signal?: AbortSignal,
-  ): Promise<any> {
+  ): Promise<unknown> {
     const url = new URL(path, this.baseUrl);
     if (params) {
-      Object.entries(params).forEach(([k, v]) => {
-        if (v !== undefined) url.searchParams.set(k, String(v));
-      });
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && String(v).length > 0) {
+          url.searchParams.set(k, String(v));
+        }
+      }
     }
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+    if (this.authToken) headers.Authorization = `Bearer ${this.authToken}`;
 
     const response = await fetch(url.toString(), { headers, signal });
     if (!response.ok) throw new Error(`Oracle ${response.status}`);
     return response.json();
   }
 
-  /** Layer 1: Get user model (compact) */
-  async getUserModel(signal?: AbortSignal): Promise<string> {
+  async getUserModel(userId: string, signal?: AbortSignal): Promise<string> {
     try {
-      const result = await this.request('/api/user-model', undefined, signal);
-      if (!result || !result.model) return '';
+      const result = await this.request('/api/user-model', { userId }, signal);
+      const obj = asObject(result);
+      if (!obj) return '';
 
-      // Compact format: key facts only
-      const m = result.model;
+      const model = asObject(obj.model) || obj;
       const parts: string[] = [];
-      if (m.name) parts.push(`ชื่อ: ${m.name}`);
-      if (m.language) parts.push(`ภาษา: ${m.language}`);
-      if (m.expertise) {
-        const exp = Array.isArray(m.expertise) ? m.expertise.join(', ') : m.expertise;
-        parts.push(`expertise: ${exp}`);
-      }
-      if (m.preferences) {
-        const prefs = typeof m.preferences === 'object'
-          ? Object.entries(m.preferences).map(([k, v]) => `${k}: ${v}`).join(', ')
-          : m.preferences;
-        parts.push(`preferences: ${prefs}`);
-      }
-      if (m.topics) {
-        const topics = Array.isArray(m.topics) ? m.topics.join(', ') : m.topics;
-        parts.push(`สนใจ: ${topics}`);
-      }
-      // Include any extra fields as key=value
-      for (const [key, value] of Object.entries(m)) {
-        if (['name', 'language', 'expertise', 'preferences', 'topics', 'id', 'created_at', 'updated_at'].includes(key)) continue;
-        if (value && typeof value === 'string') parts.push(`${key}: ${value}`);
-      }
-      return parts.join(', ').slice(0, USER_MODEL_CHAR_LIMIT);
+
+      const name = toText(model.name);
+      if (name) parts.push(`name: ${name}`);
+
+      const language = toText(model.language);
+      if (language) parts.push(`language: ${language}`);
+
+      const expertise = compactKvOrList(model.expertise);
+      if (expertise) parts.push(`expertise: ${expertise}`);
+
+      const preferences = compactKvOrList(model.preferences);
+      if (preferences) parts.push(`preferences: ${preferences}`);
+
+      const topics = compactKvOrList(model.topics ?? model.commonTopics);
+      if (topics) parts.push(`topics: ${topics}`);
+
+      return truncate(parts.join(', '), USER_MODEL_CHAR_LIMIT);
     } catch {
       return '';
     }
   }
 
-  /** Layer 4: Get recent episodes */
-  async getRecentEpisodes(limit = 2, signal?: AbortSignal): Promise<string> {
+  async getProceduralGuidance(query: string, limit = 2, signal?: AbortSignal): Promise<string> {
     try {
-      const result = await this.request('/api/episodic', { limit }, signal);
-      const episodes = result?.episodes || result?.results || [];
-      if (episodes.length === 0) return '';
+      const result = await this.request('/api/procedural', { q: query, limit }, signal);
+      const rows = extractResults(result);
+      if (rows.length === 0) return '';
 
-      return episodes
-        .slice(0, limit)
-        .map((ep: any) => {
-          const time = ep.created_at ? formatTimeAgo(ep.created_at) : '?';
-          const summary = (ep.summary || ep.content || '').slice(0, 300);
-          return `- ${time}: ${summary}`;
-        })
-        .join('\n')
-        .slice(0, EPISODES_CHAR_LIMIT);
+      const lines = rows.slice(0, limit).map((row) => {
+        const trigger = toText(row.trigger) || toText(row.title) || 'procedure';
+        const steps = (Array.isArray(row.procedure) ? row.procedure : [])
+          .map((step) => toText(step))
+          .filter(Boolean)
+          .slice(0, 3)
+          .map((step) => truncate(step, 90));
+
+        if (steps.length === 0) return `- ${truncate(trigger, 120)}`;
+        return `- ${truncate(trigger, 120)}: ${steps.join(' -> ')}`;
+      });
+
+      return truncate(lines.join('\n'), PROCEDURAL_CHAR_LIMIT);
     } catch {
       return '';
     }
   }
 
-  /** Layer 3: Search relevant knowledge */
+  async getRecentEpisodes(
+    query: string,
+    userId: string,
+    limit = 2,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    try {
+      const result = await this.request('/api/episodic', { q: query, userId, limit }, signal);
+      const rows = extractResults(result);
+      if (rows.length === 0) return '';
+
+      const lines = rows.slice(0, limit).map((row) => {
+        const createdAt = toText(row.created_at);
+        const time = createdAt ? formatTimeAgo(createdAt) : '?';
+        const summary = toText(row.summary) || toText(row.content) || '';
+        return `- ${time}: ${truncate(summary, 220)}`;
+      });
+
+      return truncate(lines.join('\n'), EPISODES_CHAR_LIMIT);
+    } catch {
+      return '';
+    }
+  }
+
   async searchKnowledge(query: string, limit = 3, signal?: AbortSignal): Promise<string> {
     try {
       const result = await this.request('/api/search', { q: query, limit, mode: 'hybrid' }, signal);
-      const results = result?.results || [];
-      if (results.length === 0) return '';
+      const rows = extractResults(result);
+      if (rows.length === 0) return '';
 
-      return results
-        .slice(0, limit)
-        .map((doc: any) => {
-          const title = doc.title || doc.type || 'doc';
-          const snippet = (doc.content || '').slice(0, 250);
-          return `- [${title}] ${snippet}`;
-        })
-        .join('\n')
-        .slice(0, KNOWLEDGE_CHAR_LIMIT);
+      const lines = rows.slice(0, limit).map((row) => {
+        const title = toText(row.title) || toText(row.type) || 'doc';
+        const snippet = toText(row.content) || '';
+        return `- [${truncate(title, 80)}] ${truncate(snippet, 180)}`;
+      });
+
+      return truncate(lines.join('\n'), KNOWLEDGE_CHAR_LIMIT);
     } catch {
       return '';
     }
   }
+}
+
+function asObject(value: unknown): JsonObject | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as JsonObject;
+}
+
+function extractResults(value: unknown): JsonObject[] {
+  const obj = asObject(value);
+  if (!obj) return [];
+
+  const direct = Array.isArray(obj.results) ? obj.results : [];
+  if (direct.length > 0) {
+    return direct.map((v) => asObject(v)).filter((v): v is JsonObject => v !== null);
+  }
+
+  const fallback = Array.isArray(obj.episodes) ? obj.episodes : [];
+  return fallback.map((v) => asObject(v)).filter((v): v is JsonObject => v !== null);
+}
+
+function toText(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function compactKvOrList(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((v) => toText(v)).filter(Boolean).join(', ');
+  }
+
+  const obj = asObject(value);
+  if (obj) {
+    return Object.entries(obj)
+      .map(([k, v]) => {
+        const text = toText(v);
+        return text ? `${k}:${text}` : '';
+      })
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  return toText(value);
+}
+
+function truncate(text: string, limit: number): string {
+  return text.length > limit ? text.slice(0, limit) : text;
+}
+
+function hashKey(text: string): string {
+  return createHash('sha1').update(text).digest('hex').slice(0, 10);
 }
 
 function formatTimeAgo(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime();
-  const hours = Math.floor(diff / 3600000);
+  if (!Number.isFinite(diff) || diff < 0) return 'just now';
+  const hours = Math.floor(diff / 3_600_000);
   if (hours < 1) return 'just now';
   if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
-/**
- * Main Prompt Builder Class — Compact Context Injection
- */
+function enforceTotalBudget(context: Omit<CompactContext, 'tokenEstimate' | 'fromCache'>): Omit<CompactContext, 'tokenEstimate' | 'fromCache'> {
+  const current = context.userModel.length
+    + context.proceduralGuidance.length
+    + context.recentEpisodes.length
+    + context.relevantKnowledge.length;
+
+  if (current <= TOTAL_CHAR_LIMIT) return context;
+
+  // Trim in least-critical order first.
+  let over = current - TOTAL_CHAR_LIMIT;
+
+  const trimField = (value: string, minKeep: number): string => {
+    if (over <= 0) return value;
+    const room = Math.max(0, value.length - minKeep);
+    const cut = Math.min(room, over);
+    over -= cut;
+    return value.slice(0, value.length - cut);
+  };
+
+  return {
+    ...context,
+    relevantKnowledge: trimField(context.relevantKnowledge, 180),
+    recentEpisodes: trimField(context.recentEpisodes, 180),
+    proceduralGuidance: trimField(context.proceduralGuidance, 180),
+    userModel: trimField(context.userModel, 120),
+  };
+}
+
 export class PromptBuilder {
   private oracleClient: OracleClient;
   private cache: ContextCache;
@@ -218,88 +308,84 @@ export class PromptBuilder {
     this.cache = new ContextCache(cacheMax, cacheTtl);
   }
 
-  /**
-   * Build compact context for a user message.
-   * Total budget: ≤600 tokens (~2400 chars).
-   * Returns empty string if Oracle is unavailable.
-   */
   async buildCompactContext(
     latestUserMessage: string,
     groupId: string,
+    userId: string = 'default',
   ): Promise<CompactContext> {
-    // Check cache (keyed by group — user model + episodes don't change per message)
-    const cacheKey = `ctx:${groupId}`;
+    const normalizedMsg = latestUserMessage.trim().toLowerCase();
+    const cacheKey = `ctx:${groupId}:${userId}:${hashKey(normalizedMsg)}`;
     const cached = this.cache.get(cacheKey);
-    if (cached) {
-      return { ...cached, fromCache: true };
-    }
+    if (cached) return { ...cached, fromCache: true };
 
-    // Create abort controller for total timeout
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), ORACLE_TIMEOUT_MS);
 
     try {
-      // Parallel queries: User Model + Episodic + Knowledge Search
-      const [userModel, recentEpisodes, relevantKnowledge] = await Promise.all([
-        this.oracleClient.getUserModel(controller.signal),
-        this.oracleClient.getRecentEpisodes(2, controller.signal),
+      const [userModel, proceduralGuidance, recentEpisodes, relevantKnowledge] = await Promise.all([
+        this.oracleClient.getUserModel(userId, controller.signal),
+        this.oracleClient.getProceduralGuidance(latestUserMessage, 2, controller.signal),
+        this.oracleClient.getRecentEpisodes(latestUserMessage, userId, 2, controller.signal),
         this.oracleClient.searchKnowledge(latestUserMessage, 3, controller.signal),
       ]);
 
       clearTimeout(timeout);
 
-      const totalChars = userModel.length + recentEpisodes.length + relevantKnowledge.length;
-      const tokenEstimate = Math.ceil(totalChars / 4);
-
-      const context: CompactContext = {
+      const budgeted = enforceTotalBudget({
         userModel,
+        proceduralGuidance,
         recentEpisodes,
         relevantKnowledge,
-        tokenEstimate,
+      });
+
+      const totalChars = budgeted.userModel.length
+        + budgeted.proceduralGuidance.length
+        + budgeted.recentEpisodes.length
+        + budgeted.relevantKnowledge.length;
+
+      const context: CompactContext = {
+        ...budgeted,
+        tokenEstimate: Math.ceil(totalChars / 4),
         fromCache: false,
       };
 
-      // Cache (keyed by group — knowledge varies but cache evicts in 5 min)
       this.cache.set(cacheKey, context);
-
       return context;
     } catch (err) {
       clearTimeout(timeout);
-      logger.warn({ err, groupId }, 'Oracle context injection failed, skipping');
-      return { userModel: '', recentEpisodes: '', relevantKnowledge: '', tokenEstimate: 0, fromCache: false };
+      logger.warn({ err, groupId, userId }, 'Oracle context injection failed, skipping');
+      return {
+        userModel: '',
+        proceduralGuidance: '',
+        recentEpisodes: '',
+        relevantKnowledge: '',
+        tokenEstimate: 0,
+        fromCache: false,
+      };
     }
   }
 
-  /**
-   * Format compact context as XML for prepending to prompt.
-   * Skip-if-empty: returns empty string if all sections are empty.
-   */
   formatCompact(ctx: CompactContext): string {
     const sections: string[] = [];
 
     if (ctx.userModel) sections.push(`<user>${ctx.userModel}</user>`);
+    if (ctx.proceduralGuidance) sections.push(`<procedural>\n${ctx.proceduralGuidance}\n</procedural>`);
     if (ctx.recentEpisodes) sections.push(`<recent>\n${ctx.recentEpisodes}\n</recent>`);
     if (ctx.relevantKnowledge) sections.push(`<knowledge>\n${ctx.relevantKnowledge}\n</knowledge>`);
 
     if (sections.length === 0) return '';
-
     return `<ctx>\n${sections.join('\n')}\n</ctx>`;
   }
 
-  /** Get cache statistics */
   getCacheStats(): { size: number } {
     return { size: this.cache.size };
   }
 
-  /** Clear cache */
   clearCache(): void {
     this.cache.clear();
   }
 }
 
-/**
- * Singleton instance
- */
 let instance: PromptBuilder | undefined;
 
 export function getPromptBuilder(opts?: PromptBuilderOpts): PromptBuilder {

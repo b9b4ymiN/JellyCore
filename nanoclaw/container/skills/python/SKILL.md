@@ -119,3 +119,27 @@ Pre-installed packages persist across runs.
 - The system Chromium is shared between agent-browser and Playwright
 - Prefer `requests` + `BeautifulSoup` for static pages (faster, lighter)
 - Use Playwright only for JavaScript-heavy pages that need rendering
+
+## Browser Fallback Smoke Test
+
+Use this when `agent-browser` is unavailable and you need to verify fallback quickly.
+
+```bash
+python3 - << 'PY'
+from playwright.sync_api import sync_playwright
+import os
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        executable_path=os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', '/usr/bin/chromium'),
+        headless=True,
+        args=['--no-sandbox', '--disable-gpu'],
+    )
+    page = browser.new_page()
+    page.goto('https://example.com', wait_until='domcontentloaded')
+    print('title:', page.title())
+    browser.close()
+PY
+```
+
+If this succeeds, browser automation can continue via Python Playwright fallback.

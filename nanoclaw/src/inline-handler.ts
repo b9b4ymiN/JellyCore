@@ -7,10 +7,22 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { ASSISTANT_NAME, GROUPS_DIR, MAX_PROMPT_MESSAGES, MAX_PROMPT_CHARS, SESSION_MAX_AGE_MS } from './config.js';
+import { GROUPS_DIR, MAX_PROMPT_MESSAGES, MAX_PROMPT_CHARS, SESSION_MAX_AGE_MS } from './config.js';
+import {
+  COMMAND_DEFINITIONS,
+  CommandName,
+  CommandCategory,
+  isKnownCommandName,
+  parseSlashCommand,
+  TELEGRAM_COMMANDS,
+} from './command-registry.js';
 import { cmdUsage, cmdCost, cmdBudget } from './cost-intelligence.js';
 import { getSessionAge, getDb } from './db.js';
+import { recentErrors } from './health-server.js';
+import { logger } from './logger.js';
 import { resourceMonitor } from './resource-monitor.js';
+
+export { TELEGRAM_COMMANDS };
 
 // ─── Result Type ─────────────────────────────────────────────────────
 
@@ -20,32 +32,6 @@ export interface InlineResult {
   reply: string;
   action?: InlineAction;
 }
-
-// ─── Telegram Slash Commands ─────────────────────────────────────────
-
-/** Commands registered with Telegram's autocomplete menu */
-export const TELEGRAM_COMMANDS = [
-  { command: 'start', description: 'เริ่มต้นใช้งาน' },
-  { command: 'help', description: 'คำสั่งที่ใช้ได้' },
-  { command: 'status', description: 'สถานะระบบ' },
-  { command: 'session', description: 'ดูข้อมูล session & context' },
-  { command: 'clear', description: 'ล้าง session (แก้ Prompt too long)' },
-  { command: 'usage', description: 'สรุปการใช้งานวันนี้' },
-  { command: 'cost', description: 'ค่าใช้จ่ายเดือนนี้' },
-  { command: 'budget', description: 'ดู/ตั้ง budget' },
-  { command: 'model', description: 'ดู model & tier ปัจจุบัน' },
-  { command: 'ping', description: 'ทดสอบว่าบอทตอบ' },
-  { command: 'soul', description: 'ดูบุคลิกของ AI' },
-  { command: 'me', description: 'ข้อมูลที่ AI รู้เกี่ยวกับคุณ' },
-  { command: 'reset', description: 'ล้างข้อมูลผู้ใช้ (USER.md)' },
-  { command: 'containers', description: 'ดู Docker containers ทั้งหมด' },
-  { command: 'kill', description: 'หยุด container (ใช้: /kill ชื่อ)' },
-  { command: 'errors', description: 'ดู errors ล่าสุด' },
-  { command: 'health', description: 'Health check ละเอียด' },
-  { command: 'queue', description: 'ดูคิวงาน' },
-  { command: 'restart', description: 'Restart container ของ group นี้' },
-  { command: 'docker', description: 'ดู Docker resource usage' },
-];
 
 // ─── Inline Responses ────────────────────────────────────────────────
 
@@ -85,37 +71,26 @@ function cmdStart(): string {
 }
 
 function cmdHelp(): string {
-  return [
-    '*คำสั่งทั้งหมด*',
-    '',
-    '*ทั่วไป:*',
-    '/start — เริ่มต้นใช้งาน',
-    '/help — คำสั่งที่ใช้ได้',
-    '/ping — ทดสอบว่าบอทตอบ',
-    '/me — ข้อมูลที่ AI รู้เกี่ยวกับคุณ',
-    '/soul — ดูบุคลิกของ AI',
-    '',
-    '*Session:*',
-    '/session — ดูข้อมูล session & context',
-    '/clear — ล้าง session (แก้ Prompt too long)',
-    '/reset — ล้างข้อมูลผู้ใช้ (USER.md)',
-    '/model — ดู model & tier ปัจจุบัน',
-    '',
-    '*ค่าใช้จ่าย:*',
-    '/usage — สรุปการใช้งานวันนี้',
-    '/cost — ค่าใช้จ่ายเดือนนี้',
-    '/budget — ดู/ตั้ง budget',
-    '',
-    '*🔧 Admin:*',
-    '/status — สถานะระบบ',
-    '/health — Health check ละเอียด',
-    '/containers — ดู Docker containers',
-    '/queue — ดูคิวงาน',
-    '/errors — ดู errors ล่าสุด',
-    '/kill ชื่อ — หยุด container',
-    '/restart — restart container กลุ่มนี้',
-    '/docker — Docker resource usage',
-  ].join('\n');
+  const titleByCategory: Record<CommandCategory, string> = {
+    general: '*ทั่วไป:*',
+    session: '*Session:*',
+    cost: '*ค่าใช้จ่าย:*',
+    admin: '*🔧 Admin:*',
+  };
+  const orderedCategories: CommandCategory[] = ['general', 'session', 'cost', 'admin'];
+
+  const lines: string[] = ['*คำสั่งทั้งหมด*', ''];
+  for (const category of orderedCategories) {
+    const defs = COMMAND_DEFINITIONS.filter((d) => d.category === category);
+    if (defs.length === 0) continue;
+    lines.push(titleByCategory[category]);
+    for (const def of defs) {
+      const helpDescription = 'helpDescription' in def ? def.helpDescription : undefined;
+      lines.push(`/${def.command} — ${helpDescription || def.description}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n').trim();
 }
 
 function cmdStatus(): string {
@@ -366,26 +341,19 @@ function cmdKill(args: string): string {
 }
 
 function cmdErrors(): string {
-  // Read recent errors from health server's circular buffer
-  try {
-    const { recentErrors } = require('./health-server.js');
-    // recentErrors is the module-level array
-    if (!recentErrors || recentErrors.length === 0) {
-      return '✅ *ไม่มี errors ล่าสุด*\n\nระบบทำงานปกติค่ะ';
-    }
-    const last10 = recentErrors.slice(-10);
-    const lines = last10.map((e: any) => {
-      const time = new Date(e.timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-      return `• ${time} ${e.group ? `[${e.group}]` : ''} ${e.message.slice(0, 80)}`;
-    });
-    return [
-      `⚠️ *Errors ล่าสุด* (${recentErrors.length} total)`,
-      '',
-      ...lines,
-    ].join('\n');
-  } catch {
-    return '⚠️ ไม่สามารถดู errors ได้';
+  if (!recentErrors || recentErrors.length === 0) {
+    return '✅ *ไม่มี errors ล่าสุด*\n\nระบบทำงานปกติค่ะ';
   }
+  const last10 = recentErrors.slice(-10);
+  const lines = last10.map((e) => {
+    const time = new Date(e.timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    return `• ${time} ${e.group ? `[${e.group}]` : ''} ${e.message.slice(0, 80)}`;
+  });
+  return [
+    `⚠️ *Errors ล่าสุด* (${recentErrors.length} total)`,
+    '',
+    ...lines,
+  ].join('\n');
 }
 
 function cmdHealth(): string {
@@ -564,6 +532,49 @@ function cmdReset(groupFolder?: string): string {
 
 // ─── Main Handler ────────────────────────────────────────────────────
 
+interface CommandHandlerContext {
+  args: string;
+  chatJid?: string;
+  groupFolder?: string;
+}
+
+const COMMAND_HANDLERS: Record<
+  CommandName,
+  (ctx: CommandHandlerContext) => string | InlineResult
+> = {
+  start: () => cmdStart(),
+  help: () => cmdHelp(),
+  status: () => cmdStatus(),
+  session: ({ groupFolder }) => cmdSession(groupFolder),
+  clear: ({ groupFolder }) => cmdClear(groupFolder),
+  ping: () => cmdPing(),
+  model: () => cmdModel(),
+  soul: () => cmdSoul(),
+  me: ({ chatJid, groupFolder }) => cmdMe(chatJid || '', groupFolder),
+  reset: ({ groupFolder }) => cmdReset(groupFolder),
+  usage: () => cmdUsage(),
+  cost: () => cmdCost(),
+  budget: ({ args }) => cmdBudget(args),
+  containers: () => cmdContainers(),
+  kill: ({ args }) => cmdKill(args),
+  errors: () => cmdErrors(),
+  health: () => cmdHealth(),
+  queue: () => cmdQueue(),
+  restart: ({ groupFolder }) => cmdRestart(groupFolder),
+  docker: () => cmdDocker(),
+};
+
+function unknownCommandReply(rawCommand: string): string {
+  const suggestions = COMMAND_DEFINITIONS
+    .filter((def) => def.command.startsWith(rawCommand.slice(0, 2)))
+    .slice(0, 3)
+    .map((def) => `/${def.command}`);
+  const suggestionText = suggestions.length > 0
+    ? `\n\nลองใช้: ${suggestions.join(', ')}`
+    : '';
+  return `ไม่รู้จักคำสั่ง /${rawCommand} — ลอง /help ดูนะคะ${suggestionText}`;
+}
+
 export function handleInline(
   reason: string,
   message: string,
@@ -571,29 +582,27 @@ export function handleInline(
   groupFolder?: string,
 ): string | InlineResult {
   if (reason === 'admin-cmd') {
-    const cmd = message.trim().split(/\s+/)[0].toLowerCase();
-    switch (cmd) {
-      case '/start': return cmdStart();
-      case '/help': return cmdHelp();
-      case '/status': return cmdStatus();
-      case '/session': return cmdSession(groupFolder);
-      case '/clear': return cmdClear(groupFolder);
-      case '/ping': return cmdPing();
-      case '/model': return cmdModel();
-      case '/soul': return cmdSoul();
-      case '/me': return cmdMe(chatJid || '', groupFolder);
-      case '/reset': return cmdReset(groupFolder);
-      case '/usage': return cmdUsage();
-      case '/cost': return cmdCost();
-      case '/budget': return cmdBudget(message.trim().replace(/^\/budget\s*/i, ''));
-      case '/containers': return cmdContainers();
-      case '/kill': return cmdKill(message.trim().replace(/^\/kill\s*/i, ''));
-      case '/errors': return cmdErrors();
-      case '/health': return cmdHealth();
-      case '/queue': return cmdQueue();
-      case '/restart': return cmdRestart(groupFolder);
-      case '/docker': return cmdDocker();
-      default: return `ไม่รู้จักคำสั่ง ${cmd} — ลอง /help ดูนะคะ`;
+    const parsed = parseSlashCommand(message);
+    if (!parsed) {
+      return 'ไม่พบคำสั่งที่ถูกต้อง — ลอง /help ดูนะคะ';
+    }
+
+    const { command, args } = parsed;
+    if (!isKnownCommandName(command)) {
+      return unknownCommandReply(command);
+    }
+
+    const handler = COMMAND_HANDLERS[command];
+    try {
+      return handler({ args, chatJid, groupFolder });
+    } catch (err) {
+      logger.error({ err, command, chatJid, groupFolder }, 'Inline command failed');
+      return [
+        `⚠️ คำสั่ง /${command} เกิดข้อผิดพลาดชั่วคราว`,
+        '',
+        'ระบบพยายามคืนสภาพให้อัตโนมัติแล้ว',
+        'ลองรันซ้ำอีกครั้ง หรือใช้ /help เพื่อเลือกคำสั่งอื่น',
+      ].join('\n');
     }
   }
 

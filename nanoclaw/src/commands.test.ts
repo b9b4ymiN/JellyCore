@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { _initTestDatabase } from './db.js';
 import { classifyQuery } from './query-router.js';
-import { handleInline, InlineResult } from './inline-handler.js';
+import { handleInline, InlineResult, TELEGRAM_COMMANDS } from './inline-handler.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -28,12 +28,24 @@ describe('Query Router — new commands', () => {
     expect(result.tier).toBe('inline');
   });
 
+  it('routes Telegram command with @bot suffix to inline', () => {
+    const result = classifyQuery('/help@my_bot');
+    expect(result.tier).toBe('inline');
+    expect(result.reason).toBe('admin-cmd');
+  });
+
   it('routes existing commands unchanged', () => {
     expect(classifyQuery('/help').tier).toBe('inline');
     expect(classifyQuery('/status').tier).toBe('inline');
     expect(classifyQuery('/usage').tier).toBe('inline');
     expect(classifyQuery('/cost').tier).toBe('inline');
     expect(classifyQuery('/budget').tier).toBe('inline');
+  });
+
+  it('routes unknown slash commands to inline (fast failure path)', () => {
+    const result = classifyQuery('/unknown_command');
+    expect(result.tier).toBe('inline');
+    expect(result.reason).toBe('admin-cmd');
   });
 });
 
@@ -101,5 +113,32 @@ describe('/help command', () => {
     expect(result).toContain('/usage');
     expect(result).toContain('/cost');
     expect(result).toContain('/budget');
+  });
+});
+
+// ─── Command registry coverage ───────────────────────────────────────
+
+describe('Telegram command coverage', () => {
+  it('every registered Telegram command has inline routing + response', () => {
+    for (const def of TELEGRAM_COMMANDS) {
+      const cmd = `/${def.command}`;
+      const routed = classifyQuery(cmd);
+      expect(routed.tier).toBe('inline');
+      expect(routed.reason).toBe('admin-cmd');
+
+      const result = handleInline('admin-cmd', cmd, 'tg:123', 'main');
+      if (typeof result === 'string') {
+        expect(result.length).toBeGreaterThan(0);
+      } else {
+        expect(result.reply.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('unknown command returns a professional recovery message', () => {
+    const result = handleInline('admin-cmd', '/not_exists');
+    expect(typeof result).toBe('string');
+    expect(result as string).toContain('ไม่รู้จักคำสั่ง');
+    expect(result as string).toContain('/help');
   });
 });

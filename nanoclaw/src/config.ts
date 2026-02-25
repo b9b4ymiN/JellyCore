@@ -125,6 +125,20 @@ export const ORPHAN_SWEEP_INTERVAL_MS = parseInt(
   10,
 );
 
+// Runtime capability smoke checks
+export const CAPABILITY_PROBE_INTERVAL_MS = parseInt(
+  process.env.CAPABILITY_PROBE_INTERVAL_MS || '300000',
+  10,
+); // 5 min
+export const CAPABILITY_PROBE_TIMEOUT_MS = parseInt(
+  process.env.CAPABILITY_PROBE_TIMEOUT_MS || '5000',
+  10,
+); // 5s
+export const CAPABILITY_AGENT_BROWSER_CHECK_INTERVAL_MS = parseInt(
+  process.env.CAPABILITY_AGENT_BROWSER_CHECK_INTERVAL_MS || '1800000',
+  10,
+); // 30 min
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

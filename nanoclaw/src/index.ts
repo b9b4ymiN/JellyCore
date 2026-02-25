@@ -41,6 +41,7 @@ import {
   getDeadLettersByStatus,
   getAllRegisteredGroups,
   getAllSessions,
+  getStableUserId,
   getAllTasks,
   getMessageAttempts,
   getMessageReceipt,
@@ -70,10 +71,11 @@ import { findChannel, formatMessages, formatOutbound, routeOutbound } from './ro
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, LaneType, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { startHealthServer, setOpsProvider, setStatusProvider, setHeartbeatProvider, recordError } from './health-server.js';
+import { startHealthServer, setOpsProvider, setStatusProvider, setHeartbeatProvider, setToolsProvider, recordError } from './health-server.js';
 import { resourceMonitor } from './resource-monitor.js';
 import { startHeartbeat, startHeartbeatJobRunner, patchHeartbeatConfig, recordActivity } from './heartbeat.js';
 import { dockerResilience } from './docker-resilience.js';
+import { capabilityProbe } from './capability-probe.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -91,6 +93,174 @@ const latestRejectedTracesByGroup = new Map<string, string[]>();
 
 // Global registry of active typing intervals â€” cleared on shutdown
 const activeTypingIntervals = new Set<ReturnType<typeof setInterval>>();
+
+interface ExternalMcpConfig {
+  name: string;
+  description?: string;
+  command?: string;
+  args?: string[];
+  requiredEnv?: string[];
+  env?: Record<string, string>;
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+}
+
+function readFileUtf8Safe(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function extractMatches(content: string, pattern: RegExp): string[] {
+  const matches: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) {
+    if (match[1]) matches.push(match[1]);
+  }
+  return uniqueSorted(matches);
+}
+
+function parseSimpleFrontmatter(content: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return out;
+  for (const line of fm[1].split(/\r?\n/)) {
+    const idx = line.indexOf(':');
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    const val = line.slice(idx + 1).trim();
+    if (key) out[key] = val;
+  }
+  return out;
+}
+
+function discoverSkillInventory(projectRoot: string): Array<{
+  name: string;
+  directory: string;
+  description: string | null;
+}> {
+  const skillsDir = path.join(projectRoot, 'container', 'skills');
+  if (!fs.existsSync(skillsDir)) return [];
+
+  const items: Array<{ name: string; directory: string; description: string | null }> = [];
+  for (const entry of fs.readdirSync(skillsDir)) {
+    const fullDir = path.join(skillsDir, entry);
+    if (!fs.statSync(fullDir).isDirectory()) continue;
+    const skillMdPath = path.join(fullDir, 'SKILL.md');
+    const skillContent = readFileUtf8Safe(skillMdPath);
+    const meta = skillContent ? parseSimpleFrontmatter(skillContent) : {};
+    items.push({
+      name: meta.name || entry,
+      directory: entry,
+      description: meta.description || null,
+    });
+  }
+  return items.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function discoverNanoclawMcpTools(projectRoot: string): string[] {
+  const p = path.join(projectRoot, 'container', 'agent-runner', 'src', 'ipc-mcp-stdio.ts');
+  const content = readFileUtf8Safe(p);
+  if (!content) return [];
+  return extractMatches(content, /server\.tool\(\s*'([^']+)'/g);
+}
+
+function discoverOracleMcpTools(projectRoot: string): string[] {
+  const p = path.join(projectRoot, 'container', 'agent-runner', 'src', 'oracle-mcp-http.ts');
+  const content = readFileUtf8Safe(p);
+  if (!content) return [];
+  return extractMatches(content, /name:\s*'(oracle_[^']+)'/g);
+}
+
+function discoverAgentAllowedTools(projectRoot: string): string[] {
+  const p = path.join(projectRoot, 'container', 'agent-runner', 'src', 'index.ts');
+  const content = readFileUtf8Safe(p);
+  if (!content) return [];
+
+  const blockMatch = content.match(/allowedTools:\s*\[([\s\S]*?)\],\s*env:/m);
+  if (!blockMatch) return [];
+  return extractMatches(blockMatch[1], /'([^']+)'/g);
+}
+
+function loadExternalMcpConfigs(projectRoot: string): ExternalMcpConfig[] {
+  const p = path.join(projectRoot, 'container', 'config', 'mcps.json');
+  const raw = readFileUtf8Safe(p);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as { servers?: ExternalMcpConfig[] };
+    return Array.isArray(parsed.servers) ? parsed.servers : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildRuntimeToolsInventory(channelNames: string[]): Record<string, unknown> {
+  const projectRoot = process.cwd();
+  const skills = discoverSkillInventory(projectRoot);
+  const nanoclawTools = discoverNanoclawMcpTools(projectRoot);
+  const oracleTools = discoverOracleMcpTools(projectRoot);
+  const allowedTools = discoverAgentAllowedTools(projectRoot);
+  const externalConfigs = loadExternalMcpConfigs(projectRoot);
+
+  const externalServers = externalConfigs.map((server) => {
+    const requiredEnv = Array.isArray(server.requiredEnv) ? server.requiredEnv : [];
+    const missingEnv = requiredEnv.filter((key) => !process.env[key]);
+    const enabled = missingEnv.length === 0;
+    return {
+      name: server.name,
+      description: server.description || null,
+      command: server.command || null,
+      args: Array.isArray(server.args) ? server.args : [],
+      requiredEnv,
+      missingEnv,
+      enabled,
+      reason: enabled ? 'ready' : `missing required env: ${missingEnv.join(', ')}`,
+    };
+  });
+
+  return {
+    timestamp: new Date().toISOString(),
+    runtime: {
+      channels: uniqueSorted(channelNames),
+      timezone: TIMEZONE,
+      projectRoot,
+    },
+    sdk: {
+      allowedToolsCount: allowedTools.length,
+      allowedTools,
+    },
+    skills: {
+      count: skills.length,
+      items: skills,
+    },
+    mcp: {
+      nanoclaw: {
+        configured: true,
+        toolCount: nanoclawTools.length,
+        tools: nanoclawTools,
+        source: 'container/agent-runner/src/ipc-mcp-stdio.ts',
+      },
+      oracle: {
+        configured: true,
+        apiUrl: process.env.ORACLE_API_URL || 'http://oracle:47778',
+        authConfigured: Boolean(process.env.ORACLE_AUTH_TOKEN),
+        toolCount: oracleTools.length,
+        tools: oracleTools,
+        source: 'container/agent-runner/src/oracle-mcp-http.ts',
+      },
+      external: {
+        configuredCount: externalServers.length,
+        activeCount: externalServers.filter((s) => s.enabled).length,
+        servers: externalServers,
+        source: 'container/config/mcps.json',
+      },
+    },
+  };
+}
 
 function traceMessages(
   messages: NewMessage[],
@@ -338,14 +508,21 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   let oracleContext = '';
   try {
     const pb = getPromptBuilder();
+    const stableUserId = getStableUserId(chatJid);
     const ctx = await pb.buildCompactContext(
       lastMsg.content,
       group.folder,
+      stableUserId,
     );
     oracleContext = pb.formatCompact(ctx);
     if (oracleContext) {
       logger.info(
-        { group: group.name, tokens: ctx.tokenEstimate, cached: ctx.fromCache },
+        {
+          group: group.name,
+          userId: stableUserId,
+          tokens: ctx.tokenEstimate,
+          cached: ctx.fromCache,
+        },
         'Oracle context injected',
       );
     }
@@ -988,6 +1165,7 @@ async function main(): Promise<void> {
   loadState();
   reconcileUnfinishedReceipts();
   dockerResilience.init(() => queue.getActiveContainerNames());
+  capabilityProbe.start();
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
@@ -1002,6 +1180,7 @@ async function main(): Promise<void> {
     // 2. Shutdown container pool and queue
     await containerPool.shutdown();
     await queue.shutdown(10000);
+    capabilityProbe.stop();
     dockerResilience.stop();
 
     // 3. Kill ALL orphan nanoclaw-* agent containers so Docker network can be freed
@@ -1185,6 +1364,7 @@ async function main(): Promise<void> {
     },
     getDockerResilience: () => dockerResilience.getState(),
     getDlqStats: () => getDlqCounts(),
+    getCapabilityHealth: () => capabilityProbe.getState(),
     getUptimeMs: () => Date.now() - appStartTime,
   });
   setOpsProvider({
@@ -1232,6 +1412,9 @@ async function main(): Promise<void> {
       }
       return { retried, requested: targets.length };
     },
+  });
+  setToolsProvider({
+    getToolsInventory: () => buildRuntimeToolsInventory(channels.map((c) => c.name)),
   });
   setHeartbeatProvider(heartbeatStatusProvider);
   startHealthServer();

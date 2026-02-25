@@ -8,6 +8,8 @@
  *   container-full  — Code/analysis/complex → Sonnet/Opus (<15s)
  */
 
+import { ANY_SLASH_COMMAND_REGEX } from './command-registry.js';
+
 export type QueryTier = 'inline' | 'oracle-only' | 'container-light' | 'container-full';
 
 export interface QueryClassification {
@@ -21,8 +23,6 @@ export interface QueryClassification {
 const GREETING = /^(สวัสดี|หวัดดี|hello|hi|hey|ดี|yo|อรุณสวัสดิ์|ราตรีสวัสดิ์)\b/i;
 const THANKS = /^(ขอบคุณ|thanks|thank you|thx|ขอบใจ|ty)\b/i;
 const ACK = /^(ok|ได้|โอเค|ค่ะ|ครับ|รับทราบ|เข้าใจ|เข้าใจแล้ว|okey|okay|noted|understood|sure|yep|nope|ใช่|ไม่|yes|no)\s*[.!]*$/i;
-const ADMIN_CMD = /^\/(start|help|status|soul|me|reset|usage|cost|budget|clear|session|ping|model|containers|kill|errors|health|queue|restart|docker)\b/i;
-
 const SEARCH_QUERY = /^(หา|ค้นหา|search|find|ค้น)\s+/i;
 const MEMORY_STORE = /^(จำไว้|remember|จำว่า|note|บันทึก)\s+/i;
 const MEMORY_RECALL = /^(รู้อะไร|จำได้|เคยคุย|เมื่อวาน|ก่อนหน้า|what do you know|remember when|last time)/i;
@@ -47,7 +47,7 @@ export function classifyQuery(message: string): QueryClassification {
   if (ACK.test(trimmed)) {
     return { tier: 'inline', model: 'haiku', reason: 'ack' };
   }
-  if (ADMIN_CMD.test(trimmed)) {
+  if (ANY_SLASH_COMMAND_REGEX.test(trimmed)) {
     return { tier: 'inline', model: 'haiku', reason: 'admin-cmd' };
   }
 

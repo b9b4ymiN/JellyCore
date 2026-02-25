@@ -163,5 +163,12 @@ You can read `/workspace/global/CLAUDE.md` for global instructions. To update gl
 
 When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID from `registered_groups.json`:
 - `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "120363336345536173@g.us")`
+- For `schedule_type: "once"`, use local timestamp without timezone suffix: `schedule_value: "2026-03-01T09:30:00"` (do not use `Z` or `+07:00`)
 
 The task will run in that group's context with access to their files and memory.
+
+## Oracle Governance
+
+Oracle MCP write access is controlled by `container/config/oracle-write-policy.json`.
+For this `main` channel, default policy is `full`.
+Every Oracle write tool call is recorded to `/workspace/ipc/oracle-write-audit.log`.
