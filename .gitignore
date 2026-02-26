@@ -37,3 +37,6 @@ desktop.ini
 # ── Test / Coverage ──────────────────────────
 coverage/
 .nyc_output/
+
+# Local Claude settings (machine-specific)
+.claude/settings.local.json

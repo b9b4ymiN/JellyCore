@@ -152,6 +152,21 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+function copyDirectoryRecursive(srcDir: string, dstDir: string): void {
+  fs.mkdirSync(dstDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    const srcPath = path.join(srcDir, entry.name);
+    const dstPath = path.join(dstDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryRecursive(srcPath, dstPath);
+      continue;
+    }
+    if (entry.isFile()) {
+      fs.copyFileSync(srcPath, dstPath);
+    }
+  }
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -248,16 +263,14 @@ function buildVolumeMounts(
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.mkdirSync(dstDir, { recursive: true });
-      for (const file of fs.readdirSync(srcDir)) {
-        const srcFile = path.join(srcDir, file);
-        const dstFile = path.join(dstDir, file);
-        fs.copyFileSync(srcFile, dstFile);
-      }
+    // Replace the directory each run so removed/renamed skills do not linger.
+    fs.rmSync(skillsDst, { recursive: true, force: true });
+    fs.mkdirSync(skillsDst, { recursive: true });
+    for (const skillDir of fs.readdirSync(skillsSrc, { withFileTypes: true })) {
+      if (!skillDir.isDirectory()) continue;
+      const srcDir = path.join(skillsSrc, skillDir.name);
+      const dstDir = path.join(skillsDst, skillDir.name);
+      copyDirectoryRecursive(srcDir, dstDir);
     }
   }
   mounts.push({
