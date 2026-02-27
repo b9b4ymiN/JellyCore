@@ -50,6 +50,7 @@ services:
       - ORACLE_PORT=47778
       - ORACLE_REPO_ROOT=/data/knowledge
       - ORACLE_DATA_DIR=/data/oracle
+      - HF_CACHE_DIR=/data/oracle/transformers-cache
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}

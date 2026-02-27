@@ -33,6 +33,7 @@ RUN mkdir -p /data/oracle /data/knowledge
 ENV ORACLE_PORT=47778
 ENV ORACLE_REPO_ROOT=/data/knowledge
 ENV ORACLE_DATA_DIR=/data/oracle
+ENV HF_CACHE_DIR=/data/oracle/transformers-cache
 ENV NODE_ENV=production
 
 # Expose Oracle HTTP API port

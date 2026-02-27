@@ -17,10 +17,10 @@
  */
 
 import { eq } from 'drizzle-orm';
-import { db, sqlite, oracleDocuments, ensureSchema, initFts5 } from '../db/index.js';
-import { createEmbedder } from '../embedder.js';
-import { ChromaHttpClient } from '../chroma-http.js';
-import { getEmbeddingCache, EmbeddingCache } from '../embedding-cache.js';
+import { db, sqlite, oracleDocuments, ensureSchema, initFts5 } from '../src/db/index.js';
+import { createEmbedder } from '../src/embedder.js';
+import { ChromaHttpClient } from '../src/chroma-http.js';
+import { getEmbeddingCache, EmbeddingCache } from '../src/embedding-cache.js';
 
 async function main() {
   // Initialize

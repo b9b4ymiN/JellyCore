@@ -1,71 +1,155 @@
 /**
- * Pluggable Embedding Interface (v0.6.0 Part B)
+ * Pluggable embedding interface.
  *
- * Supports switching embedding models via EMBEDDING_MODEL env var.
- * Default: all-MiniLM-L6-v2 (384-dim) — backwards compatible
- * Upgrade: multilingual-e5-small (384-dim) — Thai + 100 languages
- *
- * E5 models use prefix strategy:
- *   query:    "query: <text>"     → better retrieval
- *   document: "passage: <text>"   → better indexing
- *
- * ARM64 note: multilingual-e5-small (384-dim, ~120MB ONNX) is the
- * recommended choice for VM.Standard.A1.Flex (OCI ARM64).
- * Same dimension as MiniLM → no ChromaDB collection recreation needed.
+ * Supports switching embedding models via EMBEDDING_MODEL.
+ * Default: all-MiniLM-L6-v2 (384-dim).
  */
 
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { DefaultEmbeddingFunction } from '@chroma-core/default-embed';
+import { env as transformersEnv } from '@huggingface/transformers';
 
-// ── Types ──
+const MODEL_ENV = process.env.EMBEDDING_MODEL || 'all-MiniLM-L6-v2';
+const ORACLE_DATA_DIR = process.env.ORACLE_DATA_DIR || path.join(process.cwd(), '.oracle-data');
+const HF_CACHE_DIR = process.env.HF_CACHE_DIR || path.join(ORACLE_DATA_DIR, 'transformers-cache');
+const MODEL_NAMESPACE = 'Xenova';
+
+let transformersConfigured = false;
+
+function configureTransformersCache(): void {
+  if (transformersConfigured) return;
+  transformersConfigured = true;
+
+  transformersEnv.cacheDir = HF_CACHE_DIR;
+  transformersEnv.useFSCache = true;
+  transformersEnv.allowRemoteModels = true;
+  transformersEnv.allowLocalModels = true;
+
+  console.log(`[Embedder] Transformers cache dir: ${transformersEnv.cacheDir}`);
+}
+
+function isCorruptModelLoadError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    message.includes('protobuf parsing failed') ||
+    message.includes('load model') ||
+    message.includes('invalid protobuf') ||
+    message.includes('invalid wire type') ||
+    message.includes('unexpected end of file')
+  );
+}
+
+function getModelCacheDirs(modelName: string): string[] {
+  const normalizedModelName = modelName.replace(/^Xenova\//, '');
+  const dirs = new Set<string>();
+  dirs.add(path.join(HF_CACHE_DIR, MODEL_NAMESPACE, normalizedModelName));
+  dirs.add(
+    path.join(
+      process.cwd(),
+      'node_modules',
+      '@huggingface',
+      'transformers',
+      '.cache',
+      MODEL_NAMESPACE,
+      normalizedModelName,
+    ),
+  );
+  return [...dirs];
+}
+
+async function clearModelCache(modelName: string): Promise<void> {
+  const cacheDirs = getModelCacheDirs(modelName);
+  await Promise.all(
+    cacheDirs.map(async (dir) => {
+      try {
+        await fs.rm(dir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors. Best effort only.
+      }
+    }),
+  );
+}
 
 export interface Embedder {
   readonly modelName: string;
   readonly dimensions: number;
-
-  /** Raw embedding generation (no model-specific prefix) */
   embed(texts: string[]): Promise<number[][]>;
-
-  /** Embed a search query (adds "query: " for E5 models) */
   embedQuery(text: string): Promise<number[]>;
-
-  /** Embed documents/passages in batch (adds "passage: " for E5 models) */
   embedDocuments(texts: string[]): Promise<number[][]>;
 }
-
-// ── all-MiniLM-L6-v2 (Default, backwards-compatible) ──
 
 export class MiniLMEmbedder implements Embedder {
   readonly modelName = 'all-MiniLM-L6-v2';
   readonly dimensions = 384;
-  private ef = new DefaultEmbeddingFunction();
+
+  private ef: DefaultEmbeddingFunction | null = null;
   private ready = false;
+  private initialization: Promise<void> | null = null;
+
+  private async warmup(): Promise<void> {
+    await fs.mkdir(HF_CACHE_DIR, { recursive: true });
+    this.ef = new DefaultEmbeddingFunction({ modelName: `${MODEL_NAMESPACE}/${this.modelName}` });
+    await this.ef.generate(['warmup']);
+    this.ready = true;
+  }
+
+  private async ensureReady(): Promise<void> {
+    if (this.ready) return;
+    if (!this.initialization) {
+      this.initialization = this.initializeWithRecovery();
+    }
+    await this.initialization;
+  }
+
+  private async initializeWithRecovery(): Promise<void> {
+    configureTransformersCache();
+
+    try {
+      await this.warmup();
+      return;
+    } catch (error) {
+      if (!isCorruptModelLoadError(error)) {
+        this.initialization = null;
+        throw error;
+      }
+
+      console.warn(`[Embedder] ${this.modelName} cache looks corrupted. Resetting cache and retrying once...`);
+      await clearModelCache(this.modelName);
+
+      try {
+        await this.warmup();
+        console.warn(`[Embedder] ${this.modelName} recovered after cache reset.`);
+        return;
+      } catch (retryError: unknown) {
+        this.initialization = null;
+        const detail = retryError instanceof Error ? retryError.message : String(retryError);
+        throw new Error(
+          `Failed to initialize ${MODEL_NAMESPACE}/${this.modelName} after cache reset: ${detail}`,
+        );
+      }
+    }
+  }
 
   async embed(texts: string[]): Promise<number[][]> {
-    if (!this.ready) {
-      await this.ef.generate(['warmup']);
-      this.ready = true;
-    }
-    return this.ef.generate(texts);
+    await this.ensureReady();
+    return this.ef!.generate(texts);
   }
 
   async embedQuery(text: string): Promise<number[]> {
-    // MiniLM: no prefix needed
     const [emb] = await this.embed([text]);
     return emb;
   }
 
   async embedDocuments(texts: string[]): Promise<number[][]> {
-    // MiniLM: no prefix, sub-batch at 10
     const results: number[][] = [];
     const BATCH = 10;
     for (let i = 0; i < texts.length; i += BATCH) {
-      results.push(...await this.embed(texts.slice(i, i + BATCH)));
+      results.push(...(await this.embed(texts.slice(i, i + BATCH))));
     }
     return results;
   }
 }
-
-// ── Multilingual E5 (Thai + 100 languages) ──
 
 export class MultilingualE5Embedder implements Embedder {
   readonly modelName: string;
@@ -74,24 +158,27 @@ export class MultilingualE5Embedder implements Embedder {
 
   constructor(modelVariant: string = 'multilingual-e5-small') {
     this.modelName = modelVariant;
-    this.dimensions = modelVariant.includes('large') ? 1024
-      : modelVariant.includes('base') ? 768 : 384;
+    this.dimensions = modelVariant.includes('large')
+      ? 1024
+      : modelVariant.includes('base')
+      ? 768
+      : 384;
   }
 
   private async ensurePipeline(): Promise<void> {
     if (this.pipeline) return;
     try {
       const mod = await import('@xenova/transformers');
-      const onnxModel = `Xenova/${this.modelName}`;
+      const onnxModel = `${MODEL_NAMESPACE}/${this.modelName}`;
       console.log(`[Embedder] Loading ${onnxModel} (ONNX, ${this.dimensions}-dim)...`);
       this.pipeline = await mod.pipeline('feature-extraction', onnxModel, {
-        quantized: true, // Quantized ONNX for lower memory on ARM64
+        quantized: true,
       });
       console.log(`[Embedder] ${onnxModel} ready`);
     } catch (err: any) {
       throw new Error(
         `Failed to load ${this.modelName}. Install: bun add @xenova/transformers\n` +
-        `Error: ${err?.message || err}`
+          `Error: ${err?.message || err}`,
       );
     }
   }
@@ -99,7 +186,6 @@ export class MultilingualE5Embedder implements Embedder {
   async embed(texts: string[]): Promise<number[][]> {
     await this.ensurePipeline();
     const results: number[][] = [];
-    // Process one at a time to avoid batch dimension issues with Tensor output
     for (const text of texts) {
       const output = await this.pipeline(text, { pooling: 'mean', normalize: true });
       results.push(Array.from(output.data as Float32Array));
@@ -108,20 +194,14 @@ export class MultilingualE5Embedder implements Embedder {
   }
 
   async embedQuery(text: string): Promise<number[]> {
-    // E5 models require "query: " prefix for retrieval queries
     const [emb] = await this.embed([`query: ${text}`]);
     return emb;
   }
 
   async embedDocuments(texts: string[]): Promise<number[][]> {
-    // E5 models require "passage: " prefix for documents
-    return this.embed(texts.map(t => `passage: ${t}`));
+    return this.embed(texts.map((t) => `passage: ${t}`));
   }
 }
-
-// ── Factory ──
-
-const MODEL_ENV = process.env.EMBEDDING_MODEL || 'all-MiniLM-L6-v2';
 
 let _embedder: Embedder | null = null;
 
@@ -143,7 +223,6 @@ export function createEmbedder(): Embedder {
   return _embedder;
 }
 
-/** Reset singleton (for testing / model switch) */
 export function resetEmbedder(): void {
   _embedder = null;
 }
