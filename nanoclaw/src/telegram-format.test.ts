@@ -3,7 +3,7 @@
 import { toTelegramMarkdownV2 } from './channels/telegram-format.js';
 
 describe('telegram-format markdown table handling', () => {
-  it('converts markdown table to readable list text', () => {
+  it('converts markdown table to a Telegram-friendly ASCII table block', () => {
     const input = [
       '| Name | Score |',
       '| --- | ---: |',
@@ -13,10 +13,11 @@ describe('telegram-format markdown table handling', () => {
 
     const out = toTelegramMarkdownV2(input);
 
-    expect(out).toContain('Table converted from markdown for Telegram readability');
-    expect(out).toContain('Name: Alice');
-    expect(out).toContain('Score: 95');
-    expect(out).not.toContain('\| \-\-\-');
+    expect(out).toContain('```');
+    expect(out).toContain('| Name  | Score |');
+    expect(out).toContain('| Alice |    95 |');
+    expect(out).toContain('| Bob   |    88 |');
+    expect(out).not.toContain('Table converted from markdown for Telegram readability');
   });
 
   it('keeps regular lines with pipes when not a markdown table', () => {

@@ -60,7 +60,7 @@ export function toTelegramMarkdownV2(input: string): string {
 
   // Normalize unsupported markdown tables into plain readable lines.
   // Telegram MarkdownV2 has no table rendering.
-  text = convertMarkdownTables(text);
+  text = convertMarkdownTables(text, hold);
 
   // ── Phase 2: Protect links ──────────────────────────────────────────
 
@@ -124,7 +124,76 @@ function parseTableCells(line: string): string[] {
   return trimmed.split('|').map((c) => c.trim());
 }
 
-function convertMarkdownTables(text: string): string {
+type TableAlignment = 'left' | 'right' | 'center';
+
+function parseTableAlignments(separatorLine: string, columnCount: number): TableAlignment[] {
+  const tokens = parseTableCells(separatorLine);
+  const alignments: TableAlignment[] = [];
+
+  for (let i = 0; i < columnCount; i++) {
+    const token = (tokens[i] ?? '').trim();
+    if (/^:-{3,}:$/.test(token)) {
+      alignments.push('center');
+      continue;
+    }
+    if (/^-{3,}:$/.test(token)) {
+      alignments.push('right');
+      continue;
+    }
+    alignments.push('left');
+  }
+
+  return alignments;
+}
+
+function padCell(value: string, width: number, alignment: TableAlignment): string {
+  if (value.length >= width) return value;
+  const extra = width - value.length;
+
+  if (alignment === 'right') {
+    return `${' '.repeat(extra)}${value}`;
+  }
+
+  if (alignment === 'center') {
+    const left = Math.floor(extra / 2);
+    const right = extra - left;
+    return `${' '.repeat(left)}${value}${' '.repeat(right)}`;
+  }
+
+  return `${value}${' '.repeat(extra)}`;
+}
+
+function renderAsciiTable(headers: string[], rowLines: string[], separatorLine: string): string {
+  const rawRows = rowLines.map((line) => parseTableCells(line));
+  const columnCount = Math.max(headers.length, ...rawRows.map((r) => r.length));
+  const normalizedHeaders = Array.from(
+    { length: columnCount },
+    (_unused, idx) => headers[idx]?.trim() || `Column ${idx + 1}`,
+  );
+  const rows = rawRows.map((cells) =>
+    Array.from({ length: columnCount }, (_unused, idx) => cells[idx]?.trim() || '-'),
+  );
+  const alignments = parseTableAlignments(separatorLine, columnCount);
+
+  const widths = normalizedHeaders.map((header, col) =>
+    Math.max(header.length, ...rows.map((row) => row[col].length)),
+  );
+
+  const border = `+${widths.map((w) => '-'.repeat(w + 2)).join('+')}+`;
+  const headerLine = `| ${normalizedHeaders
+    .map((cell, col) => padCell(cell, widths[col], 'left'))
+    .join(' | ')} |`;
+  const bodyLines = rows.map(
+    (row) =>
+      `| ${row
+        .map((cell, col) => padCell(cell, widths[col], alignments[col] ?? 'left'))
+        .join(' | ')} |`,
+  );
+
+  return [border, headerLine, border, ...bodyLines, border].join('\n');
+}
+
+function convertMarkdownTables(text: string, hold: (formatted: string) => string): string {
   const lines = text.split('\n');
   const out: string[] = [];
 
@@ -141,6 +210,7 @@ function convertMarkdownTables(text: string): string {
 
     const headers = parseTableCells(current);
     const rows: string[] = [];
+    const separatorLine = next;
     i += 1; // consume separator
 
     while (i + 1 < lines.length) {
@@ -155,17 +225,8 @@ function convertMarkdownTables(text: string): string {
       continue;
     }
 
-    out.push('Table converted from markdown for Telegram readability:');
-    for (const rowLine of rows) {
-      const cells = parseTableCells(rowLine);
-      const pairs: string[] = [];
-      for (let c = 0; c < headers.length; c++) {
-        const key = headers[c] || `column_${c + 1}`;
-        const value = cells[c] || '-';
-        pairs.push(`${key}: ${value}`);
-      }
-      out.push(`- ${pairs.join('; ')}`);
-    }
+    const table = renderAsciiTable(headers, rows, separatorLine);
+    out.push(hold(`\`\`\`\n${table}\n\`\`\``));
   }
 
   return out.join('\n');

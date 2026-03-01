@@ -1,17 +1,27 @@
-# Agent Container — MCP Configuration
+# Agent Container - MCP Configuration
 
-`mcps.json` defines which **external MCP servers** are activated inside the agent container.
-`oracle-write-policy.json` defines **Oracle write governance** by group and tool.
+`mcps.json` defines which external MCP servers are available in the agent container.
+`oracle-write-policy.json` defines Oracle write governance by group and tool.
 
-Each server in the `servers` array is started automatically if all its `requiredEnv` vars are present in the container's runtime secrets.
+Each server in `servers` is evaluated with this policy:
+- `enabled !== false`
+- `startupMode !== "on_demand"` (auto-start only)
+- all `requiredEnv` vars are present in runtime secrets
+- current group is in `allowGroups` (when configured)
+
+Current default in this repo:
+- all configured MCPs are `enabled: true`
+- all configured MCPs use `startupMode: "always"`
 
 ---
 
 ## How to add a new MCP
 
-### Step 1 — Install the MCP package in the Dockerfile
+### Step 1 - Install the MCP package in the Dockerfile
 
-Edit `nanoclaw/container/Dockerfile` and add an install step in the runtime stage. Example:
+Edit `nanoclaw/container/Dockerfile` and add an install step in the runtime stage.
+
+Example:
 
 ```dockerfile
 # My Custom MCP
@@ -23,18 +33,23 @@ RUN git clone --depth=1 https://github.com/example/my-mcp /opt/my-mcp \
 ```
 
 Or for npm-published MCPs:
+
 ```dockerfile
 RUN npm install -g @example/my-mcp
 ```
 
-> **Important**: If the MCP uses standard `tsc` output (not a bundled build), keep `node_modules` — do **not** run `rm -rf node_modules` after the build.
+Important:
+- If the MCP uses standard `tsc` output (not a bundled build), keep `node_modules`.
 
-### Step 2 — Add the server entry to `mcps.json`
+### Step 2 - Add the server entry to `mcps.json`
 
 ```json
 {
   "name": "my-mcp",
   "description": "What this MCP does",
+  "enabled": true,
+  "startupMode": "always",
+  "allowGroups": [],
   "command": "node",
   "args": ["/opt/my-mcp/build/index.js"],
   "requiredEnv": ["MY_MCP_API_KEY"],
@@ -45,27 +60,30 @@ RUN npm install -g @example/my-mcp
 ```
 
 Fields:
-- `name` — lowercase, becomes `mcp__<name>__*` tool prefix seen by the agent
-- `requiredEnv` — ALL of these must be set (truthy) in the runtime secrets for the server to start
-- `env` — maps `{ envVarInsideMCPServer: envVarInSecrets }`
+- `name` - lowercase, becomes `mcp__<name>__*` tool prefix seen by the agent
+- `enabled` - hard enable/disable switch (default `true`)
+- `startupMode` - `always` or `on_demand` (default `always`)
+- `allowGroups` - optional allowlist by `group.folder` (empty = all groups)
+- `requiredEnv` - all of these must be set in runtime secrets for the server to start
+- `env` - maps `{ envVarInsideMCPServer: envVarInSecrets }`
 
-### Step 3 — Expose the token as a runtime secret
+### Step 3 - Expose token/secret vars at runtime
 
-In `nanoclaw/src/container-runner.ts` → `readSecrets()`, add the var name to `allowedVars`:
+In `nanoclaw/src/container-runner.ts` -> `readSecrets()`, add your variable in `allowedVars`:
 
 ```typescript
 'MY_MCP_API_KEY',
 ```
 
-In `docker-compose.yml` and `docker-compose.production.yml`, add to the nanoclaw `environment` block:
+In `docker-compose.yml` and `docker-compose.production.yml`, add the variable in nanoclaw `environment`:
 
 ```yaml
 - MY_MCP_API_KEY=${MY_MCP_API_KEY}
 ```
 
-Add the actual value to your `.env` file on the server.
+Then set the value in your `.env`.
 
-### Step 4 — Rebuild and restart
+### Step 4 - Rebuild and restart
 
 ```bash
 docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/container
@@ -78,7 +96,9 @@ docker compose up -d nanoclaw
 
 | Name | Description | Required Token |
 |------|-------------|----------------|
-| `oura` | Oura Ring — sleep, readiness, activity, HRV, SpO2 | `OURA_PERSONAL_ACCESS_TOKEN` |
+| `oura` | Oura Ring data: sleep, readiness, activity, HRV, SpO2 | `OURA_PERSONAL_ACCESS_TOKEN` |
+| `yfinance` | Yahoo Finance: prices, fundamentals, options, recommendations | none |
+| `notebooklm` | NotebookLM research via browser automation | none (interactive Google login) |
 
 ---
 

@@ -66,17 +66,29 @@ const IPC_POLL_MS = 500;
 // ── External MCP server config ──────────────────────────────────────────────
 // Add entries to /app/config/mcps.json (rebuild image to pick up new installs).
 
+type ExternalMcpStartupMode = 'always' | 'on_demand';
+
 interface ExternalMcpServer {
   name: string;          // becomes mcp__<name>__* prefix
   description?: string;
   command: string;
   args: string[];
+  enabled?: boolean;     // default true
+  startupMode?: ExternalMcpStartupMode; // default always
+  allowGroups?: string[]; // optional group.folder allowlist
   requiredEnv: string[]; // ALL must be truthy in sdkEnv for this server to load
   env: Record<string, string>; // { envVarInServer: envVarInSdkEnv }
 }
 
 interface ExternalMcpsConfig {
   servers: ExternalMcpServer[];
+}
+
+interface ExternalMcpActivation {
+  server: ExternalMcpServer;
+  missingEnv: string[];
+  active: boolean;
+  reason: string;
 }
 
 type OracleWriteMode = 'none' | 'selected' | 'full';
@@ -94,7 +106,22 @@ interface OracleWritePolicyConfig {
 function loadExternalMcps(): ExternalMcpsConfig {
   try {
     const cfgPath = path.join('/app/config/mcps.json');
-    return JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as ExternalMcpsConfig;
+    const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as ExternalMcpsConfig;
+    const servers = Array.isArray(parsed.servers) ? parsed.servers : [];
+    return {
+      servers: servers
+        .filter((s) => Boolean(s?.name && s?.command && Array.isArray(s?.args)))
+        .map((server) => ({
+          ...server,
+          enabled: server.enabled !== false,
+          startupMode: server.startupMode === 'on_demand' ? 'on_demand' : 'always',
+          allowGroups: Array.isArray(server.allowGroups)
+            ? server.allowGroups.filter((v) => typeof v === 'string' && v.trim().length > 0)
+            : [],
+          requiredEnv: Array.isArray(server.requiredEnv) ? server.requiredEnv : [],
+          env: server.env && typeof server.env === 'object' ? server.env : {},
+        })),
+    };
   } catch {
     return { servers: [] };
   }
@@ -112,25 +139,97 @@ function loadOracleWritePolicy(): OracleWritePolicyConfig {
 const externalMcps = loadExternalMcps();
 const oracleWritePolicy = loadOracleWritePolicy();
 
+function parseNameSet(raw: string | undefined): Set<string> {
+  return new Set(
+    (raw || '')
+      .split(',')
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function evaluateExternalMcpServers(
+  sdkEnv: Record<string, string | undefined>,
+  groupFolder: string,
+): ExternalMcpActivation[] {
+  const envDisabled = parseNameSet(sdkEnv.NANOCLAW_EXTERNAL_MCP_DISABLED);
+
+  return externalMcps.servers.map((server) => {
+    const missingEnv = server.requiredEnv.filter((v) => !sdkEnv[v]);
+    const allowGroups = server.allowGroups || [];
+
+    if (envDisabled.has(server.name.toLowerCase())) {
+      return {
+        server,
+        missingEnv,
+        active: false,
+        reason: 'disabled by env override',
+      };
+    }
+    if (server.enabled === false) {
+      return {
+        server,
+        missingEnv,
+        active: false,
+        reason: 'disabled by config',
+      };
+    }
+    if (allowGroups.length > 0 && !allowGroups.includes(groupFolder)) {
+      return {
+        server,
+        missingEnv,
+        active: false,
+        reason: `group '${groupFolder}' not allowed`,
+      };
+    }
+    if (server.startupMode === 'on_demand') {
+      return {
+        server,
+        missingEnv,
+        active: false,
+        reason: 'startupMode=on_demand',
+      };
+    }
+    if (missingEnv.length > 0) {
+      return {
+        server,
+        missingEnv,
+        active: false,
+        reason: `missing required env: ${missingEnv.join(', ')}`,
+      };
+    }
+    return {
+      server,
+      missingEnv,
+      active: true,
+      reason: 'ready',
+    };
+  });
+}
+
 function buildExternalMcpServers(
+  evaluations: ExternalMcpActivation[],
   sdkEnv: Record<string, string | undefined>,
 ): Record<string, { command: string; args: string[]; env: Record<string, string> }> {
   const result: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {};
-  for (const server of externalMcps.servers) {
-    if (!server.requiredEnv.every(v => sdkEnv[v])) continue;
+  for (const evaluation of evaluations) {
+    if (!evaluation.active) continue;
+    const { server } = evaluation;
     result[server.name] = {
       command: server.command,
       args: server.args,
       env: Object.fromEntries(
-        Object.entries(server.env).map(([k, v]) => [k, sdkEnv[v] as string]),
+        Object.entries(server.env).map(([k, v]) => [k, sdkEnv[v] || '']),
       ),
     };
   }
   return result;
 }
 
-function externalMcpAllowedTools(): string[] {
-  return externalMcps.servers.map(s => `mcp__${s.name}__*`);
+function externalMcpAllowedTools(evaluations: ExternalMcpActivation[]): string[] {
+  return evaluations
+    .filter((e) => e.active)
+    .map((e) => `mcp__${e.server.name}__*`);
 }
 
 function normalizeOracleWriteMode(mode: string | undefined): OracleWriteMode {
@@ -536,6 +635,20 @@ async function runQuery(
   log(
     `Oracle write policy: mode=${resolvedOraclePolicy.mode} allow=${resolvedOraclePolicy.allow.join(',') || '(none)'}`,
   );
+  const externalMcpEvaluations = evaluateExternalMcpServers(
+    sdkEnv,
+    containerInput.groupFolder,
+  );
+  if (externalMcpEvaluations.length > 0) {
+    const active = externalMcpEvaluations.filter((e) => e.active);
+    const inactive = externalMcpEvaluations.filter((e) => !e.active);
+    log(`External MCP active ${active.length}/${externalMcpEvaluations.length}`);
+    if (inactive.length > 0) {
+      log(
+        `External MCP inactive: ${inactive.map((e) => `${e.server.name}(${e.reason})`).join(', ')}`,
+      );
+    }
+  }
 
   for await (const message of query({
     prompt: stream,
@@ -557,7 +670,7 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
         'mcp__oracle__*',
-        ...externalMcpAllowedTools(),
+        ...externalMcpAllowedTools(externalMcpEvaluations),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -586,8 +699,8 @@ async function runQuery(
           },
         },
         // External MCP servers — loaded from /app/config/mcps.json
-        // Each server is activated only when its requiredEnv vars are present
-        ...buildExternalMcpServers(sdkEnv),
+        // Activation policy: enabled + allowGroups + startupMode + requiredEnv + env override
+        ...buildExternalMcpServers(externalMcpEvaluations, sdkEnv),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook()] }],

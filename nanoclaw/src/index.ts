@@ -104,6 +104,9 @@ interface ExternalMcpConfig {
   description?: string;
   command?: string;
   args?: string[];
+  enabled?: boolean;
+  startupMode?: 'always' | 'on_demand';
+  allowGroups?: string[];
   requiredEnv?: string[];
   env?: Record<string, string>;
 }
@@ -212,18 +215,31 @@ function buildRuntimeToolsInventory(channelNames: string[]): Record<string, unkn
   const externalConfigs = loadExternalMcpConfigs(projectRoot);
 
   const externalServers = externalConfigs.map((server) => {
+    const configEnabled = server.enabled !== false;
     const requiredEnv = Array.isArray(server.requiredEnv) ? server.requiredEnv : [];
+    const startupMode = server.startupMode === 'on_demand' ? 'on_demand' : 'always';
+    const allowGroups = Array.isArray(server.allowGroups) ? server.allowGroups : [];
     const missingEnv = requiredEnv.filter((key) => !process.env[key]);
-    const enabled = missingEnv.length === 0;
+    const active = configEnabled && startupMode === 'always' && missingEnv.length === 0;
+    const reason = !configEnabled
+      ? 'disabled by config'
+      : startupMode === 'on_demand'
+        ? 'startupMode=on_demand'
+        : missingEnv.length > 0
+          ? `missing required env: ${missingEnv.join(', ')}`
+          : 'ready';
     return {
       name: server.name,
       description: server.description || null,
       command: server.command || null,
       args: Array.isArray(server.args) ? server.args : [],
+      configEnabled,
+      startupMode,
+      allowGroups,
       requiredEnv,
       missingEnv,
-      enabled,
-      reason: enabled ? 'ready' : `missing required env: ${missingEnv.join(', ')}`,
+      enabled: active,
+      reason,
     };
   });
 

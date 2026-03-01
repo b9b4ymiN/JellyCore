@@ -3,13 +3,38 @@
   "servers": [
     {
       "name": "oura",
-      "description": "Oura Ring health data — sleep, readiness, daily activity, HRV, SpO2, workouts, stress",
+      "description": "Oura Ring health data - sleep, readiness, daily activity, HRV, SpO2, workouts, stress",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
       "command": "node",
       "args": ["/opt/oura-mcp/build/index.js"],
       "requiredEnv": ["OURA_PERSONAL_ACCESS_TOKEN"],
       "env": {
         "OURA_PERSONAL_ACCESS_TOKEN": "OURA_PERSONAL_ACCESS_TOKEN"
       }
+    },
+    {
+      "name": "yfinance",
+      "description": "Yahoo Finance market data: quotes, historical prices, financial statements, options, recommendations",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
+      "command": "python3",
+      "args": ["/opt/yahoo-finance-mcp/server.py"],
+      "requiredEnv": [],
+      "env": {}
+    },
+    {
+      "name": "notebooklm",
+      "description": "NotebookLM research assistant via browser automation and persistent notebook library",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
+      "command": "notebooklm-mcp",
+      "args": [],
+      "requiredEnv": [],
+      "env": {}
     }
   ]
 }

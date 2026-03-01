@@ -103,6 +103,7 @@ services:
       # Oracle (containers on jellycore-internal network use DNS name)
       - ORACLE_API_URL=http://oracle:47778
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
+      - NANOCLAW_EXTERNAL_MCP_DISABLED=${NANOCLAW_EXTERNAL_MCP_DISABLED}
       # Oura Ring MCP (optional) — set in .env to enable health/sleep/activity tools
       - OURA_PERSONAL_ACCESS_TOKEN=${OURA_PERSONAL_ACCESS_TOKEN}
       # Security

@@ -77,6 +77,17 @@ RUN git clone --depth=1 https://github.com/elizabethtrykin/oura-mcp /opt/oura-mc
     && npm run build \
     && rm -rf /opt/oura-mcp/.git
 
+# Yahoo Finance MCP (Python)
+RUN git clone --depth=1 https://github.com/Alex2Yang97/yahoo-finance-mcp /opt/yahoo-finance-mcp \
+    && pip3 install --no-cache-dir --break-system-packages \
+      "mcp[cli]>=1.6.0" \
+      "yfinance>=0.2.62" \
+      "pandas>=2.0.0" \
+    && rm -rf /opt/yahoo-finance-mcp/.git
+
+# NotebookLM MCP (Node)
+RUN npm install -g notebooklm-mcp@latest
+
 # Install PM2 log rotate module
 RUN pm2 install pm2-logrotate && \
     pm2 set pm2-logrotate:max_size 50M && \

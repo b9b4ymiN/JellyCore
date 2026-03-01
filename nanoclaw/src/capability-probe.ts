@@ -24,9 +24,13 @@ interface CheckResult {
 
 interface ExternalMcpServerHealth {
   name: string;
+  configEnabled: boolean;
+  startupMode: 'always' | 'on_demand';
+  allowGroups: string[];
   requiredEnv: string[];
   missingEnv: string[];
   enabled: boolean;
+  reason: string;
 }
 
 type ExternalCheckResult = CheckResult & {
@@ -255,16 +259,38 @@ export class CapabilityProbe {
     try {
       const raw = fs.readFileSync(cfgPath, 'utf-8');
       const parsed = JSON.parse(raw) as {
-        servers?: Array<{ name: string; requiredEnv?: string[] }>;
+        servers?: Array<{
+          name: string;
+          enabled?: boolean;
+          startupMode?: 'always' | 'on_demand';
+          allowGroups?: string[];
+          requiredEnv?: string[];
+        }>;
       };
       const servers = (parsed.servers || []).map((server) => {
+        const configEnabled = server.enabled !== false;
+        const startupMode: 'always' | 'on_demand' =
+          server.startupMode === 'on_demand' ? 'on_demand' : 'always';
+        const allowGroups = Array.isArray(server.allowGroups) ? server.allowGroups : [];
         const requiredEnv = Array.isArray(server.requiredEnv) ? server.requiredEnv : [];
         const missingEnv = requiredEnv.filter((key) => !process.env[key]);
+        const enabled = configEnabled && startupMode === 'always' && missingEnv.length === 0;
+        const reason = !configEnabled
+          ? 'disabled by config'
+          : startupMode === 'on_demand'
+            ? 'startupMode=on_demand'
+            : missingEnv.length > 0
+              ? `missing required env: ${missingEnv.join(', ')}`
+              : 'ready';
         return {
           name: server.name,
+          configEnabled,
+          startupMode,
+          allowGroups,
           requiredEnv,
           missingEnv,
-          enabled: missingEnv.length === 0,
+          enabled,
+          reason,
         };
       });
 

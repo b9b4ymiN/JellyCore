@@ -84,6 +84,7 @@ services:
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
+      - NANOCLAW_EXTERNAL_MCP_DISABLED=${NANOCLAW_EXTERNAL_MCP_DISABLED}
       - NODE_ENV=production
     depends_on:
       chromadb:
