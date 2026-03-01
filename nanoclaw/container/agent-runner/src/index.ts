@@ -78,6 +78,8 @@ interface ExternalMcpServer {
   allowGroups?: string[]; // optional group.folder allowlist
   requiredEnv: string[]; // ALL must be truthy in sdkEnv for this server to load
   env: Record<string, string>; // { envVarInServer: envVarInSdkEnv }
+  envLiteral?: Record<string, string>; // fixed values (from .mcp.json style env)
+  source?: string;
 }
 
 interface ExternalMcpsConfig {
@@ -103,28 +105,148 @@ interface OracleWritePolicyConfig {
   groups?: Record<string, OracleWritePolicyEntry>;
 }
 
-function loadExternalMcps(): ExternalMcpsConfig {
+interface McpJsonServerConfig {
+  command?: string;
+  args?: unknown;
+  env?: Record<string, unknown>;
+  description?: string;
+  enabled?: boolean;
+  startupMode?: ExternalMcpStartupMode;
+  allowGroups?: string[];
+  requiredEnv?: string[];
+}
+
+interface McpJsonConfig {
+  mcpServers?: Record<string, McpJsonServerConfig>;
+}
+
+function normalizeExternalServer(raw: ExternalMcpServer): ExternalMcpServer {
+  return {
+    ...raw,
+    enabled: raw.enabled !== false,
+    startupMode: raw.startupMode === 'on_demand' ? 'on_demand' : 'always',
+    allowGroups: Array.isArray(raw.allowGroups)
+      ? raw.allowGroups.filter((v) => typeof v === 'string' && v.trim().length > 0)
+      : [],
+    requiredEnv: Array.isArray(raw.requiredEnv)
+      ? raw.requiredEnv.filter((v) => typeof v === 'string' && v.trim().length > 0)
+      : [],
+    env: raw.env && typeof raw.env === 'object'
+      ? Object.fromEntries(
+          Object.entries(raw.env).filter(
+            ([k, v]) => typeof k === 'string' && k.trim().length > 0 && typeof v === 'string' && v.trim().length > 0,
+          ),
+        )
+      : {},
+    envLiteral: raw.envLiteral && typeof raw.envLiteral === 'object'
+      ? Object.fromEntries(
+          Object.entries(raw.envLiteral).filter(
+            ([k, v]) => typeof k === 'string' && k.trim().length > 0 && typeof v === 'string',
+          ),
+        )
+      : {},
+  };
+}
+
+function readExternalServersFromConfigJson(cfgPath: string): ExternalMcpServer[] {
   try {
-    const cfgPath = path.join('/app/config/mcps.json');
     const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as ExternalMcpsConfig;
     const servers = Array.isArray(parsed.servers) ? parsed.servers : [];
-    return {
-      servers: servers
-        .filter((s) => Boolean(s?.name && s?.command && Array.isArray(s?.args)))
-        .map((server) => ({
-          ...server,
-          enabled: server.enabled !== false,
-          startupMode: server.startupMode === 'on_demand' ? 'on_demand' : 'always',
-          allowGroups: Array.isArray(server.allowGroups)
-            ? server.allowGroups.filter((v) => typeof v === 'string' && v.trim().length > 0)
-            : [],
-          requiredEnv: Array.isArray(server.requiredEnv) ? server.requiredEnv : [],
-          env: server.env && typeof server.env === 'object' ? server.env : {},
-        })),
-    };
+    return servers
+      .filter((s) => Boolean(s?.name && s?.command && Array.isArray(s?.args)))
+      .map((server) => normalizeExternalServer({ ...server, source: cfgPath }));
   } catch {
-    return { servers: [] };
+    return [];
   }
+}
+
+function parseMcpJsonEnv(rawEnv: Record<string, unknown> | undefined): {
+  env: Record<string, string>;
+  envLiteral: Record<string, string>;
+} {
+  const env: Record<string, string> = {};
+  const envLiteral: Record<string, string> = {};
+  if (!rawEnv || typeof rawEnv !== 'object') {
+    return { env, envLiteral };
+  }
+
+  for (const [key, value] of Object.entries(rawEnv)) {
+    if (typeof key !== 'string' || key.trim().length === 0) continue;
+    if (typeof value !== 'string') {
+      envLiteral[key] = String(value);
+      continue;
+    }
+    const ref = value.match(/^\$\{([A-Z_][A-Z0-9_]*)\}$/);
+    if (ref) {
+      env[key] = ref[1];
+      continue;
+    }
+    envLiteral[key] = value;
+  }
+  return { env, envLiteral };
+}
+
+function readExternalServersFromMcpJson(cfgPath: string): ExternalMcpServer[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as McpJsonConfig;
+    const mcpServers = parsed?.mcpServers;
+    if (!mcpServers || typeof mcpServers !== 'object') return [];
+
+    const servers: ExternalMcpServer[] = [];
+    for (const [name, cfg] of Object.entries(mcpServers)) {
+      if (!cfg || typeof cfg !== 'object') continue;
+      if (typeof cfg.command !== 'string' || cfg.command.trim().length === 0) continue;
+      const args = Array.isArray(cfg.args)
+        ? cfg.args.filter((v): v is string => typeof v === 'string')
+        : [];
+      const envParsed = parseMcpJsonEnv(cfg.env);
+
+      servers.push(normalizeExternalServer({
+        name,
+        description: cfg.description || '',
+        command: cfg.command,
+        args,
+        enabled: cfg.enabled !== false,
+        startupMode: cfg.startupMode === 'on_demand' ? 'on_demand' : 'always',
+        allowGroups: Array.isArray(cfg.allowGroups) ? cfg.allowGroups : [],
+        requiredEnv: Array.isArray(cfg.requiredEnv) ? cfg.requiredEnv : [],
+        env: envParsed.env,
+        envLiteral: envParsed.envLiteral,
+        source: cfgPath,
+      }));
+    }
+
+    return servers;
+  } catch {
+    return [];
+  }
+}
+
+function loadExternalMcps(): ExternalMcpsConfig {
+  const serverMap = new Map<string, ExternalMcpServer>();
+  const sources: Array<{ kind: 'config' | 'mcp'; path: string }> = [
+    { kind: 'config', path: path.join('/app/config/mcps.json') },
+    // Optional per-session override in persistent .claude dir
+    { kind: 'mcp', path: path.join('/home/node/.claude/.mcp.json') },
+    // Per-group workspace override (mounted from groups/<folder>/)
+    { kind: 'mcp', path: path.join('/workspace/group/.mcp.json') },
+  ];
+
+  for (const source of sources) {
+    if (!fs.existsSync(source.path)) continue;
+    const loaded = source.kind === 'config'
+      ? readExternalServersFromConfigJson(source.path)
+      : readExternalServersFromMcpJson(source.path);
+    for (const server of loaded) {
+      const previous = serverMap.get(server.name);
+      if (previous && previous.source !== server.source) {
+        log(`External MCP '${server.name}' overridden by ${server.source}`);
+      }
+      serverMap.set(server.name, server);
+    }
+  }
+
+  return { servers: [...serverMap.values()] };
 }
 
 function loadOracleWritePolicy(): OracleWritePolicyConfig {
@@ -215,12 +337,16 @@ function buildExternalMcpServers(
   for (const evaluation of evaluations) {
     if (!evaluation.active) continue;
     const { server } = evaluation;
+    const envResolved = {
+      ...Object.fromEntries(
+        Object.entries(server.env).map(([k, v]) => [k, sdkEnv[v] || '']),
+      ),
+      ...(server.envLiteral || {}),
+    };
     result[server.name] = {
       command: server.command,
       args: server.args,
-      env: Object.fromEntries(
-        Object.entries(server.env).map(([k, v]) => [k, sdkEnv[v] || '']),
-      ),
+      env: envResolved,
     };
   }
   return result;

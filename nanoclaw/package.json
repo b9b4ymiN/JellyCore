@@ -14,7 +14,9 @@
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest",
-    "mcp:verify": "tsx scripts/verify-external-mcp.ts"
+    "mcp:verify": "tsx scripts/verify-external-mcp.ts",
+    "mcp:policy": "tsx scripts/validate-mcp-governance.ts",
+    "mcp:check": "npm run mcp:policy && npm run mcp:verify"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

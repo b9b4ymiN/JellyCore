@@ -114,6 +114,22 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # NotebookLM MCP (Node)
 RUN npm install -g notebooklm-mcp@latest
 
+# Google Docs/Sheets/Drive MCP (Node)
+# Keep token persistent per group by pinning XDG_CONFIG_HOME into /home/node/.claude/config
+# (/home/node/.claude is a per-group persistent mount managed by nanoclaw)
+RUN npm install -g @a-bonus/google-docs-mcp@latest \
+    && mkdir -p /opt/google-docs-mcp \
+    && cat > /opt/google-docs-mcp/start.sh <<'EOF' \
+    && chmod +x /opt/google-docs-mcp/start.sh
+#!/bin/sh
+set -e
+
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/home/node/.claude/config}"
+mkdir -p "${XDG_CONFIG_HOME}/google-docs-mcp"
+
+exec google-docs-mcp "$@"
+EOF
+
 # Install PM2 log rotate module
 RUN pm2 install pm2-logrotate && \
     pm2 set pm2-logrotate:max_size 50M && \

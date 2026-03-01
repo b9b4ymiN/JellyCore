@@ -35,6 +35,22 @@
       "args": [],
       "requiredEnv": [],
       "env": {}
+    },
+    {
+      "name": "google_docs",
+      "description": "Google Docs, Sheets, and Drive MCP tools",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
+      "command": "/opt/google-docs-mcp/start.sh",
+      "args": [],
+      "requiredEnv": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+      "env": {
+        "GOOGLE_CLIENT_ID": "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET": "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_MCP_PROFILE": "GOOGLE_MCP_PROFILE",
+        "XDG_CONFIG_HOME": "GOOGLE_DOCS_XDG_CONFIG_HOME"
+      }
     }
   ]
 }

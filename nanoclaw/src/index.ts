@@ -194,16 +194,84 @@ function discoverAgentAllowedTools(projectRoot: string): string[] {
   return extractMatches(blockMatch[1], /'([^']+)'/g);
 }
 
-function loadExternalMcpConfigs(projectRoot: string): ExternalMcpConfig[] {
-  const p = path.join(projectRoot, 'container', 'config', 'mcps.json');
-  const raw = readFileUtf8Safe(p);
-  if (!raw) return [];
+function parseMcpServersJson(raw: string): ExternalMcpConfig[] {
   try {
-    const parsed = JSON.parse(raw) as { servers?: ExternalMcpConfig[] };
-    return Array.isArray(parsed.servers) ? parsed.servers : [];
+    const parsed = JSON.parse(raw) as {
+      mcpServers?: Record<string, {
+        command?: string;
+        args?: unknown;
+        env?: Record<string, unknown>;
+        description?: string;
+        enabled?: boolean;
+        startupMode?: 'always' | 'on_demand';
+        allowGroups?: string[];
+        requiredEnv?: string[];
+      }>;
+    };
+    if (!parsed.mcpServers || typeof parsed.mcpServers !== 'object') return [];
+
+    const servers: ExternalMcpConfig[] = [];
+    for (const [name, cfg] of Object.entries(parsed.mcpServers)) {
+      if (!cfg || typeof cfg !== 'object') continue;
+      if (typeof cfg.command !== 'string' || cfg.command.trim().length === 0) continue;
+      servers.push({
+        name,
+        description: cfg.description || '',
+        command: cfg.command,
+        args: Array.isArray(cfg.args)
+          ? cfg.args.filter((v): v is string => typeof v === 'string')
+          : [],
+        enabled: cfg.enabled !== false,
+        startupMode: cfg.startupMode === 'on_demand' ? 'on_demand' : 'always',
+        allowGroups: Array.isArray(cfg.allowGroups) ? cfg.allowGroups : [],
+        requiredEnv: Array.isArray(cfg.requiredEnv) ? cfg.requiredEnv : [],
+        env: {},
+      });
+    }
+    return servers;
   } catch {
     return [];
   }
+}
+
+function loadExternalMcpConfigs(projectRoot: string): ExternalMcpConfig[] {
+  const merged = new Map<string, ExternalMcpConfig>();
+
+  const primaryPath = path.join(projectRoot, 'container', 'config', 'mcps.json');
+  const primaryRaw = readFileUtf8Safe(primaryPath);
+  if (primaryRaw) {
+    try {
+      const parsed = JSON.parse(primaryRaw) as { servers?: ExternalMcpConfig[] };
+      const servers = Array.isArray(parsed.servers) ? parsed.servers : [];
+      for (const server of servers) {
+        if (!server?.name) continue;
+        merged.set(server.name, server);
+      }
+    } catch {
+      // ignore malformed primary config in inventory view
+    }
+  }
+
+  const projectMcpPath = path.join(projectRoot, '.mcp.json');
+  const projectMcpRaw = readFileUtf8Safe(projectMcpPath);
+  if (projectMcpRaw) {
+    for (const server of parseMcpServersJson(projectMcpRaw)) {
+      if (!server?.name) continue;
+      merged.set(server.name, server);
+    }
+  }
+
+  // Optional per-main-group .mcp.json for runtime parity with agent-runner
+  const groupMcpPath = path.join(projectRoot, 'groups', MAIN_GROUP_FOLDER, '.mcp.json');
+  const groupMcpRaw = readFileUtf8Safe(groupMcpPath);
+  if (groupMcpRaw) {
+    for (const server of parseMcpServersJson(groupMcpRaw)) {
+      if (!server?.name) continue;
+      merged.set(server.name, server);
+    }
+  }
+
+  return [...merged.values()];
 }
 
 function buildRuntimeToolsInventory(channelNames: string[]): Record<string, unknown> {

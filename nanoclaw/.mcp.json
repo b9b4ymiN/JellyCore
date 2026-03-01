@@ -1,3 +1,61 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "oura": {
+      "description": "Oura Ring health data - sleep, readiness, daily activity, HRV, SpO2, workouts, stress",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
+      "command": "node",
+      "args": [
+        "/opt/oura-mcp/build/index.js"
+      ],
+      "requiredEnv": [
+        "OURA_PERSONAL_ACCESS_TOKEN"
+      ],
+      "env": {
+        "OURA_PERSONAL_ACCESS_TOKEN": "${OURA_PERSONAL_ACCESS_TOKEN}"
+      }
+    },
+    "yfinance": {
+      "description": "Yahoo Finance market data: quotes, historical prices, financial statements, options, recommendations",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
+      "command": "python3",
+      "args": [
+        "-u",
+        "/opt/yahoo-finance-mcp/server.py"
+      ],
+      "requiredEnv": [],
+      "env": {}
+    },
+    "notebooklm": {
+      "description": "NotebookLM research assistant via browser automation and persistent notebook library",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
+      "command": "notebooklm-mcp",
+      "args": [],
+      "requiredEnv": [],
+      "env": {}
+    },
+    "google_docs": {
+      "description": "Google Docs, Sheets, and Drive MCP tools",
+      "enabled": true,
+      "startupMode": "always",
+      "allowGroups": [],
+      "command": "/opt/google-docs-mcp/start.sh",
+      "args": [],
+      "requiredEnv": [
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET"
+      ],
+      "env": {
+        "GOOGLE_CLIENT_ID": "${GOOGLE_CLIENT_ID}",
+        "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}",
+        "GOOGLE_MCP_PROFILE": "${GOOGLE_MCP_PROFILE}",
+        "XDG_CONFIG_HOME": "${GOOGLE_DOCS_XDG_CONFIG_HOME}"
+      }
+    }
+  }
 }

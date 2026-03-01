@@ -149,6 +149,11 @@ services:
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
       # Oura Ring MCP (optional) — set in .env to enable health/sleep/activity tools
       - OURA_PERSONAL_ACCESS_TOKEN=${OURA_PERSONAL_ACCESS_TOKEN}
+      # Google Docs MCP (optional) — OAuth client credentials + optional profile/path override
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_MCP_PROFILE=${GOOGLE_MCP_PROFILE}
+      - GOOGLE_DOCS_XDG_CONFIG_HOME=${GOOGLE_DOCS_XDG_CONFIG_HOME}
       # Security
       - JELLYCORE_AUTH_PASSPHRASE=${JELLYCORE_AUTH_PASSPHRASE}
       - JELLYCORE_IPC_SECRET=${JELLYCORE_IPC_SECRET}

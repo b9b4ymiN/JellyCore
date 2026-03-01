@@ -1,0 +1,62 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-03-01",
+  "defaultProfile": "all-enabled",
+  "notes": [
+    "Core namespaces (non-external): mcp__nanoclaw__*, mcp__oracle__*",
+    "External MCP defaults are managed in mcps.json; this file defines governance and validation metadata."
+  ],
+  "profiles": {
+    "all-enabled": {
+      "description": "Enable all configured external MCP servers. Recommended default for this project.",
+      "disabledByEnv": ""
+    },
+    "research-only": {
+      "description": "Disable health and finance MCP tools when research-focused operation is needed.",
+      "disabledByEnv": "oura,yfinance"
+    },
+    "minimal-risk": {
+      "description": "Disable browser-automation and personal-data MCPs for strict operation windows.",
+      "disabledByEnv": "oura,notebooklm,google_docs"
+    }
+  },
+  "external": {
+    "oura": {
+      "tier": "optional",
+      "defaultEnabled": true,
+      "startupMode": "always",
+      "requiredEnv": [
+        "OURA_PERSONAL_ACCESS_TOKEN"
+      ],
+      "purpose": "Personal health and recovery metrics from Oura Ring.",
+      "riskLevel": "high-privacy"
+    },
+    "yfinance": {
+      "tier": "core",
+      "defaultEnabled": true,
+      "startupMode": "always",
+      "requiredEnv": [],
+      "purpose": "Market quotes, history, financial statements, options, and recommendations.",
+      "riskLevel": "low"
+    },
+    "notebooklm": {
+      "tier": "core",
+      "defaultEnabled": true,
+      "startupMode": "always",
+      "requiredEnv": [],
+      "purpose": "Long-form research workflows through NotebookLM.",
+      "riskLevel": "medium"
+    },
+    "google_docs": {
+      "tier": "core",
+      "defaultEnabled": true,
+      "startupMode": "always",
+      "requiredEnv": [
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET"
+      ],
+      "purpose": "Google Docs/Sheets/Drive authoring and data operations.",
+      "riskLevel": "medium"
+    }
+  }
+}

@@ -1,7 +1,9 @@
 # Agent Container - MCP Configuration
 
 `mcps.json` defines which external MCP servers are available in the agent container.
+`mcp-governance.json` defines tiering, default profile, and validation metadata for external MCP servers.
 `oracle-write-policy.json` defines Oracle write governance by group and tool.
+For full onboarding workflow (design -> deploy -> verify -> rollback), see `docs/MCP_TOOLS_ONBOARDING_RUNBOOK.md`.
 
 Each server in `servers` is evaluated with this policy:
 - `enabled !== false`
@@ -12,6 +14,18 @@ Each server in `servers` is evaluated with this policy:
 Current default in this repo:
 - all configured MCPs are `enabled: true`
 - all configured MCPs use `startupMode: "always"`
+
+Optional runtime override:
+- `nanoclaw/.mcp.json` is mirrored into each session as `/home/node/.claude/.mcp.json`
+- per-group `groups/<group-folder>/.mcp.json` is also supported and has higher priority
+- `.mcp.json` uses Claude-style format: `{ "mcpServers": { ... } }`
+
+Governance validation:
+- Run `npm run mcp:policy` inside `nanoclaw/` to validate:
+  - every `mcps.json` server has governance metadata
+  - `enabled`, `startupMode`, and `requiredEnv` are aligned
+  - policy drift is detected before deployment
+- Run `npm run mcp:check` for policy + live MCP handshake checks in one command
 
 ---
 
@@ -121,6 +135,18 @@ MCP_VERIFY_DOCKER_NETWORK=jellycore_jellycore-internal npm run mcp:verify
 | `oura` | Oura Ring data: sleep, readiness, activity, HRV, SpO2 | `OURA_PERSONAL_ACCESS_TOKEN` |
 | `yfinance` | Yahoo Finance: prices, fundamentals, options, recommendations | none |
 | `notebooklm` | NotebookLM research via browser automation | none (interactive Google login) |
+| `google_docs` | Google Docs, Sheets, Drive tools | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, OAuth `token.json` |
+
+Google Docs token storage in this project:
+- Without `GOOGLE_MCP_PROFILE`:
+  - Inside agent container: `/home/node/.claude/config/google-docs-mcp/token.json`
+  - Host-side persistent path (inside `jellycore-nanoclaw` container volume): `/app/nanoclaw/data/sessions/<group-folder>/.claude/config/google-docs-mcp/token.json`
+- With `GOOGLE_MCP_PROFILE=<profile>`:
+  - Inside agent container: `/home/node/.claude/config/google-docs-mcp/<profile>/token.json`
+  - Host-side persistent path (inside `jellycore-nanoclaw` container volume): `/app/nanoclaw/data/sessions/<group-folder>/.claude/config/google-docs-mcp/<profile>/token.json`
+
+Recommended profile setting:
+- Set `GOOGLE_MCP_PROFILE=main` for main group token namespace.
 
 ---
 

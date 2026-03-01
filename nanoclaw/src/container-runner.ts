@@ -281,6 +281,30 @@ function buildVolumeMounts(
       copyDirectoryRecursive(srcDir, dstDir);
     }
   }
+
+  // Optional project-level MCP override:
+  // If nanoclaw/.mcp.json exists, mirror it into the per-group .claude mount
+  // so Telegram runtime can load it from /home/node/.claude/.mcp.json.
+  const projectMcpPath = path.join(process.cwd(), '.mcp.json');
+  const sessionMcpPath = path.join(groupSessionsDir, '.mcp.json');
+  if (fs.existsSync(projectMcpPath)) {
+    try {
+      fs.copyFileSync(projectMcpPath, sessionMcpPath);
+    } catch (err) {
+      logger.warn(
+        { err, group: group.folder, projectMcpPath, sessionMcpPath },
+        'Failed to mirror project .mcp.json into group session directory',
+      );
+    }
+  } else if (fs.existsSync(sessionMcpPath)) {
+    // Keep behavior deterministic: remove stale mirrored config when project file is deleted.
+    try {
+      fs.rmSync(sessionMcpPath, { force: true });
+    } catch {
+      // best effort
+    }
+  }
+
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
@@ -332,6 +356,11 @@ function readSecrets(): Record<string, string> {
     // Oura Ring MCP (optional — set to enable health/sleep/activity data access)
     'NANOCLAW_EXTERNAL_MCP_DISABLED',
     'OURA_PERSONAL_ACCESS_TOKEN',
+    // Google Docs MCP (optional — requires OAuth client credentials)
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_MCP_PROFILE',
+    'GOOGLE_DOCS_XDG_CONFIG_HOME',
   ];
   const secrets: Record<string, string> = {};
 
