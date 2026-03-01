@@ -41,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm2 \
     libxshmfence1 \
     curl \
+    docker.io \
     git \
     python3 \
     python3-pip \
@@ -97,8 +98,32 @@ COPY config/ /app/config/
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
 # Entrypoint: run as root initially to fix bind-mount permissions,
-# then drop to node user via su to run the agent.
-RUN printf '#!/bin/bash\nset -e\nmkdir -p /workspace/ipc/input /workspace/ipc/messages /workspace/ipc/tasks 2>/dev/null || true\nchmod -R 777 /workspace/ipc 2>/dev/null || true\nchown -R node:node /workspace/group /workspace/global /workspace/extra /home/node 2>/dev/null || true\ncat > /tmp/input.json\nchmod 644 /tmp/input.json\nexec su -s /bin/bash node -c "node /app/dist/index.js < /tmp/input.json"\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+# map docker.sock group access for node user, then drop to node.
+RUN cat > /app/entrypoint.sh <<'EOF' \
+ && chmod +x /app/entrypoint.sh
+#!/bin/bash
+set -e
+
+mkdir -p /workspace/ipc/input /workspace/ipc/messages /workspace/ipc/tasks 2>/dev/null || true
+chmod -R 777 /workspace/ipc 2>/dev/null || true
+chown -R node:node /workspace/group /workspace/global /workspace/extra /home/node 2>/dev/null || true
+
+if [ -S /var/run/docker.sock ]; then
+  SOCK_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)"
+  if [ -n "$SOCK_GID" ]; then
+    SOCK_GROUP="$(getent group "$SOCK_GID" | cut -d: -f1 || true)"
+    if [ -z "$SOCK_GROUP" ]; then
+      SOCK_GROUP="dockersock"
+      groupadd -g "$SOCK_GID" "$SOCK_GROUP" 2>/dev/null || true
+    fi
+    usermod -aG "$SOCK_GROUP" node 2>/dev/null || true
+  fi
+fi
+
+cat > /tmp/input.json
+chmod 644 /tmp/input.json
+exec su -s /bin/bash node -c "node /app/dist/index.js < /tmp/input.json"
+EOF
 
 # Set ownership to node user (non-root) for image directories
 RUN chown -R node:node /workspace /home/node

@@ -155,6 +155,7 @@ services:
       - TZ=${TZ:-Asia/Bangkok}
       - ASSISTANT_NAME=${ASSISTANT_NAME:-Andy}
       - CONTAINER_IMAGE=${CONTAINER_IMAGE:-nanoclaw-agent:latest}
+      - AGENT_FULL_ACCESS=${AGENT_FULL_ACCESS:-true}
       - NODE_ENV=production
       # Docker network for agent containers to join
       - DOCKER_NETWORK=jellycore_jellycore-internal

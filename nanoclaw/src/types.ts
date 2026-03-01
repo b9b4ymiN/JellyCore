@@ -49,6 +49,31 @@ export interface NewMessage {
   content: string;
   timestamp: string;
   is_from_me?: boolean;
+  attachments?: MessageAttachment[];
+}
+
+export type MessageAttachmentKind =
+  | 'photo'
+  | 'document'
+  | 'video'
+  | 'voice'
+  | 'audio'
+  | 'unknown';
+
+export interface MessageAttachment {
+  id: string;
+  kind: MessageAttachmentKind;
+  mimeType?: string | null;
+  fileName?: string | null;
+  fileSize?: number | null;
+  telegramFileId?: string | null;
+  telegramFileUniqueId?: string | null;
+  caption?: string | null;
+  width?: number | null;
+  height?: number | null;
+  durationSec?: number | null;
+  localPath?: string | null;
+  checksum?: string | null;
 }
 
 export type LaneType = 'user' | 'scheduler' | 'heartbeat';
@@ -202,6 +227,7 @@ export interface Channel {
   name: string;
   connect(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
+  sendPayload?(jid: string, payload: OutboundPayload): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
@@ -220,3 +246,21 @@ export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
 // name is optional — channels that deliver names inline (Telegram) pass it here;
 // channels that sync names separately (WhatsApp syncGroupMetadata) omit it.
 export type OnChatMetadata = (chatJid: string, timestamp: string, name?: string) => void;
+
+export type OutboundPayload =
+  | {
+      kind: 'text';
+      text: string;
+    }
+  | {
+      kind: 'photo';
+      filePath: string;
+      caption?: string;
+    }
+  | {
+      kind: 'document';
+      filePath: string;
+      caption?: string;
+      fileName?: string;
+      mimeType?: string;
+    };

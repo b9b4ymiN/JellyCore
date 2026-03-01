@@ -6,6 +6,7 @@
  */
 
 import { EventEmitter } from 'events';
+import type { MessageAttachment } from './types.js';
 
 export interface IncomingMessage {
   chatJid: string;
@@ -13,6 +14,7 @@ export interface IncomingMessage {
   sender: string;
   timestamp: number;
   messageId?: string;
+  attachments?: MessageAttachment[];
 }
 
 class MessageBus extends EventEmitter {

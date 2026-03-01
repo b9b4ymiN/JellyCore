@@ -31,6 +31,9 @@ import { recentErrors } from './health-server.js';
 import { writeHeartbeatJobsSnapshot } from './ipc.js';
 import { logger } from './logger.js';
 import { resourceMonitor } from './resource-monitor.js';
+import { getTelegramMediaConfig, patchTelegramMediaConfig } from './telegram-media-config.js';
+import { cleanupTelegramMediaFiles } from './telegram-media.js';
+import type { TelegramMediaKind } from './telegram-media.js';
 import type { HeartbeatJob } from './types.js';
 import type { HeartbeatRuntimeConfig } from './heartbeat.js';
 
@@ -38,7 +41,15 @@ export { TELEGRAM_COMMANDS };
 
 // ─── Result Type ─────────────────────────────────────────────────────
 
-export type InlineAction = 'clear-session';
+export type InlineAction =
+  | 'clear-session'
+  | {
+      type: 'send-telegram-media';
+      kind: TelegramMediaKind;
+      relativePath: string;
+      caption?: string;
+      groupFolder?: string;
+    };
 
 export interface InlineResult {
   reply: string;
@@ -366,6 +377,113 @@ function cmdErrors(): string {
     '',
     ...lines,
   ].join('\n');
+}
+
+function tgMediaHelpText(): string {
+  return [
+    'Telegram media commands',
+    '/tgmedia status',
+    '/tgmedia enable | disable',
+    '/tgmedia download on | off',
+    '/tgmedia clean [days]',
+    '/tgsendfile <relative_path> [caption]',
+    '/tgsendphoto <relative_path> [caption]',
+    'AI directive: <tg-media>{"kind":"document","path":"notes/report.md"}</tg-media>',
+  ].join('\n');
+}
+
+function formatTgMediaStatus(): string {
+  const cfg = getTelegramMediaConfig();
+  return [
+    'Telegram media status',
+    `- enabled: ${cfg.enabled}`,
+    `- download_enabled: ${cfg.downloadEnabled}`,
+    `- max_download_bytes: ${cfg.maxDownloadBytes}`,
+    `- max_send_bytes: ${cfg.maxSendBytes}`,
+    `- media_dir: ${cfg.mediaDir}`,
+  ].join('\n');
+}
+
+function cmdTgMedia(args: string): string {
+  const trimmed = args.trim();
+  const [rawAction, ...restTokens] = trimmed.split(/\s+/).filter(Boolean);
+  const action = (rawAction || 'status').toLowerCase();
+
+  if (action === 'help' || action === '?') {
+    return `${tgMediaHelpText()}\n\n${formatTgMediaStatus()}`;
+  }
+  if (action === 'status') {
+    return formatTgMediaStatus();
+  }
+  if (action === 'enable') {
+    patchTelegramMediaConfig({ enabled: true });
+    return `Telegram media enabled\n\n${formatTgMediaStatus()}`;
+  }
+  if (action === 'disable') {
+    patchTelegramMediaConfig({ enabled: false });
+    return `Telegram media disabled\n\n${formatTgMediaStatus()}`;
+  }
+  if (action === 'download') {
+    const mode = (restTokens[0] || '').toLowerCase();
+    if (!['on', 'off'].includes(mode)) {
+      return 'Usage: /tgmedia download <on|off>';
+    }
+    patchTelegramMediaConfig({ downloadEnabled: mode === 'on' });
+    return `Telegram media download ${mode}\n\n${formatTgMediaStatus()}`;
+  }
+  if (action === 'clean') {
+    const days = Number(restTokens[0] || '7');
+    if (!Number.isFinite(days) || days < 0) {
+      return 'Usage: /tgmedia clean [days]';
+    }
+    const result = cleanupTelegramMediaFiles(days);
+    return [
+      'Telegram media cleanup done',
+      `- dir: ${result.dir}`,
+      `- deleted: ${result.deleted}`,
+      `- kept: ${result.kept}`,
+      `- freed_bytes: ${result.bytesFreed}`,
+    ].join('\n');
+  }
+
+  return `Unknown tgmedia action: ${action}\n\n${tgMediaHelpText()}`;
+}
+
+function cmdTgSend(
+  kind: TelegramMediaKind,
+  args: string,
+  groupFolder?: string,
+): string | InlineResult {
+  const trimmed = args.trim();
+  if (!trimmed) {
+    const usage = kind === 'photo'
+      ? '/tgsendphoto <relative_path> [caption]'
+      : '/tgsendfile <relative_path> [caption]';
+    return `Usage: ${usage}`;
+  }
+
+  const firstSpace = trimmed.indexOf(' ');
+  const relPath = (firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace)).trim();
+  const caption = (firstSpace < 0 ? '' : trimmed.slice(firstSpace + 1)).trim();
+  if (!relPath) {
+    const usage = kind === 'photo'
+      ? '/tgsendphoto <relative_path> [caption]'
+      : '/tgsendfile <relative_path> [caption]';
+    return `Usage: ${usage}`;
+  }
+
+  return {
+    reply: kind === 'photo'
+      ? `Preparing photo: ${relPath}`
+      : `Preparing file: ${relPath}`,
+    action: {
+      type: 'send-telegram-media',
+      kind,
+      relativePath: relPath,
+      caption: caption || undefined,
+      groupFolder,
+    },
+  };
 }
 
 function cmdHealth(): string {
@@ -911,6 +1029,9 @@ const COMMAND_HANDLERS: Record<
   containers: () => cmdContainers(),
   heartbeat: ({ args, groupFolder }) => cmdHeartbeat(args, groupFolder),
   hbjob: ({ args, chatJid, groupFolder }) => cmdHbJob(args, chatJid, groupFolder),
+  tgmedia: ({ args }) => cmdTgMedia(args),
+  tgsendfile: ({ args, groupFolder }) => cmdTgSend('document', args, groupFolder),
+  tgsendphoto: ({ args, groupFolder }) => cmdTgSend('photo', args, groupFolder),
   kill: ({ args }) => cmdKill(args),
   errors: () => cmdErrors(),
   health: () => cmdHealth(),

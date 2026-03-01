@@ -55,6 +55,24 @@ export const COMMAND_DEFINITIONS = [
     category: 'admin',
   },
   {
+    command: 'tgmedia',
+    description: 'Manage Telegram media',
+    helpDescription: 'Manage Telegram media (use: /tgmedia help)',
+    category: 'admin',
+  },
+  {
+    command: 'tgsendfile',
+    description: 'Send a file from workspace',
+    helpDescription: 'Send file (use: /tgsendfile <relative_path> [caption])',
+    category: 'admin',
+  },
+  {
+    command: 'tgsendphoto',
+    description: 'Send an image from workspace',
+    helpDescription: 'Send photo (use: /tgsendphoto <relative_path> [caption])',
+    category: 'admin',
+  },
+  {
     command: 'kill',
     description: 'หยุด container',
     helpDescription: 'หยุด container (ใช้: /kill ชื่อ)',

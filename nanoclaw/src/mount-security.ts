@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
 
-import { MOUNT_ALLOWLIST_PATH } from './config.js';
+import { AGENT_FULL_ACCESS, MOUNT_ALLOWLIST_PATH } from './config.js';
 import { AdditionalMount, AllowedRoot, MountAllowlist } from './types.js';
 
 const logger = pino({
@@ -233,16 +233,6 @@ export function validateMount(
   mount: AdditionalMount,
   isMain: boolean,
 ): MountValidationResult {
-  const allowlist = loadMountAllowlist();
-
-  // If no allowlist, block all additional mounts
-  if (allowlist === null) {
-    return {
-      allowed: false,
-      reason: `No mount allowlist configured at ${MOUNT_ALLOWLIST_PATH}`,
-    };
-  }
-
   // Derive containerPath from hostPath basename if not specified
   const containerPath = mount.containerPath || path.basename(mount.hostPath);
 
@@ -251,6 +241,35 @@ export function validateMount(
     return {
       allowed: false,
       reason: `Invalid container path: "${containerPath}" - must be relative, non-empty, and not contain ".."`,
+    };
+  }
+
+  // Full access mode bypasses allowlist/blocked-pattern restrictions.
+  if (AGENT_FULL_ACCESS) {
+    const expandedPath = expandPath(mount.hostPath);
+    const realPath = getRealPath(expandedPath);
+    if (realPath === null) {
+      return {
+        allowed: false,
+        reason: `Host path does not exist: "${mount.hostPath}" (expanded: "${expandedPath}")`,
+      };
+    }
+    return {
+      allowed: true,
+      reason: 'AGENT_FULL_ACCESS enabled (allowlist bypass)',
+      realHostPath: realPath,
+      resolvedContainerPath: containerPath,
+      effectiveReadonly: false,
+    };
+  }
+
+  const allowlist = loadMountAllowlist();
+
+  // If no allowlist, block all additional mounts
+  if (allowlist === null) {
+    return {
+      allowed: false,
+      reason: `No mount allowlist configured at ${MOUNT_ALLOWLIST_PATH}`,
     };
   }
 

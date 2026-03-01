@@ -9,6 +9,7 @@ import {
   HeartbeatJob,
   HeartbeatJobLog,
   LaneType,
+  MessageAttachment,
   MessageAttempt,
   MessageReceipt,
   MessageStatus,
@@ -41,6 +42,27 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
+    CREATE TABLE IF NOT EXISTS message_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      attachment_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      mime_type TEXT,
+      file_name TEXT,
+      file_size INTEGER,
+      telegram_file_id TEXT,
+      telegram_file_unique_id TEXT,
+      caption TEXT,
+      width INTEGER,
+      height INTEGER,
+      duration_sec INTEGER,
+      local_path TEXT,
+      checksum TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachments_message
+      ON message_attachments(message_id, chat_jid);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -717,18 +739,22 @@ export function setLastGroupSync(): void {
  * Only call this for registered groups where message history is needed.
  */
 export function storeMessage(msg: NewMessage): void {
-  db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, timestamp_epoch, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    msg.id,
-    msg.chat_jid,
-    msg.sender,
-    msg.sender_name,
-    msg.content,
-    msg.timestamp,
-    toEpochMs(msg.timestamp),
-    msg.is_from_me ? 1 : 0,
-  );
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, timestamp_epoch, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      msg.id,
+      msg.chat_jid,
+      msg.sender,
+      msg.sender_name,
+      msg.content,
+      msg.timestamp,
+      toEpochMs(msg.timestamp),
+      msg.is_from_me ? 1 : 0,
+    );
+    storeMessageAttachments(msg.id, msg.chat_jid, msg.attachments || []);
+  });
+  tx();
 }
 
 /**
@@ -742,19 +768,111 @@ export function storeMessageDirect(msg: {
   content: string;
   timestamp: string;
   is_from_me: boolean;
+  attachments?: MessageAttachment[];
 }): void {
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, timestamp_epoch, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      msg.id,
+      msg.chat_jid,
+      msg.sender,
+      msg.sender_name,
+      msg.content,
+      msg.timestamp,
+      toEpochMs(msg.timestamp),
+      msg.is_from_me ? 1 : 0,
+    );
+    storeMessageAttachments(msg.id, msg.chat_jid, msg.attachments || []);
+  });
+  tx();
+}
+
+export function storeMessageAttachments(
+  messageId: string,
+  chatJid: string,
+  attachments: MessageAttachment[],
+): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, timestamp_epoch, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    msg.id,
-    msg.chat_jid,
-    msg.sender,
-    msg.sender_name,
-    msg.content,
-    msg.timestamp,
-    toEpochMs(msg.timestamp),
-    msg.is_from_me ? 1 : 0,
+    `DELETE FROM message_attachments WHERE message_id = ? AND chat_jid = ?`,
+  ).run(messageId, chatJid);
+
+  if (!attachments || attachments.length === 0) return;
+
+  const insert = db.prepare(
+    `INSERT INTO message_attachments (
+      message_id, chat_jid, attachment_id, kind, mime_type, file_name, file_size,
+      telegram_file_id, telegram_file_unique_id, caption, width, height, duration_sec,
+      local_path, checksum, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+
+  const now = new Date().toISOString();
+  for (const a of attachments) {
+    insert.run(
+      messageId,
+      chatJid,
+      a.id,
+      a.kind,
+      a.mimeType ?? null,
+      a.fileName ?? null,
+      a.fileSize ?? null,
+      a.telegramFileId ?? null,
+      a.telegramFileUniqueId ?? null,
+      a.caption ?? null,
+      a.width ?? null,
+      a.height ?? null,
+      a.durationSec ?? null,
+      a.localPath ?? null,
+      a.checksum ?? null,
+      now,
+    );
+  }
+}
+
+export function getMessageAttachments(
+  messageId: string,
+  chatJid: string,
+): MessageAttachment[] {
+  const rows = db.prepare(
+    `SELECT
+      attachment_id, kind, mime_type, file_name, file_size,
+      telegram_file_id, telegram_file_unique_id, caption, width, height,
+      duration_sec, local_path, checksum
+     FROM message_attachments
+     WHERE message_id = ? AND chat_jid = ?
+     ORDER BY id ASC`,
+  ).all(messageId, chatJid) as Array<{
+    attachment_id: string;
+    kind: MessageAttachment['kind'];
+    mime_type: string | null;
+    file_name: string | null;
+    file_size: number | null;
+    telegram_file_id: string | null;
+    telegram_file_unique_id: string | null;
+    caption: string | null;
+    width: number | null;
+    height: number | null;
+    duration_sec: number | null;
+    local_path: string | null;
+    checksum: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.attachment_id,
+    kind: r.kind,
+    mimeType: r.mime_type,
+    fileName: r.file_name,
+    fileSize: r.file_size,
+    telegramFileId: r.telegram_file_id,
+    telegramFileUniqueId: r.telegram_file_unique_id,
+    caption: r.caption,
+    width: r.width,
+    height: r.height,
+    durationSec: r.duration_sec,
+    localPath: r.local_path,
+    checksum: r.checksum,
+  }));
 }
 
 export function getNewMessages(

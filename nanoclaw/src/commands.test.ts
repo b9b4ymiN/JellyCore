@@ -6,9 +6,18 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { _initTestDatabase } from './db.js';
 import { classifyQuery } from './query-router.js';
 import { handleInline, InlineResult, TELEGRAM_COMMANDS } from './inline-handler.js';
+import { getTelegramMediaConfig, patchTelegramMediaConfig } from './telegram-media-config.js';
 
 beforeEach(() => {
   _initTestDatabase();
+  const cfg = getTelegramMediaConfig();
+  patchTelegramMediaConfig({
+    enabled: true,
+    downloadEnabled: cfg.downloadEnabled,
+    maxDownloadBytes: cfg.maxDownloadBytes,
+    maxSendBytes: cfg.maxSendBytes,
+    mediaDir: cfg.mediaDir,
+  });
 });
 
 // ─── Query Router: new commands ─────────────────────────────────────
@@ -115,6 +124,55 @@ describe('/help command', () => {
     expect(result).toContain('/budget');
     expect(result).toContain('/heartbeat');
     expect(result).toContain('/hbjob');
+    expect(result).toContain('/tgmedia');
+    expect(result).toContain('/tgsendfile');
+    expect(result).toContain('/tgsendphoto');
+  });
+});
+
+describe('/tgmedia command', () => {
+  it('shows media status and can disable/enable media runtime', () => {
+    const status = handleInline('admin-cmd', '/tgmedia status') as string;
+    expect(status).toContain('Telegram media status');
+
+    const disabled = handleInline('admin-cmd', '/tgmedia disable') as string;
+    expect(disabled).toContain('enabled: false');
+
+    const enabled = handleInline('admin-cmd', '/tgmedia enable') as string;
+    expect(enabled).toContain('enabled: true');
+  });
+});
+
+describe('/tgsend* commands', () => {
+  it('returns action payload for sending file/photo', () => {
+    const fileResult = handleInline(
+      'admin-cmd',
+      '/tgsendfile notes/report.pdf Monthly report',
+      'tg:1',
+      'main',
+    ) as InlineResult;
+    expect(typeof fileResult).toBe('object');
+    expect(fileResult.action).toEqual(
+      expect.objectContaining({
+        type: 'send-telegram-media',
+        kind: 'document',
+        relativePath: 'notes/report.pdf',
+      }),
+    );
+
+    const photoResult = handleInline(
+      'admin-cmd',
+      '/tgsendphoto images/chart.jpg latest chart',
+      'tg:1',
+      'main',
+    ) as InlineResult;
+    expect(photoResult.action).toEqual(
+      expect.objectContaining({
+        type: 'send-telegram-media',
+        kind: 'photo',
+        relativePath: 'images/chart.jpg',
+      }),
+    );
   });
 });
 

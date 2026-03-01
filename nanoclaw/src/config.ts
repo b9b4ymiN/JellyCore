@@ -24,6 +24,12 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
+/**
+ * Dangerous mode: gives agent containers broad access to NanoClaw data + Docker socket.
+ * Enables self-healing and full remediation workflows at the cost of security isolation.
+ */
+export const AGENT_FULL_ACCESS =
+  (process.env.AGENT_FULL_ACCESS || 'true').toLowerCase() === 'true';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -229,6 +235,22 @@ export const AUTH_PASSPHRASE = process.env.JELLYCORE_AUTH_PASSPHRASE;
 
 // Telegram bot token (optional — if not set, Telegram channel is disabled)
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+export const TELEGRAM_MEDIA_ENABLED =
+  (process.env.TELEGRAM_MEDIA_ENABLED || 'true').toLowerCase() !== 'false';
+export const TELEGRAM_MEDIA_DOWNLOAD_ENABLED =
+  (process.env.TELEGRAM_MEDIA_DOWNLOAD_ENABLED || 'false').toLowerCase() === 'true';
+export const TELEGRAM_MEDIA_MAX_BYTES = parseInt(
+  process.env.TELEGRAM_MEDIA_MAX_BYTES || '10485760',
+  10,
+); // 10MB
+export const TELEGRAM_MEDIA_SEND_MAX_BYTES = parseInt(
+  process.env.TELEGRAM_MEDIA_SEND_MAX_BYTES || '20971520',
+  10,
+); // 20MB
+export const TELEGRAM_MEDIA_DIR = path.resolve(
+  STORE_DIR,
+  process.env.TELEGRAM_MEDIA_DIR || 'telegram-media',
+);
 
 // Enabled channels: comma-separated list of channels to activate
 // Values: "telegram", "whatsapp" (case-insensitive)

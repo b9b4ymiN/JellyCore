@@ -8,6 +8,7 @@ import os from 'os';
 import path from 'path';
 
 import {
+  AGENT_FULL_ACCESS,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -16,6 +17,7 @@ import {
   IDLE_TIMEOUT,
   IPC_SECRET,
   POOL_ENABLED,
+  STORE_DIR,
 } from './config.js';
 import { dockerResilience } from './docker-resilience.js';
 import { logger } from './logger.js';
@@ -118,16 +120,6 @@ function resolveHostPath(containerPath: string): string {
   return hostPath;
 }
 
-function getHomeDir(): string {
-  const home = process.env.HOME || os.homedir();
-  if (!home) {
-    throw new Error(
-      'Unable to determine home directory: HOME environment variable is not set and os.homedir() returned empty',
-    );
-  }
-  return home;
-}
-
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -172,8 +164,6 @@ function buildVolumeMounts(
   isMain: boolean,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
-  const homeDir = getHomeDir();
-  const projectRoot = process.cwd();
 
   if (isMain) {
     // Main group — mount only its own workspace (NOT project root)
@@ -210,6 +200,24 @@ function buildVolumeMounts(
         containerPath: '/workspace/global',
         readonly: true,
       });
+    }
+  }
+
+  if (AGENT_FULL_ACCESS) {
+    // Full access mode intentionally lifts isolation so agents can self-remediate
+    // infra/runtime issues without human intervention.
+    const fullAccessMounts: VolumeMount[] = [
+      { hostPath: GROUPS_DIR, containerPath: '/workspace/all-groups', readonly: false },
+      { hostPath: DATA_DIR, containerPath: '/workspace/all-data', readonly: false },
+      { hostPath: STORE_DIR, containerPath: '/workspace/all-store', readonly: false },
+      { hostPath: path.join(process.cwd(), 'container'), containerPath: '/workspace/agent-container-src', readonly: false },
+      { hostPath: '/var/run/docker.sock', containerPath: '/var/run/docker.sock', readonly: false },
+    ];
+
+    for (const m of fullAccessMounts) {
+      if (fs.existsSync(m.hostPath)) {
+        mounts.push(m);
+      }
     }
   }
 

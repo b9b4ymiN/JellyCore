@@ -8,6 +8,7 @@ import {
   getRecoverableReceipts,
   getStableUserId,
   getMessagesSince,
+  getMessageAttachments,
   getNewMessages,
   getSession,
   getSessionAge,
@@ -147,6 +148,39 @@ describe('storeMessage', () => {
     const messages = getMessagesSince('group@g.us', '2024-01-01T00:00:00.000Z', 'BotName');
     expect(messages).toHaveLength(1);
     expect(messages[0].content).toBe('updated');
+  });
+
+  it('stores and retrieves message attachments', () => {
+    storeChatMetadata('tg:100', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'tg-msg-1',
+      chat_jid: 'tg:100',
+      sender: 'tg:777',
+      sender_name: 'Alice',
+      content: '[Photo]',
+      timestamp: '2024-01-01T00:00:10.000Z',
+      is_from_me: false,
+      attachments: [
+        {
+          id: 'photo:abc',
+          kind: 'photo',
+          mimeType: 'image/jpeg',
+          fileName: 'image.jpg',
+          fileSize: 2048,
+          telegramFileId: 'f1',
+          telegramFileUniqueId: 'u1',
+          width: 100,
+          height: 200,
+        },
+      ],
+    });
+
+    const rows = getMessageAttachments('tg-msg-1', 'tg:100');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe('photo:abc');
+    expect(rows[0].kind).toBe('photo');
+    expect(rows[0].telegramFileId).toBe('f1');
   });
 });
 

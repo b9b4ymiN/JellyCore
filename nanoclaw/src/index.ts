@@ -29,7 +29,8 @@ import {
 } from './container-runner.js';
 import { containerPool } from './container-pool.js';
 import { classifyQuery } from './query-router.js';
-import { handleInline, InlineResult } from './inline-handler.js';
+import { handleInline } from './inline-handler.js';
+import type { InlineAction } from './inline-handler.js';
 import { handleOracleOnly } from './oracle-handler.js';
 import { getPromptBuilder } from './prompt-builder.js';
 import { initCostTracking, trackUsage } from './cost-tracker.js';
@@ -67,15 +68,19 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher, writeHeartbeatJobsSnapshot } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound, routeOutbound } from './router.js';
+import { findChannel, formatMessages, formatOutbound, routeOutbound, routeOutboundPayload } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, LaneType, NewMessage, RegisteredGroup } from './types.js';
+import { Channel, LaneType, NewMessage, OutboundPayload, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { startHealthServer, setOpsProvider, setStatusProvider, setHeartbeatProvider, setToolsProvider, recordError } from './health-server.js';
 import { resourceMonitor } from './resource-monitor.js';
 import { startHeartbeat, startHeartbeatJobRunner, patchHeartbeatConfig, recordActivity } from './heartbeat.js';
 import { dockerResilience } from './docker-resilience.js';
 import { capabilityProbe } from './capability-probe.js';
+import {
+  buildTelegramOutboundPayloadFromGroupFile,
+  parseTelegramMediaDirectives,
+} from './telegram-media.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -306,6 +311,46 @@ async function sendToChannel(jid: string, text: string): Promise<void> {
   await routeOutbound(channels, jid, text);
 }
 
+async function sendPayloadToChannel(
+  jid: string,
+  payload: OutboundPayload,
+): Promise<void> {
+  await routeOutboundPayload(channels, jid, payload);
+}
+
+async function executeInlineAction(
+  action: InlineAction,
+  context: { chatJid: string; group: RegisteredGroup; channel: Channel },
+): Promise<void> {
+  if (action === 'clear-session') return;
+  if (action.type !== 'send-telegram-media') return;
+
+  const groupFolder = action.groupFolder || context.group.folder;
+  const payloadResult = buildTelegramOutboundPayloadFromGroupFile(
+    groupFolder,
+    action.kind,
+    action.relativePath,
+    action.caption,
+  );
+  if (!payloadResult.ok) {
+    await sendToChannel(
+      context.chatJid,
+      formatOutbound(context.channel, `Cannot send media: ${payloadResult.error}`),
+    );
+    return;
+  }
+
+  try {
+    await sendPayloadToChannel(context.chatJid, payloadResult.payload);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    await sendToChannel(
+      context.chatJid,
+      formatOutbound(context.channel, `Media send failed: ${reason}`),
+    );
+  }
+}
+
 /** Set typing indicator on the right channel (safe â€” never throws) */
 async function setTypingOnChannel(jid: string, isTyping: boolean): Promise<void> {
   try {
@@ -448,6 +493,8 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
       delete lastAgentTimestamp[chatJid];
       saveState();
       logger.info({ group: group.name }, 'Session cleared via /clear command');
+    } else if (action) {
+      await executeInlineAction(action, { chatJid, group, channel: ch });
     }
 
     trackUsage(classification.tier, classification.model, Date.now() - startTime);
@@ -619,14 +666,50 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
       try {
         if (result.result) {
           const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
-          // Strip <internal>...</internal> blocks â€” agent uses these for internal reasoning
-          const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+          // Strip <internal>...</internal> blocks before user-visible delivery.
+          const stripped = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+          const mediaDirective = parseTelegramMediaDirectives(stripped);
+          const text = mediaDirective.cleanText;
           logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
           if (text) {
             await sendToChannel(chatJid, formatOutbound(ch, text));
             outputSentToUser = true;
             // Cancel all progress messages once we have real output
             progressTimers.forEach(clearTimeout);
+          }
+          for (const directive of mediaDirective.directives) {
+            const payloadResult = buildTelegramOutboundPayloadFromGroupFile(
+              group.folder,
+              directive.kind,
+              directive.path,
+              directive.caption,
+            );
+            if (!payloadResult.ok) {
+              await sendToChannel(
+                chatJid,
+                formatOutbound(ch, `Cannot send media: ${payloadResult.error}`),
+              );
+              outputSentToUser = true;
+              continue;
+            }
+            try {
+              await sendPayloadToChannel(chatJid, payloadResult.payload);
+              outputSentToUser = true;
+            } catch (mediaErr) {
+              const reason = mediaErr instanceof Error ? mediaErr.message : String(mediaErr);
+              await sendToChannel(
+                chatJid,
+                formatOutbound(ch, `Media send failed: ${reason}`),
+              );
+              outputSentToUser = true;
+            }
+          }
+          for (const errText of mediaDirective.errors) {
+            await sendToChannel(
+              chatJid,
+              formatOutbound(ch, `Telegram media directive error: ${errText}`),
+            );
+            outputSentToUser = true;
           }
           // Only reset idle timer on actual results, not session-update markers (result: null)
           resetIdleTimer();

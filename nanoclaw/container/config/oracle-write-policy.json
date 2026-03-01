@@ -1,12 +1,7 @@
 ﻿{
   "default": {
-    "mode": "selected",
-    "allow": [
-      "oracle_user_model_update",
-      "oracle_procedural_learn",
-      "oracle_procedural_usage",
-      "oracle_episodic_record"
-    ]
+    "mode": "full",
+    "allow": ["*"]
   },
   "groups": {
     "main": {
