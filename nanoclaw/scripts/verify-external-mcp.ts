@@ -269,6 +269,32 @@ function probeTarget(
     } else {
       dockerArgs.push('--add-host', 'host.docker.internal:host-gateway');
     }
+
+    // Optional auth token mount for google_docs probe:
+    // Mount host dir to /tmp/mcp-verify-google-config/google-docs-mcp inside probe container.
+    // Expected layout:
+    // - no profile: <hostDir>/token.json
+    // - profile=main: <hostDir>/main/token.json
+    if (target.name === 'google_docs') {
+      const tokenDirRaw = (process.env.MCP_VERIFY_GOOGLE_DOCS_TOKEN_DIR || '').trim();
+      if (tokenDirRaw) {
+        const tokenDir = path.resolve(tokenDirRaw);
+        try {
+          if (fs.existsSync(tokenDir) && fs.statSync(tokenDir).isDirectory()) {
+            const probeConfigHome = '/tmp/mcp-verify-google-config';
+            dockerArgs.push(
+              '-v',
+              `${tokenDir}:${probeConfigHome}/google-docs-mcp:ro`,
+              '-e',
+              `GOOGLE_DOCS_XDG_CONFIG_HOME=${probeConfigHome}`,
+            );
+          }
+        } catch {
+          // best effort: fall through without token mount
+        }
+      }
+    }
+
     dockerArgs.push(
       '--entrypoint',
       'node',

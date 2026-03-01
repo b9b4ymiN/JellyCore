@@ -185,6 +185,18 @@ npm run mcp:check
 Notes:
 - `MCP_VERIFY_STRICT=true` makes missing required env fail immediately.
 - This script performs `initialize` + `tools/list` against each server.
+- For `google_docs`, probe container cannot see session-mounted token by default.
+  Use `MCP_VERIFY_GOOGLE_DOCS_TOKEN_DIR` to mount a token directory during verification.
+
+Example:
+
+```bash
+mkdir -p ~/gdocs-token/main
+cp ~/token.json ~/gdocs-token/main/token.json
+MCP_VERIFY_DOCKER_NETWORK=jellycore_jellycore-internal \
+MCP_VERIFY_GOOGLE_DOCS_TOKEN_DIR=~/gdocs-token \
+npx -y tsx scripts/verify-external-mcp.ts
+```
 
 ### 5.3 Telegram session check
 

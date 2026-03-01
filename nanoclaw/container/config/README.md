@@ -126,6 +126,17 @@ If Oracle is on a custom Docker network, set:
 MCP_VERIFY_DOCKER_NETWORK=jellycore_jellycore-internal npm run mcp:verify
 ```
 
+For `google_docs`, verification container does not automatically inherit session token mounts.
+Use optional token-dir mount:
+
+```bash
+MCP_VERIFY_GOOGLE_DOCS_TOKEN_DIR=~/gdocs-token MCP_VERIFY_DOCKER_NETWORK=jellycore_jellycore-internal npm run mcp:verify
+```
+
+Token-dir layout:
+- no profile: `~/gdocs-token/token.json`
+- profile `main`: `~/gdocs-token/main/token.json`
+
 ---
 
 ## Existing MCPs
