@@ -211,7 +211,7 @@ function buildRuntimeToolsInventory(channelNames: string[]): Record<string, unkn
   const skills = discoverSkillInventory(projectRoot);
   const nanoclawTools = discoverNanoclawMcpTools(projectRoot);
   const oracleTools = discoverOracleMcpTools(projectRoot);
-  const allowedTools = discoverAgentAllowedTools(projectRoot);
+  const staticAllowedTools = discoverAgentAllowedTools(projectRoot);
   const externalConfigs = loadExternalMcpConfigs(projectRoot);
 
   const externalServers = externalConfigs.map((server) => {
@@ -242,6 +242,13 @@ function buildRuntimeToolsInventory(channelNames: string[]): Record<string, unkn
       reason,
     };
   });
+  const externalAllowedTools = externalServers
+    .filter((server) => server.enabled)
+    .map((server) => `mcp__${server.name}__*`);
+  const allowedTools = uniqueSorted([
+    ...staticAllowedTools,
+    ...externalAllowedTools,
+  ]);
 
   return {
     timestamp: new Date().toISOString(),

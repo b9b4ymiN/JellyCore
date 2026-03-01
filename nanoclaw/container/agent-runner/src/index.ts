@@ -610,7 +610,7 @@ async function runQuery(
       globalContext.push(fs.readFileSync(filePath, 'utf-8'));
     }
   }
-  const globalAppend = globalContext.length > 0 ? globalContext.join('\n\n---\n\n') : undefined;
+  const globalAppendBase = globalContext.length > 0 ? globalContext.join('\n\n---\n\n') : undefined;
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -649,6 +649,26 @@ async function runQuery(
       );
     }
   }
+  const activeExternalServers = externalMcpEvaluations.filter((e) => e.active);
+  const inactiveExternalServers = externalMcpEvaluations.filter((e) => !e.active);
+  const runtimeMcpAppend = [
+    'Runtime MCP availability for this session (source of truth):',
+    '- Core namespaces: mcp__nanoclaw__*, mcp__oracle__*',
+    `- External active: ${
+      activeExternalServers.length > 0
+        ? activeExternalServers.map((e) => `mcp__${e.server.name}__*`).join(', ')
+        : '(none)'
+    }`,
+    `- External inactive: ${
+      inactiveExternalServers.length > 0
+        ? inactiveExternalServers.map((e) => `${e.server.name} (${e.reason})`).join(', ')
+        : '(none)'
+    }`,
+    'When asked about MCP availability, answer from this runtime list only and do not guess non-existent tools.',
+  ].join('\n');
+  const globalAppend = [globalAppendBase, runtimeMcpAppend]
+    .filter((v): v is string => typeof v === 'string' && v.length > 0)
+    .join('\n\n---\n\n');
 
   for await (const message of query({
     prompt: stream,
