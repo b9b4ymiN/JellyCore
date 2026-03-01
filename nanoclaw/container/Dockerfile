@@ -96,10 +96,11 @@ if target in src:
     src = src.replace(target, 'print("Starting Yahoo Finance MCP server...", file=sys.stderr)')
     p.write_text(src, encoding='utf-8')
 PY
-    && pip3 install --no-cache-dir --break-system-packages \
-      "mcp[cli]>=1.6.0" \
-      "yfinance>=0.2.62" \
-      "pandas>=2.0.0" \
+
+RUN pip3 install --no-cache-dir --break-system-packages \
+    "mcp[cli]>=1.6.0" \
+    "yfinance>=0.2.62" \
+    "pandas>=2.0.0" \
     && rm -rf /opt/yahoo-finance-mcp/.git
 
 # NotebookLM MCP (Node)
