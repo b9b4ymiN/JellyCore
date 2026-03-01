@@ -23,7 +23,7 @@ RUN npm run build
 FROM node:22-slim
 
 # Install system dependencies for Chromium + Python
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
     fonts-noto-color-emoji \
@@ -89,9 +89,9 @@ src = p.read_text(encoding='utf-8')
 # MCP stdio requires clean protocol on stdout; route all plain print logs to stderr.
 if 'import sys' not in src:
     if 'import pandas as pd' in src:
-        src = src.replace('import pandas as pd', 'import pandas as pd\\nimport sys')
+        src = src.replace('import pandas as pd', 'import pandas as pd\nimport sys')
     else:
-        src = 'import sys\\n' + src
+        src = 'import sys\n' + src
 
 lines = []
 for line in src.splitlines():
@@ -101,7 +101,7 @@ for line in src.splitlines():
         line = f"{indent}{stripped[:-1]}, file=sys.stderr)"
     lines.append(line)
 
-src = "\\n".join(lines) + "\\n"
+src = "\n".join(lines) + "\n"
 p.write_text(src, encoding='utf-8')
 PY
 
