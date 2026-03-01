@@ -105,6 +105,13 @@ Use strict mode if you want missing required env to fail the check:
 MCP_VERIFY_STRICT=true npm run mcp:verify
 ```
 
+By default, it also verifies Oracle MCP bridge (`/app/dist/oracle-mcp-http.js`).
+If Oracle is on a custom Docker network, set:
+
+```bash
+MCP_VERIFY_DOCKER_NETWORK=jellycore_jellycore-internal npm run mcp:verify
+```
+
 ---
 
 ## Existing MCPs

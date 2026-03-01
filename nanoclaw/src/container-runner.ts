@@ -581,7 +581,16 @@ export async function runContainerAgent(
       const chunk = data.toString();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
-        if (line) logger.debug({ container: group.folder }, line);
+        if (!line) continue;
+        const isMcpRuntimeLine =
+          line.includes('[agent-runner] MCP event')
+          || line.includes('[agent-runner] External MCP')
+          || line.includes('[agent-runner] Runtime MCP configuration');
+        if (isMcpRuntimeLine) {
+          logger.info({ container: group.folder }, line);
+        } else {
+          logger.debug({ container: group.folder }, line);
+        }
       }
       // Don't reset timeout on stderr — SDK writes debug logs continuously.
       // Timeout only resets on actual output (OUTPUT_MARKER in stdout).

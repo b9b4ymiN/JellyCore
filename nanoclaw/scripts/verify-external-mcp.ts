@@ -3,6 +3,7 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 
 type StartupMode = 'always' | 'on_demand';
+type ProbeProtocol = 'jsonl' | 'framed';
 
 interface ExternalMcpServer {
   name: string;
@@ -26,6 +27,16 @@ interface ProbeResult {
   tools?: string[];
   error?: string;
   stderr?: string;
+}
+
+interface ProbeTarget {
+  name: string;
+  command: string;
+  args: string[];
+  startupMode: StartupMode;
+  requiredEnv: string[];
+  env: Record<string, string>;
+  enabled: boolean;
 }
 
 const PROBE_SCRIPT = `
@@ -124,8 +135,8 @@ function sendMessage(payload) {
 }
 
 function request(id, method, params) {
-  return new Promise((resolve, reject) => {
-    pending.set(String(id), { resolve, reject });
+  return new Promise((resolve) => {
+    pending.set(String(id), { resolve });
     sendMessage({ jsonrpc: '2.0', id, method, params });
   });
 }
@@ -186,11 +197,6 @@ function loadConfig(configPath: string): ExternalMcpsConfig {
   };
 }
 
-function isTruthyEnv(name: string): boolean {
-  const value = process.env[name];
-  return typeof value === 'string' && value.length > 0;
-}
-
 function parseProbeResult(raw: string): ProbeResult {
   const text = raw.trim();
   if (!text) return { ok: false, error: 'empty probe output' };
@@ -227,124 +233,182 @@ function ensureDockerReady(): void {
   }
 }
 
+function boolEnv(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+}
+
+function probeTarget(
+  target: ProbeTarget,
+  containerImage: string,
+  timeoutMs: number,
+  network: string,
+): { ok: boolean; line: string; detail?: string } {
+  const missingEnv = target.requiredEnv.filter((name) => {
+    const value = process.env[name];
+    return typeof value !== 'string' || value.length === 0;
+  });
+
+  if (!target.enabled) {
+    return { ok: true, line: `- ${target.name}: SKIP (disabled)` };
+  }
+  if (missingEnv.length > 0) {
+    return { ok: false, line: `- ${target.name}: FAIL (missing env: ${missingEnv.join(', ')})` };
+  }
+
+  const protocols: ProbeProtocol[] = ['jsonl', 'framed'];
+  let pass: { parsed: ProbeResult; elapsed: number; protocol: ProbeProtocol } | null = null;
+  let lastFailure = 'unknown error';
+  let lastFailureStderr = '';
+
+  for (const probeProtocol of protocols) {
+    const dockerArgs: string[] = ['run', '--rm'];
+    if (network) {
+      dockerArgs.push('--network', network);
+    } else {
+      dockerArgs.push('--add-host', 'host.docker.internal:host-gateway');
+    }
+    dockerArgs.push(
+      '--entrypoint',
+      'node',
+      '-e',
+      `MCP_CMD=${target.command}`,
+      '-e',
+      `MCP_ARGS_JSON=${JSON.stringify(target.args)}`,
+      '-e',
+      `MCP_PROBE_TIMEOUT_MS=${timeoutMs}`,
+      '-e',
+      `MCP_PROBE_PROTOCOL=${probeProtocol}`,
+    );
+
+    for (const [name, value] of Object.entries(target.env)) {
+      dockerArgs.push('-e', `${name}=${value}`);
+    }
+
+    dockerArgs.push(containerImage, '-e', PROBE_SCRIPT);
+
+    const started = Date.now();
+    const probe = spawnSync('docker', dockerArgs, {
+      encoding: 'utf-8',
+      timeout: timeoutMs + 8000,
+      maxBuffer: 1024 * 1024,
+    });
+    const elapsed = Date.now() - started;
+
+    if (probe.error) {
+      lastFailure = probe.error.message;
+      lastFailureStderr = '';
+      continue;
+    }
+
+    const parsed = parseProbeResult(probe.stdout || '');
+    if (probe.status === 0 && parsed.ok) {
+      pass = { parsed, elapsed, protocol: probeProtocol };
+      break;
+    }
+
+    const stderrText = (probe.stderr || '').trim();
+    lastFailure = parsed.error === 'empty probe output' && stderrText
+      ? stderrText
+      : parsed.error || stderrText || `exit code ${probe.status ?? 'unknown'}`;
+    lastFailureStderr = parsed.stderr || '';
+  }
+
+  if (!pass) {
+    const detail = lastFailureStderr ? `stderr: ${lastFailureStderr}` : undefined;
+    return { ok: false, line: `- ${target.name}: FAIL (${lastFailure})`, detail };
+  }
+
+  const tools = Array.isArray(pass.parsed.tools) ? pass.parsed.tools : [];
+  const line = `- ${target.name}: PASS (${pass.parsed.toolCount ?? tools.length} tools, ${pass.elapsed}ms, startupMode=${target.startupMode}, protocol=${pass.protocol})`;
+  const detail = tools.length > 0 ? `tools: ${tools.join(', ')}` : undefined;
+  return { ok: true, line, detail };
+}
+
 function main(): void {
   const root = process.cwd();
   const configPath = path.join(root, 'container', 'config', 'mcps.json');
   const containerImage = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
   const timeoutMs = Math.max(3000, parseInt(process.env.MCP_VERIFY_TIMEOUT_MS || '20000', 10) || 20000);
+  const strictMode = boolEnv('MCP_VERIFY_STRICT', false);
+  const verifyOracle = boolEnv('MCP_VERIFY_ORACLE', true);
+  const network = process.env.MCP_VERIFY_DOCKER_NETWORK || '';
 
   if (!fs.existsSync(configPath)) {
     console.error(`config not found: ${configPath}`);
     process.exit(2);
   }
 
-  const cfg = loadConfig(configPath);
-  const servers = cfg.servers;
-  const strictMode = ['1', 'true', 'yes'].includes((process.env.MCP_VERIFY_STRICT || '').toLowerCase());
-
   ensureDockerReady();
 
-  if (servers.length === 0) {
-    console.log('no external MCP servers configured');
-    return;
-  }
+  const cfg = loadConfig(configPath);
+  const externalTargets: ProbeTarget[] = cfg.servers.map((server) => {
+    const envMap = server.env && typeof server.env === 'object' ? server.env : {};
+    const resolvedEnv: Record<string, string> = {};
+    for (const [insideName, sourceName] of Object.entries(envMap)) {
+      const value = process.env[sourceName];
+      if (typeof value === 'string') resolvedEnv[insideName] = value;
+    }
+    return {
+      name: server.name,
+      command: server.command,
+      args: Array.isArray(server.args) ? server.args : [],
+      startupMode: server.startupMode === 'on_demand' ? 'on_demand' : 'always',
+      requiredEnv: Array.isArray(server.requiredEnv) ? server.requiredEnv : [],
+      env: resolvedEnv,
+      enabled: server.enabled !== false,
+    };
+  });
 
   let failed = 0;
-  console.log(`Verifying external MCP tools via image: ${containerImage}`);
-  console.log(`Configured servers: ${servers.length}`);
+  console.log(`Verifying MCP tools via image: ${containerImage}`);
+  console.log(`Docker network mode: ${network || 'default bridge (+ host-gateway alias)'}`);
 
-  for (const server of servers) {
-    const startupMode: StartupMode = server.startupMode === 'on_demand' ? 'on_demand' : 'always';
-    const configEnabled = server.enabled !== false;
-    const requiredEnv = Array.isArray(server.requiredEnv) ? server.requiredEnv : [];
-    const missingEnv = requiredEnv.filter((envName) => !isTruthyEnv(envName));
+  if (verifyOracle) {
+    console.log('Core MCP checks:');
+    const oracleApiUrl = process.env.MCP_VERIFY_ORACLE_API_URL
+      || process.env.ORACLE_API_URL
+      || 'http://host.docker.internal:47778';
+    const oracleTarget: ProbeTarget = {
+      name: 'oracle',
+      command: 'node',
+      args: ['/app/dist/oracle-mcp-http.js'],
+      startupMode: 'always',
+      requiredEnv: strictMode ? ['ORACLE_AUTH_TOKEN'] : [],
+      env: {
+        ORACLE_API_URL: oracleApiUrl,
+        ORACLE_AUTH_TOKEN: process.env.ORACLE_AUTH_TOKEN || '',
+        ORACLE_WRITE_MODE: 'none',
+        ORACLE_ALLOWED_WRITE_TOOLS: '',
+        ORACLE_POLICY_GROUP: 'verify',
+        NANOCLAW_CHAT_JID: 'verify@local',
+      },
+      enabled: true,
+    };
+    const oracleResult = probeTarget(oracleTarget, containerImage, timeoutMs, network);
+    console.log(oracleResult.line);
+    if (oracleResult.detail) console.log(`  ${oracleResult.detail}`);
+    if (!oracleResult.ok) failed += 1;
+  }
 
-    if (!configEnabled) {
-      console.log(`- ${server.name}: SKIP (disabled by config)`);
-      continue;
-    }
-    if (missingEnv.length > 0) {
-      if (strictMode) {
-        failed += 1;
-        console.log(`- ${server.name}: FAIL (missing env: ${missingEnv.join(', ')})`);
-      } else {
-        console.log(`- ${server.name}: SKIP (missing env: ${missingEnv.join(', ')})`);
-      }
-      continue;
-    }
+  console.log('External MCP checks:');
+  console.log(`Configured external servers: ${externalTargets.length}`);
+  for (const target of externalTargets) {
+    const missingRequired = target.requiredEnv.filter((name) => {
+      const value = process.env[name];
+      return typeof value !== 'string' || value.length === 0;
+    });
 
-    const protocols: Array<'jsonl' | 'framed'> = ['jsonl', 'framed'];
-    let passResult: { parsed: ProbeResult; elapsed: number; protocol: 'jsonl' | 'framed' } | null = null;
-    let lastFailure = 'unknown error';
-    let lastFailureStderr = '';
-
-    for (const probeProtocol of protocols) {
-      const dockerArgs: string[] = [
-        'run',
-        '--rm',
-        '--entrypoint',
-        'node',
-        '-e',
-        `MCP_CMD=${server.command}`,
-        '-e',
-        `MCP_ARGS_JSON=${JSON.stringify(Array.isArray(server.args) ? server.args : [])}`,
-        '-e',
-        `MCP_PROBE_TIMEOUT_MS=${timeoutMs}`,
-        '-e',
-        `MCP_PROBE_PROTOCOL=${probeProtocol}`,
-      ];
-
-      const envMap = server.env && typeof server.env === 'object' ? server.env : {};
-      for (const [insideName, sourceName] of Object.entries(envMap)) {
-        const value = process.env[sourceName];
-        if (typeof value === 'string') {
-          dockerArgs.push('-e', `${insideName}=${value}`);
-        }
-      }
-
-      dockerArgs.push(containerImage, '-e', PROBE_SCRIPT);
-
-      const started = Date.now();
-      const probe = spawnSync('docker', dockerArgs, {
-        encoding: 'utf-8',
-        timeout: timeoutMs + 8000,
-        maxBuffer: 1024 * 1024,
-      });
-      const elapsed = Date.now() - started;
-
-      if (probe.error) {
-        lastFailure = probe.error.message;
-        lastFailureStderr = '';
-        continue;
-      }
-
-      const parsed = parseProbeResult(probe.stdout || '');
-      if (probe.status === 0 && parsed.ok) {
-        passResult = { parsed, elapsed, protocol: probeProtocol };
-        break;
-      }
-
-      const stderrText = (probe.stderr || '').trim();
-      lastFailure = parsed.error === 'empty probe output' && stderrText
-        ? stderrText
-        : parsed.error || stderrText || `exit code ${probe.status ?? 'unknown'}`;
-      lastFailureStderr = parsed.stderr || '';
-    }
-
-    if (!passResult) {
-      failed += 1;
-      console.log(`- ${server.name}: FAIL (${lastFailure})`);
-      if (lastFailureStderr) console.log(`  stderr: ${lastFailureStderr}`);
+    if (missingRequired.length > 0 && !strictMode) {
+      console.log(`- ${target.name}: SKIP (missing env: ${missingRequired.join(', ')})`);
       continue;
     }
 
-    const tools = Array.isArray(passResult.parsed.tools) ? passResult.parsed.tools : [];
-    console.log(
-      `- ${server.name}: PASS (${passResult.parsed.toolCount ?? tools.length} tools, ${passResult.elapsed}ms, startupMode=${startupMode}, protocol=${passResult.protocol})`,
-    );
-    if (tools.length > 0) {
-      console.log(`  tools: ${tools.join(', ')}`);
-    }
+    const result = probeTarget(target, containerImage, timeoutMs, network);
+    console.log(result.line);
+    if (result.detail) console.log(`  ${result.detail}`);
+    if (!result.ok) failed += 1;
   }
 
   if (failed > 0) {
@@ -352,7 +416,7 @@ function main(): void {
     process.exit(1);
   }
 
-  console.log('All eligible external MCP servers are callable and returned tools/list successfully.');
+  console.log('MCP verification passed: all checked servers returned tools/list successfully.');
 }
 
 main();

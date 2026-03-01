@@ -21,7 +21,7 @@
       "startupMode": "always",
       "allowGroups": [],
       "command": "python3",
-      "args": ["/opt/yahoo-finance-mcp/server.py"],
+      "args": ["-u", "/opt/yahoo-finance-mcp/server.py"],
       "requiredEnv": [],
       "env": {}
     },
