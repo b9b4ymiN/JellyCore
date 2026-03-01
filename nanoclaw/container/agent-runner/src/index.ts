@@ -652,19 +652,19 @@ async function runQuery(
   const activeExternalServers = externalMcpEvaluations.filter((e) => e.active);
   const inactiveExternalServers = externalMcpEvaluations.filter((e) => !e.active);
   const runtimeMcpAppend = [
-    'Runtime MCP availability for this session (source of truth):',
+    'Runtime MCP configuration for this session:',
     '- Core namespaces: mcp__nanoclaw__*, mcp__oracle__*',
-    `- External active: ${
+    `- External configured-to-load: ${
       activeExternalServers.length > 0
         ? activeExternalServers.map((e) => `mcp__${e.server.name}__*`).join(', ')
         : '(none)'
     }`,
-    `- External inactive: ${
+    `- External not configured-to-load: ${
       inactiveExternalServers.length > 0
         ? inactiveExternalServers.map((e) => `${e.server.name} (${e.reason})`).join(', ')
         : '(none)'
     }`,
-    'When asked about MCP availability, answer from this runtime list only and do not guess non-existent tools.',
+    'Important: configured-to-load does not guarantee successful MCP handshake. If tool/function list in-session is missing a configured MCP, explicitly report it as configured but currently unavailable.',
   ].join('\n');
   const globalAppend = [globalAppendBase, runtimeMcpAppend]
     .filter((v): v is string => typeof v === 'string' && v.length > 0)
@@ -731,6 +731,12 @@ async function runQuery(
     messageCount++;
     const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
     log(`[msg #${messageCount}] type=${msgType}`);
+    if (message.type === 'system') {
+      const sys = message as { subtype?: string };
+      if (sys.subtype === 'mcp_status' || sys.subtype === 'mcp_message') {
+        log(`MCP event (${sys.subtype}): ${JSON.stringify(message)}`);
+      }
+    }
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;

@@ -34,6 +34,7 @@ const { spawn } = require('child_process');
 const timeoutMs = Math.max(3000, Number(process.env.MCP_PROBE_TIMEOUT_MS || 15000));
 const cmd = process.env.MCP_CMD || '';
 const args = JSON.parse(process.env.MCP_ARGS_JSON || '[]');
+const protocol = (process.env.MCP_PROBE_PROTOCOL || 'jsonl').toLowerCase();
 
 if (!cmd) {
   process.stdout.write(JSON.stringify({ ok: false, error: 'missing MCP_CMD' }));
@@ -65,7 +66,7 @@ child.on('exit', (code, signal) => {
   }
 });
 
-function parseOneMessage() {
+function parseFramedMessage() {
   const headerEnd = stdoutBuffer.indexOf('\\r\\n\\r\\n');
   if (headerEnd < 0) return null;
   const header = stdoutBuffer.slice(0, headerEnd).toString();
@@ -80,11 +81,26 @@ function parseOneMessage() {
   return JSON.parse(body);
 }
 
+function parseJsonlMessage() {
+  const nl = stdoutBuffer.indexOf('\\n');
+  if (nl < 0) return null;
+  const rawLine = stdoutBuffer.slice(0, nl).toString();
+  stdoutBuffer = stdoutBuffer.slice(nl + 1);
+  const line = rawLine.replace(/\\r$/, '').trim();
+  if (!line) return undefined;
+  try {
+    return JSON.parse(line);
+  } catch {
+    throw new Error(\`non-JSON stdout line from MCP server: \${line.slice(0, 200)}\`);
+  }
+}
+
 function pump() {
   try {
     while (true) {
-      const msg = parseOneMessage();
-      if (!msg) break;
+      const msg = protocol === 'framed' ? parseFramedMessage() : parseJsonlMessage();
+      if (msg === null) break;
+      if (typeof msg === 'undefined') continue;
       if (typeof msg.id === 'undefined') continue;
       const key = String(msg.id);
       const waiter = pending.get(key);
@@ -98,9 +114,13 @@ function pump() {
 }
 
 function sendMessage(payload) {
-  const body = Buffer.from(JSON.stringify(payload));
-  child.stdin.write(\`Content-Length: \${body.length}\\r\\n\\r\\n\`);
-  child.stdin.write(body);
+  if (protocol === 'framed') {
+    const body = Buffer.from(JSON.stringify(payload));
+    child.stdin.write(\`Content-Length: \${body.length}\\r\\n\\r\\n\`);
+    child.stdin.write(body);
+    return;
+  }
+  child.stdin.write(JSON.stringify(payload) + '\\n');
 }
 
 function request(id, method, params) {
@@ -253,57 +273,75 @@ function main(): void {
       continue;
     }
 
-    const dockerArgs: string[] = [
-      'run',
-      '--rm',
-      '--entrypoint',
-      'node',
-      '-e',
-      `MCP_CMD=${server.command}`,
-      '-e',
-      `MCP_ARGS_JSON=${JSON.stringify(Array.isArray(server.args) ? server.args : [])}`,
-      '-e',
-      `MCP_PROBE_TIMEOUT_MS=${timeoutMs}`,
-    ];
+    const protocols: Array<'jsonl' | 'framed'> = ['jsonl', 'framed'];
+    let passResult: { parsed: ProbeResult; elapsed: number; protocol: 'jsonl' | 'framed' } | null = null;
+    let lastFailure = 'unknown error';
+    let lastFailureStderr = '';
 
-    const envMap = server.env && typeof server.env === 'object' ? server.env : {};
-    for (const [insideName, sourceName] of Object.entries(envMap)) {
-      const value = process.env[sourceName];
-      if (typeof value === 'string') {
-        dockerArgs.push('-e', `${insideName}=${value}`);
+    for (const probeProtocol of protocols) {
+      const dockerArgs: string[] = [
+        'run',
+        '--rm',
+        '--entrypoint',
+        'node',
+        '-e',
+        `MCP_CMD=${server.command}`,
+        '-e',
+        `MCP_ARGS_JSON=${JSON.stringify(Array.isArray(server.args) ? server.args : [])}`,
+        '-e',
+        `MCP_PROBE_TIMEOUT_MS=${timeoutMs}`,
+        '-e',
+        `MCP_PROBE_PROTOCOL=${probeProtocol}`,
+      ];
+
+      const envMap = server.env && typeof server.env === 'object' ? server.env : {};
+      for (const [insideName, sourceName] of Object.entries(envMap)) {
+        const value = process.env[sourceName];
+        if (typeof value === 'string') {
+          dockerArgs.push('-e', `${insideName}=${value}`);
+        }
       }
-    }
 
-    dockerArgs.push(containerImage, '-e', PROBE_SCRIPT);
+      dockerArgs.push(containerImage, '-e', PROBE_SCRIPT);
 
-    const started = Date.now();
-    const probe = spawnSync('docker', dockerArgs, {
-      encoding: 'utf-8',
-      timeout: timeoutMs + 8000,
-      maxBuffer: 1024 * 1024,
-    });
-    const elapsed = Date.now() - started;
+      const started = Date.now();
+      const probe = spawnSync('docker', dockerArgs, {
+        encoding: 'utf-8',
+        timeout: timeoutMs + 8000,
+        maxBuffer: 1024 * 1024,
+      });
+      const elapsed = Date.now() - started;
 
-    if (probe.error) {
-      failed += 1;
-      console.log(`- ${server.name}: FAIL (${probe.error.message})`);
-      continue;
-    }
+      if (probe.error) {
+        lastFailure = probe.error.message;
+        lastFailureStderr = '';
+        continue;
+      }
 
-    const parsed = parseProbeResult(probe.stdout || '');
-    if (probe.status !== 0 || !parsed.ok) {
-      failed += 1;
+      const parsed = parseProbeResult(probe.stdout || '');
+      if (probe.status === 0 && parsed.ok) {
+        passResult = { parsed, elapsed, protocol: probeProtocol };
+        break;
+      }
+
       const stderrText = (probe.stderr || '').trim();
-      const err = parsed.error === 'empty probe output' && stderrText
+      lastFailure = parsed.error === 'empty probe output' && stderrText
         ? stderrText
         : parsed.error || stderrText || `exit code ${probe.status ?? 'unknown'}`;
-      console.log(`- ${server.name}: FAIL (${err})`);
-      if (parsed.stderr) console.log(`  stderr: ${parsed.stderr}`);
+      lastFailureStderr = parsed.stderr || '';
+    }
+
+    if (!passResult) {
+      failed += 1;
+      console.log(`- ${server.name}: FAIL (${lastFailure})`);
+      if (lastFailureStderr) console.log(`  stderr: ${lastFailureStderr}`);
       continue;
     }
 
-    const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
-    console.log(`- ${server.name}: PASS (${parsed.toolCount ?? tools.length} tools, ${elapsed}ms, startupMode=${startupMode})`);
+    const tools = Array.isArray(passResult.parsed.tools) ? passResult.parsed.tools : [];
+    console.log(
+      `- ${server.name}: PASS (${passResult.parsed.toolCount ?? tools.length} tools, ${passResult.elapsed}ms, startupMode=${startupMode}, protocol=${passResult.protocol})`,
+    );
     if (tools.length > 0) {
       console.log(`  tools: ${tools.join(', ')}`);
     }

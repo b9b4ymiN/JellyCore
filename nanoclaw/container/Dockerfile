@@ -79,6 +79,23 @@ RUN git clone --depth=1 https://github.com/elizabethtrykin/oura-mcp /opt/oura-mc
 
 # Yahoo Finance MCP (Python)
 RUN git clone --depth=1 https://github.com/Alex2Yang97/yahoo-finance-mcp /opt/yahoo-finance-mcp \
+    && python3 - <<'PY'
+from pathlib import Path
+
+p = Path('/opt/yahoo-finance-mcp/server.py')
+src = p.read_text(encoding='utf-8')
+
+# MCP stdio requires clean protocol on stdout; startup logs must not be printed there.
+target = 'print("Starting Yahoo Finance MCP server...")'
+if target in src:
+    if 'import sys' not in src:
+        if 'import pandas as pd' in src:
+            src = src.replace('import pandas as pd', 'import pandas as pd\\nimport sys')
+        else:
+            src = 'import sys\\n' + src
+    src = src.replace(target, 'print("Starting Yahoo Finance MCP server...", file=sys.stderr)')
+    p.write_text(src, encoding='utf-8')
+PY
     && pip3 install --no-cache-dir --break-system-packages \
       "mcp[cli]>=1.6.0" \
       "yfinance>=0.2.62" \
