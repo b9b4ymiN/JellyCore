@@ -154,7 +154,10 @@ export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 // --- Oracle integration ---
-export const ORACLE_BASE_URL = process.env.ORACLE_BASE_URL || 'http://oracle-v2:47778';
+export const ORACLE_BASE_URL =
+  process.env.ORACLE_BASE_URL ||
+  process.env.ORACLE_API_URL ||
+  'http://oracle:47778';
 
 // --- Heartbeat ---
 export const HEARTBEAT_ENABLED =
@@ -167,6 +170,28 @@ export const HEARTBEAT_SILENCE_THRESHOLD_MS = parseInt(
   process.env.HEARTBEAT_SILENCE_THRESHOLD_HOURS || '2',
   10,
 ) * 60 * 60 * 1000; // hours → ms (default 2h)
+export const HEARTBEAT_SHOW_OK =
+  (process.env.HEARTBEAT_SHOW_OK || 'false').toLowerCase() === 'true';
+export const HEARTBEAT_SHOW_ALERTS =
+  (process.env.HEARTBEAT_SHOW_ALERTS || 'true').toLowerCase() !== 'false';
+export const HEARTBEAT_USE_INDICATOR =
+  (process.env.HEARTBEAT_USE_INDICATOR || 'true').toLowerCase() !== 'false';
+export const HEARTBEAT_DELIVERY_MUTED =
+  (process.env.HEARTBEAT_DELIVERY_MUTED || 'false').toLowerCase() === 'true';
+export const HEARTBEAT_ALERT_REPEAT_COOLDOWN_MS = parseInt(
+  process.env.HEARTBEAT_ALERT_REPEAT_COOLDOWN_MINUTES || '60',
+  10,
+) * 60 * 1000;
+export const HEARTBEAT_ACK_MAX_CHARS = parseInt(
+  process.env.HEARTBEAT_ACK_MAX_CHARS || '220',
+  10,
+);
+export const HEARTBEAT_PROMPT = process.env.HEARTBEAT_PROMPT || [
+  'You are the system heartbeat monitor.',
+  'If all monitored services are healthy, reply with exactly: HEARTBEAT_OK',
+  'If any issue exists, do not include HEARTBEAT_OK.',
+  'Instead return a concise alert with key failure and next action.',
+].join(' ');
 /** Default interval for smart heartbeat jobs (default 1 hour) */
 export const HEARTBEAT_JOB_DEFAULT_INTERVAL_MS = parseInt(
   process.env.HEARTBEAT_JOB_INTERVAL_MINUTES || '60',

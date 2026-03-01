@@ -335,18 +335,22 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
 /** Fetch Oracle health summary for use in heartbeat messages. */
 export async function fetchOracleSummary(): Promise<string | null> {
+  const endpoints = ['/api/health', '/health'];
   try {
-    const res = await fetch(`${ORACLE_BASE_URL}/health`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return `Oracle: HTTP ${res.status}`;
-    const data = await res.json() as Record<string, unknown>;
-    const status = data['status'] ?? 'unknown';
-    const uptimeSec = typeof data['uptime'] === 'number' ? data['uptime'] : null;
-    const uptimeStr = uptimeSec !== null
-      ? `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`
-      : '?';
-    return `Oracle ${status} (uptime ${uptimeStr})`;
+    for (const endpoint of endpoints) {
+      const res = await fetch(`${ORACLE_BASE_URL}${endpoint}`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json() as Record<string, unknown>;
+      const status = data['status'] ?? 'unknown';
+      const uptimeSec = typeof data['uptime'] === 'number' ? data['uptime'] : null;
+      const uptimeStr = uptimeSec !== null
+        ? `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`
+        : '?';
+      return `Oracle ${status} (uptime ${uptimeStr})`;
+    }
+    return 'Oracle unreachable';
   } catch {
     return 'Oracle unreachable';
   }

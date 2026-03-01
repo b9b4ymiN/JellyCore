@@ -43,6 +43,18 @@ export const COMMAND_DEFINITIONS = [
   { command: 'queue', description: 'ดูคิวงาน', category: 'admin' },
   { command: 'errors', description: 'ดู errors ล่าสุด', category: 'admin' },
   {
+    command: 'heartbeat',
+    description: 'Manage heartbeat runtime',
+    helpDescription: 'Manage heartbeat runtime (use: /heartbeat help)',
+    category: 'admin',
+  },
+  {
+    command: 'hbjob',
+    description: 'Manage heartbeat jobs',
+    helpDescription: 'Manage heartbeat jobs (use: /hbjob help)',
+    category: 'admin',
+  },
+  {
     command: 'kill',
     description: 'หยุด container',
     helpDescription: 'หยุด container (ใช้: /kill ชื่อ)',
@@ -78,4 +90,3 @@ export function parseSlashCommand(
   const args = trimmed.slice(firstToken.length).trim();
   return { command: rawName, args };
 }
-

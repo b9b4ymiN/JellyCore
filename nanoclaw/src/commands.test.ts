@@ -113,6 +113,74 @@ describe('/help command', () => {
     expect(result).toContain('/usage');
     expect(result).toContain('/cost');
     expect(result).toContain('/budget');
+    expect(result).toContain('/heartbeat');
+    expect(result).toContain('/hbjob');
+  });
+});
+
+describe('/heartbeat command', () => {
+  it('shows status by default', () => {
+    const result = handleInline('admin-cmd', '/heartbeat', 'tg:1', 'main') as string;
+    expect(result).toContain('Heartbeat status');
+    expect(result).toContain('enabled:');
+  });
+
+  it('can turn heartbeat off and on from main group', () => {
+    const off = handleInline('admin-cmd', '/heartbeat off', 'tg:1', 'main') as string;
+    expect(off).toContain('enabled: false');
+
+    const on = handleInline('admin-cmd', '/heartbeat on', 'tg:1', 'main') as string;
+    expect(on).toContain('enabled: true');
+  });
+
+  it('blocks non-main group config updates', () => {
+    const result = handleInline('admin-cmd', '/heartbeat off', 'tg:1', 'team-a') as string;
+    expect(result).toContain('Only main group');
+  });
+});
+
+describe('/hbjob command', () => {
+  it('creates, lists, updates, pauses, resumes, and removes a job', () => {
+    const add = handleInline(
+      'admin-cmd',
+      '/hbjob add Daily Check|monitor|15|Check key metrics and summarize',
+      'tg:1',
+      'main',
+    ) as string;
+    expect(add).toContain('Heartbeat job created');
+
+    const list1 = handleInline('admin-cmd', '/hbjob list', 'tg:1', 'main') as string;
+    expect(list1).toContain('Daily Check');
+
+    const match = list1.match(/\[([a-z0-9-]{8})\]/i);
+    expect(match).toBeTruthy();
+    const shortId = match![1];
+
+    const label = handleInline('admin-cmd', `/hbjob label ${shortId} Updated Label`, 'tg:1', 'main') as string;
+    expect(label).toContain('label updated');
+
+    const prompt = handleInline(
+      'admin-cmd',
+      `/hbjob prompt ${shortId} New prompt payload`,
+      'tg:1',
+      'main',
+    ) as string;
+    expect(prompt).toContain('prompt updated');
+
+    const interval = handleInline('admin-cmd', `/hbjob interval ${shortId} 30`, 'tg:1', 'main') as string;
+    expect(interval).toContain('interval updated');
+
+    const category = handleInline('admin-cmd', `/hbjob category ${shortId} health`, 'tg:1', 'main') as string;
+    expect(category).toContain('category updated');
+
+    const pause = handleInline('admin-cmd', `/hbjob pause ${shortId}`, 'tg:1', 'main') as string;
+    expect(pause).toContain('paused');
+
+    const resume = handleInline('admin-cmd', `/hbjob resume ${shortId}`, 'tg:1', 'main') as string;
+    expect(resume).toContain('resumed');
+
+    const remove = handleInline('admin-cmd', `/hbjob remove ${shortId}`, 'tg:1', 'main') as string;
+    expect(remove).toContain('removed');
   });
 });
 

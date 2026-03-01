@@ -324,12 +324,23 @@ server.tool(
 • enabled: turn heartbeat on/off
 • interval_hours: how often heartbeat reports are sent (default 1 hour)
 • silence_threshold_hours: how long of user silence triggers an alert (default 24 hours)
+• show_ok / show_alerts: control which heartbeat outputs are delivered
+• delivery_muted: stop sending heartbeat messages without stopping checks
+• heartbeat_prompt: override monitor prompt
+• ack_max_chars: cap OK acknowledgement length
 
 Example: "ตั้ง heartbeat ทุก 2 ชั่วโมง" → configure_heartbeat({ interval_hours: 2 })`,
   {
     enabled: z.boolean().optional().describe('Enable or disable the heartbeat system'),
     interval_hours: z.number().positive().optional().describe('Heartbeat report interval in hours (e.g. 1, 2, 6)'),
     silence_threshold_hours: z.number().positive().optional().describe('Hours of user silence before escalation alert (e.g. 24, 48)'),
+    show_ok: z.boolean().optional().describe('Send OK heartbeats when system is healthy'),
+    show_alerts: z.boolean().optional().describe('Send alert heartbeats when issues are detected'),
+    use_indicator: z.boolean().optional().describe('Prefix heartbeat with compact status indicator'),
+    delivery_muted: z.boolean().optional().describe('Mute delivery while still running heartbeat checks'),
+    alert_repeat_cooldown_minutes: z.number().nonnegative().optional().describe('Cooldown before repeating identical alerts'),
+    heartbeat_prompt: z.string().optional().describe('Override heartbeat monitor prompt'),
+    ack_max_chars: z.number().int().positive().optional().describe('Max characters for OK acknowledgement'),
   },
   async (args) => {
     if (!isMain) {
@@ -343,10 +354,22 @@ Example: "ตั้ง heartbeat ทุก 2 ชั่วโมง" → configur
     if (args.enabled !== undefined) heartbeat.enabled = args.enabled;
     if (args.interval_hours !== undefined) heartbeat.intervalMs = args.interval_hours * 60 * 60 * 1000;
     if (args.silence_threshold_hours !== undefined) heartbeat.silenceThresholdMs = args.silence_threshold_hours * 60 * 60 * 1000;
+    if (args.show_ok !== undefined) heartbeat.showOk = args.show_ok;
+    if (args.show_alerts !== undefined) heartbeat.showAlerts = args.show_alerts;
+    if (args.use_indicator !== undefined) heartbeat.useIndicator = args.use_indicator;
+    if (args.delivery_muted !== undefined) heartbeat.deliveryMuted = args.delivery_muted;
+    if (args.alert_repeat_cooldown_minutes !== undefined) {
+      heartbeat.alertRepeatCooldownMs = args.alert_repeat_cooldown_minutes * 60 * 1000;
+    }
+    if (args.heartbeat_prompt !== undefined) heartbeat.heartbeatPrompt = args.heartbeat_prompt;
+    if (args.ack_max_chars !== undefined) heartbeat.ackMaxChars = args.ack_max_chars;
 
     if (Object.keys(heartbeat).length === 0) {
       return {
-        content: [{ type: 'text' as const, text: '⚠️ No changes specified. Provide at least one of: enabled, interval_hours, silence_threshold_hours.' }],
+        content: [{
+          type: 'text' as const,
+          text: '⚠️ No changes specified. Provide at least one heartbeat setting.',
+        }],
         isError: true,
       };
     }
@@ -363,6 +386,13 @@ Example: "ตั้ง heartbeat ทุก 2 ชั่วโมง" → configur
       args.enabled !== undefined ? `enabled: ${args.enabled}` : null,
       args.interval_hours !== undefined ? `interval: ${args.interval_hours}h` : null,
       args.silence_threshold_hours !== undefined ? `silence threshold: ${args.silence_threshold_hours}h` : null,
+      args.show_ok !== undefined ? `show ok: ${args.show_ok}` : null,
+      args.show_alerts !== undefined ? `show alerts: ${args.show_alerts}` : null,
+      args.use_indicator !== undefined ? `indicator: ${args.use_indicator}` : null,
+      args.delivery_muted !== undefined ? `delivery muted: ${args.delivery_muted}` : null,
+      args.alert_repeat_cooldown_minutes !== undefined ? `alert cooldown: ${args.alert_repeat_cooldown_minutes}m` : null,
+      args.ack_max_chars !== undefined ? `ack max chars: ${args.ack_max_chars}` : null,
+      args.heartbeat_prompt !== undefined ? 'prompt: updated' : null,
     ].filter(Boolean).join(', ');
 
     return {

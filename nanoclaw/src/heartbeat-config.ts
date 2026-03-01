@@ -7,9 +7,16 @@
  */
 
 import {
+  HEARTBEAT_ACK_MAX_CHARS,
+  HEARTBEAT_ALERT_REPEAT_COOLDOWN_MS,
+  HEARTBEAT_DELIVERY_MUTED,
   HEARTBEAT_ENABLED,
   HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_PROMPT,
+  HEARTBEAT_SHOW_ALERTS,
+  HEARTBEAT_SHOW_OK,
   HEARTBEAT_SILENCE_THRESHOLD_MS,
+  HEARTBEAT_USE_INDICATOR,
 } from './config.js';
 import { logger } from './logger.js';
 
@@ -23,6 +30,20 @@ export interface HeartbeatRuntimeConfig {
   mainChatJid: string;
   /** Escalate frequency when consecutive errors exceed this count */
   escalateAfterErrors: number;
+  /** Show positive/OK heartbeat messages. */
+  showOk: boolean;
+  /** Show alert heartbeat messages. */
+  showAlerts: boolean;
+  /** Prefix heartbeat output with concise indicator. */
+  useIndicator: boolean;
+  /** Mute chat delivery while continuing heartbeat checks. */
+  deliveryMuted: boolean;
+  /** Suppress repeating identical alert text in this cooldown window. */
+  alertRepeatCooldownMs: number;
+  /** Prompt/instructions for heartbeat evaluation. */
+  heartbeatPrompt: string;
+  /** Max chars for OK acknowledgement text payload. */
+  ackMaxChars: number;
 }
 
 let runtimeConfig: HeartbeatRuntimeConfig = {
@@ -31,6 +52,13 @@ let runtimeConfig: HeartbeatRuntimeConfig = {
   silenceThresholdMs: HEARTBEAT_SILENCE_THRESHOLD_MS,
   mainChatJid: '',
   escalateAfterErrors: 3,
+  showOk: HEARTBEAT_SHOW_OK,
+  showAlerts: HEARTBEAT_SHOW_ALERTS,
+  useIndicator: HEARTBEAT_USE_INDICATOR,
+  deliveryMuted: HEARTBEAT_DELIVERY_MUTED,
+  alertRepeatCooldownMs: HEARTBEAT_ALERT_REPEAT_COOLDOWN_MS,
+  heartbeatPrompt: HEARTBEAT_PROMPT,
+  ackMaxChars: HEARTBEAT_ACK_MAX_CHARS,
 };
 
 /** Callbacks invoked whenever config is patched (e.g. to restart timers). */
@@ -50,7 +78,25 @@ export function onHeartbeatConfigChange(cb: () => void): () => void {
 
 /** Patch heartbeat config at runtime (called by IPC heartbeat_config handler). */
 export function patchHeartbeatConfig(patch: Partial<HeartbeatRuntimeConfig>): void {
-  runtimeConfig = { ...runtimeConfig, ...patch };
+  const next = { ...runtimeConfig, ...patch };
+  if (!Number.isFinite(next.intervalMs) || next.intervalMs < 60_000) {
+    next.intervalMs = runtimeConfig.intervalMs;
+  }
+  if (!Number.isFinite(next.silenceThresholdMs) || next.silenceThresholdMs < 60_000) {
+    next.silenceThresholdMs = runtimeConfig.silenceThresholdMs;
+  }
+  if (!Number.isFinite(next.escalateAfterErrors) || next.escalateAfterErrors < 1) {
+    next.escalateAfterErrors = runtimeConfig.escalateAfterErrors;
+  }
+  if (!Number.isFinite(next.alertRepeatCooldownMs) || next.alertRepeatCooldownMs < 0) {
+    next.alertRepeatCooldownMs = runtimeConfig.alertRepeatCooldownMs;
+  }
+  if (!Number.isFinite(next.ackMaxChars) || next.ackMaxChars < 50) {
+    next.ackMaxChars = runtimeConfig.ackMaxChars;
+  } else if (next.ackMaxChars > 4000) {
+    next.ackMaxChars = 4000;
+  }
+  runtimeConfig = next;
   logger.info({ config: runtimeConfig }, 'Heartbeat config updated');
   for (const cb of onConfigChangeCallbacks) {
     try { cb(); } catch (err) { logger.warn({ err }, 'onHeartbeatConfigChange callback error'); }

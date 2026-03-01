@@ -1,19 +1,16 @@
 /**
  * Heartbeat Reporter
  *
- * Builds comprehensive status messages and sends them to the main admin chat.
- * Handles four reasons: scheduled, silence, escalated, manual.
- *
- * Timer is restartable — calling patchHeartbeatConfig() automatically restarts
- * the timers with the new interval/threshold values.
+ * Alert-first heartbeat delivery with OpenClaw-style HEARTBEAT_OK semantics:
+ * - "HEARTBEAT_OK" means healthy
+ * - any other output is treated as an alert summary
+ * - delivery honors showOk/showAlerts/useIndicator/deliveryMuted flags
  */
 
 import {
-  HEARTBEAT_JOB_DEFAULT_INTERVAL_MS,
   ORACLE_BASE_URL,
   TIMEZONE,
 } from './config.js';
-import { getAllTasks, getActiveHeartbeatJobs, getTaskRunLogs } from './db.js';
 import { recentErrors } from './health-server.js';
 import { logger } from './logger.js';
 import {
@@ -25,58 +22,15 @@ import {
 } from './heartbeat-config.js';
 import { getRecentJobResults } from './heartbeat-jobs.js';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/** Format interval ms as "Xชม. Xน." (Thai units). */
-function formatIntervalMs(ms: number): string {
-  const totalMin = Math.round(ms / 60_000);
-  if (totalMin < 60) return `${totalMin}น.`;
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  return m > 0 ? `${h}ชม. ${m}น.` : `${h}ชม.`;
-}
-
-/** Format a task's label for display when label is missing. */
-function formatTaskLabel(label: string | null | undefined, scheduleType: string, scheduleValue: string): string {
-  if (label) return label;
-  if (scheduleType === 'interval') {
-    const ms = Number(scheduleValue);
-    if (!isNaN(ms) && ms > 0) return `ทุก ${formatIntervalMs(ms)}`;
-  }
-  return scheduleValue;
-}
-
-// ── Oracle integration ────────────────────────────────────────────────────────
-
 interface OracleHealth {
-  status: string;
-  uptime: number;
-  docsIndexed?: number;
-  cacheSize?: number;
+  status?: string;
+  uptime?: number;
 }
 
 interface OracleStats {
+  total?: number;
   totalDocs?: number;
-  searchRequests?: number;
 }
-
-async function fetchOracleHealth(): Promise<OracleHealth | null> {
-  try {
-    const res = await fetch(`${ORACLE_BASE_URL}/health`, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return null;
-    return (await res.json()) as OracleHealth;
-  } catch { return null; }
-}
-
-async function fetchOracleStats(): Promise<OracleStats | null> {
-  try {
-    const res = await fetch(`${ORACLE_BASE_URL}/oracle/stats`, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return null;
-    return (await res.json()) as OracleStats;
-  } catch { return null; }
-}
-
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 export type HeartbeatReason = 'scheduled' | 'silence' | 'escalated' | 'manual';
 
@@ -90,195 +44,349 @@ export interface HeartbeatStatusProvider {
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
-// ── Message building ──────────────────────────────────────────────────────────
-
-function formatUptime(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  if (h > 0) return `${h}ชม. ${m}น.`;
-  return `${m}น.`;
+interface HeartbeatCheckResult {
+  raw: string;
+  status: ReturnType<HeartbeatStatusProvider['getStatus']>;
+  oracleHealth: OracleHealth | null;
+  oracleStats: OracleStats | null;
+  silentMin: number;
 }
 
-async function buildHeartbeatMessage(
+interface ParsedHeartbeatResult {
+  ok: boolean;
+  summary: string;
+}
+
+export interface HeartbeatVisibilityConfig {
+  showOk: boolean;
+  showAlerts: boolean;
+  deliveryMuted: boolean;
+}
+
+let lastAlertSignature = '';
+let lastAlertAt = 0;
+
+function joinUrl(base: string, endpoint: string): string {
+  const trimmedBase = base.replace(/\/+$/, '');
+  const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return `${trimmedBase}${path}`;
+}
+
+async function fetchJsonWithFallback<T>(
+  baseUrl: string,
+  paths: string[],
+): Promise<T | null> {
+  for (const p of paths) {
+    try {
+      const res = await fetch(joinUrl(baseUrl, p), {
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!res.ok) continue;
+      return (await res.json()) as T;
+    } catch {
+      // Try next candidate path.
+    }
+  }
+  return null;
+}
+
+async function fetchOracleHealth(): Promise<OracleHealth | null> {
+  return fetchJsonWithFallback<OracleHealth>(ORACLE_BASE_URL, [
+    '/api/health',
+    '/health',
+  ]);
+}
+
+async function fetchOracleStats(): Promise<OracleStats | null> {
+  return fetchJsonWithFallback<OracleStats>(ORACLE_BASE_URL, [
+    '/api/stats',
+    '/oracle/stats',
+  ]);
+}
+
+function summarizeRecentSystemErrors(withinMs: number, limit: number): string[] {
+  const cutoff = Date.now() - withinMs;
+  const unique = new Set<string>();
+  const out: string[] = [];
+
+  for (let i = recentErrors.length - 1; i >= 0 && out.length < limit; i -= 1) {
+    const e = recentErrors[i];
+    const ts = Date.parse(e.timestamp);
+    if (Number.isFinite(ts) && ts < cutoff) continue;
+
+    const normalized = e.message.trim().toLowerCase();
+    if (!normalized || unique.has(normalized)) continue;
+
+    unique.add(normalized);
+    out.push(e.message.trim());
+  }
+
+  return out.reverse();
+}
+
+function summarizeRecentHeartbeatJobFailures(withinMs: number, limit: number): string[] {
+  const recent = getRecentJobResults(withinMs);
+  const unique = new Set<string>();
+  const failures: string[] = [];
+
+  for (let i = recent.length - 1; i >= 0 && failures.length < limit; i -= 1) {
+    const r = recent[i];
+    const txt = r.result.trim();
+    const isFailure =
+      txt.startsWith('\u274C') ||
+      txt.toLowerCase().startsWith('error:');
+    if (!isFailure) continue;
+
+    const summary = `${r.label}: ${txt.replace(/^\u274C\s*/, '').replace(/^Error:\s*/i, '')}`;
+    const normalized = summary.toLowerCase();
+    if (unique.has(normalized)) continue;
+
+    unique.add(normalized);
+    failures.push(summary);
+  }
+
+  return failures.reverse();
+}
+
+function formatUptime(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+export function parseHeartbeatOutput(raw: string, ackMaxChars: number): ParsedHeartbeatResult {
+  const trimmed = raw.trim();
+  if (trimmed === 'HEARTBEAT_OK') {
+    return { ok: true, summary: 'HEARTBEAT_OK' };
+  }
+
+  const normalized = trimmed
+    .replace(/^ALERT\s*:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) {
+    return { ok: false, summary: 'Heartbeat check reported an issue without details.' };
+  }
+
+  const maxLen = Math.max(80, Math.min(ackMaxChars, 1200));
+  return {
+    ok: false,
+    summary: normalized.length > maxLen ? `${normalized.slice(0, maxLen)}...` : normalized,
+  };
+}
+
+export function shouldDeliverHeartbeatResult(
+  parsed: ParsedHeartbeatResult,
+  cfg: HeartbeatVisibilityConfig,
+): boolean {
+  if (cfg.deliveryMuted) return false;
+  if (parsed.ok) return cfg.showOk;
+  return cfg.showAlerts;
+}
+
+function buildHeartbeatSignal(
+  reason: HeartbeatReason,
+  silentMin: number,
+  consecutiveErrors: number,
+  oracleHealth: OracleHealth | null,
+  sysErrors: string[],
+  heartbeatJobFailures: string[],
+): string {
+  const alerts: string[] = [];
+
+  if (!oracleHealth) {
+    alerts.push('Oracle health endpoint unreachable.');
+  } else if (oracleHealth.status && !['ok', 'healthy'].includes(oracleHealth.status.toLowerCase())) {
+    alerts.push(`Oracle status is ${oracleHealth.status}.`);
+  }
+
+  if (reason === 'escalated' || consecutiveErrors > 0) {
+    alerts.push(`Consecutive errors: ${consecutiveErrors}.`);
+  }
+
+  for (const e of sysErrors) {
+    alerts.push(`System error: ${e.slice(0, 140)}`);
+  }
+
+  for (const f of heartbeatJobFailures) {
+    alerts.push(`Heartbeat job failed: ${f.slice(0, 140)}`);
+  }
+
+  // Inactivity is informational, not an outage.
+  if (alerts.length === 0 && reason === 'silence' && silentMin > 0) {
+    return `HEARTBEAT_OK\nNo user activity for ${silentMin} minutes.`;
+  }
+
+  if (alerts.length === 0) {
+    return 'HEARTBEAT_OK';
+  }
+
+  return `ALERT: ${alerts.join(' | ')}`;
+}
+
+async function collectHeartbeatSignal(
   reason: HeartbeatReason,
   statusProvider: HeartbeatStatusProvider,
-): Promise<string> {
-  const now = new Date();
-  const timeLabel = now.toLocaleString('th-TH', {
-    timeZone: TIMEZONE,
-    dateStyle: 'short',
-    timeStyle: 'medium',
-  });
-
+): Promise<HeartbeatCheckResult> {
   const status = statusProvider.getStatus();
   const [oracleHealth, oracleStats] = await Promise.all([
     fetchOracleHealth(),
     fetchOracleStats(),
   ]);
 
-  // Tasks due in next 24 hours
-  const allTasks = getAllTasks().filter(t => t.status === 'active');
-  const dueSoon = allTasks.filter(t => {
-    if (!t.next_run) return false;
-    const diff = new Date(t.next_run).getTime() - Date.now();
-    return diff > 0 && diff < 24 * 60 * 60 * 1000;
+  const cfg = getHeartbeatConfig();
+  const consecutiveErrors = getConsecutiveErrors();
+  const silentMin = Math.floor((Date.now() - getLastActivityTime()) / 60_000);
+  const sysErrors = summarizeRecentSystemErrors(
+    Math.max(cfg.intervalMs, 30 * 60 * 1000),
+    2,
+  );
+  const heartbeatJobFailures = summarizeRecentHeartbeatJobFailures(
+    Math.max(cfg.intervalMs, 60 * 60 * 1000),
+    1,
+  );
+
+  const raw = buildHeartbeatSignal(
+    reason,
+    silentMin,
+    consecutiveErrors,
+    oracleHealth,
+    sysErrors,
+    heartbeatJobFailures,
+  );
+
+  return {
+    raw,
+    status,
+    oracleHealth,
+    oracleStats,
+    silentMin,
+  };
+}
+
+function formatHeartbeatMessage(
+  reason: HeartbeatReason,
+  parsed: ParsedHeartbeatResult,
+  check: HeartbeatCheckResult,
+): string {
+  const cfg = getHeartbeatConfig();
+  const nowLabel = new Date().toLocaleString('th-TH', {
+    timeZone: TIMEZONE,
+    dateStyle: 'short',
+    timeStyle: 'medium',
   });
 
-  // Recent task failures (last 3 tasks × last 3 logs each)
-  const recentFailedRuns = allTasks
-    .flatMap(t => {
-      const logs = getTaskRunLogs(t.id, 3);
-      return logs
-        .filter(l => l.status === 'error')
-        .map(l => ({ task: t.label ?? t.id.slice(0, 8), error: l.error ?? 'unknown', at: l.run_at }));
-    })
-    .slice(0, 3);
-
-  const sysErrors = recentErrors.slice(-3);
-
-  const header: Record<HeartbeatReason, string> = {
-    scheduled: '💓 Heartbeat',
-    silence: '💤 Silence Heartbeat',
-    escalated: '🚨 Escalated Heartbeat',
-    manual: '📣 Manual Heartbeat',
+  const reasonLabel: Record<HeartbeatReason, string> = {
+    scheduled: 'scheduled',
+    silence: 'silence',
+    escalated: 'escalated',
+    manual: 'manual',
   };
 
-  const lines: string[] = [
-    `${header[reason]}`,
-    `🕐 ${timeLabel} (${TIMEZONE})`,
-    '',
-  ];
+  const lines: string[] = [];
+  if (parsed.ok) {
+    const prefix = cfg.useIndicator ? '[OK] ' : '';
+    lines.push(`${prefix}${parsed.summary}`);
+    lines.push(`Mode: ${reasonLabel[reason]} | ${nowLabel}`);
 
-  // NanoClaw status
-  lines.push('🤖 *NanoClaw*');
-  lines.push(`   Containers: ${status.activeContainers} active | Queue: ${status.queueDepth}`);
-  lines.push(`   Groups: ${status.registeredGroups.length} registered`);
-  lines.push(`   Uptime: ${formatUptime(status.uptimeMs)}`);
-  lines.push('');
-
-  // Oracle status
-  lines.push('🧠 *Oracle*');
-  if (oracleHealth) {
-    const oracleUptime = oracleHealth.uptime ? formatUptime(oracleHealth.uptime * 1000) : '?';
-    lines.push(`   สถานะ: ${oracleHealth.status} | Uptime: ${oracleUptime}`);
-    if (oracleStats?.totalDocs !== undefined) {
-      lines.push(`   เอกสาร: ${oracleStats.totalDocs.toLocaleString()} รายการ`);
+    if (reason === 'silence') {
+      lines.push(`No activity for ${check.silentMin} min.`);
     }
-  } else {
-    lines.push('   ⚠️ ไม่สามารถเชื่อมต่อ Oracle ได้');
-  }
-  lines.push('');
 
-  // Scheduler
-  lines.push('📅 *Scheduler*');
-  lines.push(`   Active tasks: ${allTasks.length}`);
-  if (dueSoon.length > 0) {
-    lines.push(`   Due ใน 24h: ${dueSoon.length} รายการ`);
-    const next = dueSoon[0];
-    const nextTime = next.next_run
-      ? new Date(next.next_run).toLocaleString('th-TH', { timeZone: TIMEZONE, timeStyle: 'short' })
-      : '?';
-    lines.push(`   ถัดไป: "${formatTaskLabel(next.label, next.schedule_type, next.schedule_value)}" เวลา ${nextTime}`);
-  } else {
-    lines.push('   ไม่มี tasks ใน 24h');
-  }
-  lines.push('');
+    lines.push(
+      `Containers ${check.status.activeContainers} | Queue ${check.status.queueDepth} | Groups ${check.status.registeredGroups.length}`,
+    );
 
-  // Errors section
-  const hasErrors = sysErrors.length > 0 || recentFailedRuns.length > 0;
-  if (hasErrors) {
-    lines.push('⚠️ *ข้อผิดพลาดล่าสุด*');
-    for (const e of sysErrors) {
-      lines.push(`   • [sys] ${e.message.slice(0, 80)}`);
-    }
-    for (const f of recentFailedRuns) {
-      lines.push(`   • [task:${f.task}] ${String(f.error).slice(0, 80)}`);
-    }
-    lines.push('');
-  }
-
-  // Smart Heartbeat Jobs summary
-  const activeJobs = getActiveHeartbeatJobs();
-  if (activeJobs.length > 0) {
-    const categoryEmoji: Record<string, string> = {
-      learning: '📚',
-      monitor: '📊',
-      health: '🏥',
-      custom: '🔧',
-    };
-    lines.push(`🧠 *Smart Jobs* (${activeJobs.length} active)`);
-    for (const job of activeJobs.slice(0, 5)) {
-      const emoji = categoryEmoji[job.category] ?? '🔧';
-      const intervalMin = (job.interval_ms ?? HEARTBEAT_JOB_DEFAULT_INTERVAL_MS) / 60000;
-      const intervalLabel = intervalMin < 60 ? `${intervalMin}น.` : formatIntervalMs(job.interval_ms ?? HEARTBEAT_JOB_DEFAULT_INTERVAL_MS);
-      let lastResultDisplay: string;
-      if (job.last_result === '__RUNNING__') {
-        lastResultDisplay = ' ⏳ กำลังทำงาน…';
-      } else if (job.last_result?.startsWith('Error:') || job.last_result?.startsWith('❌')) {
-        const msg = job.last_result.replace(/^Error:\s*/, '').replace(/^❌\s*/, '');
-        lastResultDisplay = ` ❌ ${msg.slice(0, 55)}${msg.length > 55 ? '…' : ''}`;
-      } else if (job.last_result) {
-        const truncated = job.last_result.slice(0, 55);
-        lastResultDisplay = ` → ${truncated}${job.last_result.length > 55 ? '…' : ''}`;
+    if (check.oracleHealth) {
+      const status = check.oracleHealth.status || 'ok';
+      const docs = check.oracleStats?.total ?? check.oracleStats?.totalDocs;
+      if (docs !== undefined) {
+        lines.push(`Oracle ${status} | Docs ${docs.toLocaleString()}`);
       } else {
-        lastResultDisplay = ' (ยังไม่เคยทำงาน)';
+        lines.push(`Oracle ${status}`);
       }
-      lines.push(`   ${emoji} ${job.label} (ทุก ${intervalLabel})${lastResultDisplay}`);
     }
-    if (activeJobs.length > 5) {
-      lines.push(`   … และอีก ${activeJobs.length - 5} งาน`);
-    }
-    lines.push('');
+
+    lines.push(`Uptime ${formatUptime(check.status.uptimeMs)}`);
+    return lines.join('\n');
   }
 
-  // Recent completed jobs (last 6h) in case reporter fires between job runs
-  const recentResults = getRecentJobResults(6 * 60 * 60 * 1000);
-  if (recentResults.length > 0) {
-    lines.push(`📋 *งานล่าสุด (6ชม.)*`);
-    for (const r of recentResults.slice(0, 3)) {
-      const categoryEmoji: Record<string, string> = { learning: '📚', monitor: '📊', health: '🏥', custom: '🔧' };
-      const emoji = categoryEmoji[r.category] ?? '🔧';
-      const summary = r.result.startsWith('❌') ? r.result.slice(0, 60) : r.result.slice(0, 60);
-      lines.push(`   ${emoji} ${r.label}: ${summary}`);
-    }
-    lines.push('');
-  }
+  const prefix = cfg.useIndicator ? '[ALERT] ' : '';
+  lines.push(`${prefix}Heartbeat alert`);
+  lines.push(`Mode: ${reasonLabel[reason]} | ${nowLabel}`);
+  lines.push(parsed.summary);
 
-  // Footer
-  const consecutiveErrors = getConsecutiveErrors();
-  if (reason === 'silence') {
-    const silentMin = Math.floor((Date.now() - getLastActivityTime()) / 60000);
-    lines.push(`ℹ️ ไม่มีกิจกรรม ${silentMin} นาที`);
-  } else if (reason === 'escalated') {
-    lines.push(`🔴 พบ errors ติดต่อกัน ${consecutiveErrors} ครั้ง — เพิ่มความถี่ heartbeat ชั่วคราว`);
+  if (check.status.queueDepth > 0) {
+    lines.push(`Queue depth: ${check.status.queueDepth}`);
   }
-
-  lines.push(hasErrors ? '\n⚠️ ระบบทำงาน มีข้อผิดพลาดบางส่วน' : '\n✅ ระบบทำงานปกติ');
 
   return lines.join('\n');
 }
 
-// ── Send ──────────────────────────────────────────────────────────────────────
+function makeAlertSignature(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\d{1,2}:\d{2}(:\d{2})?/g, '<time>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+}
 
 async function sendHeartbeat(
   reason: HeartbeatReason,
   provider: HeartbeatStatusProvider,
 ): Promise<void> {
-  const { mainChatJid, enabled } = getHeartbeatConfig();
-  if (!enabled || !mainChatJid) return;
+  const cfg = getHeartbeatConfig();
+  if (!cfg.enabled || !cfg.mainChatJid) return;
+
+  const check = await collectHeartbeatSignal(reason, provider);
+  const parsed = parseHeartbeatOutput(check.raw, cfg.ackMaxChars);
+
+  if (!shouldDeliverHeartbeatResult(parsed, cfg)) {
+    if (cfg.deliveryMuted) {
+      logger.info({ reason, ok: parsed.ok }, 'Heartbeat delivery muted; check executed only');
+    } else if (parsed.ok) {
+      logger.debug({ reason }, 'Heartbeat OK suppressed by config');
+    } else {
+      logger.debug({ reason }, 'Heartbeat alert suppressed by config');
+    }
+    return;
+  }
+
+  if (!parsed.ok) {
+    const signature = makeAlertSignature(parsed.summary);
+    const now = Date.now();
+    if (
+      signature &&
+      signature === lastAlertSignature &&
+      now - lastAlertAt < cfg.alertRepeatCooldownMs
+    ) {
+      logger.info(
+        {
+          reason,
+          cooldownMs: cfg.alertRepeatCooldownMs,
+        },
+        'Skipping repeated heartbeat alert in cooldown window',
+      );
+      return;
+    }
+
+    lastAlertSignature = signature;
+    lastAlertAt = now;
+  }
 
   try {
-    const msg = await buildHeartbeatMessage(reason, provider);
-    await provider.sendMessage(mainChatJid, msg);
-    logger.info({ reason }, 'Heartbeat sent');
+    const msg = formatHeartbeatMessage(reason, parsed, check);
+    await provider.sendMessage(cfg.mainChatJid, msg);
+    logger.info({ reason, ok: parsed.ok }, 'Heartbeat sent');
     if (reason === 'escalated') clearHeartbeatErrors();
   } catch (err) {
     logger.warn({ err }, 'Heartbeat send failed (non-fatal)');
   }
 }
-
-// ── Timer lifecycle ───────────────────────────────────────────────────────────
 
 /**
  * Start the heartbeat system. Returns a cleanup function.
@@ -290,29 +398,26 @@ export function startHeartbeat(provider: HeartbeatStatusProvider): () => void {
   let lastSilenceAlert = 0;
 
   const startTimers = () => {
-    // Clear any existing timers first
     for (const t of timers) clearInterval(t);
     timers = [];
 
     const cfg = getHeartbeatConfig();
     if (!cfg.enabled) return;
 
-    // Scheduled heartbeat
     const scheduledTimer = setInterval(() => {
       const reason: HeartbeatReason =
         getConsecutiveErrors() >= cfg.escalateAfterErrors ? 'escalated' : 'scheduled';
-      sendHeartbeat(reason, provider);
+      void sendHeartbeat(reason, provider);
     }, cfg.intervalMs);
     timers.push(scheduledTimer);
 
-    // Silence monitor — checks at most every 10 min
     const silenceCheckInterval = Math.min(cfg.silenceThresholdMs / 4, 10 * 60 * 1000);
     const silenceTimer = setInterval(() => {
       const silentMs = Date.now() - getLastActivityTime();
       const cooldownMs = cfg.silenceThresholdMs;
       if (silentMs > cfg.silenceThresholdMs && Date.now() - lastSilenceAlert > cooldownMs) {
         lastSilenceAlert = Date.now();
-        sendHeartbeat('silence', provider);
+        void sendHeartbeat('silence', provider);
       }
     }, silenceCheckInterval);
     timers.push(silenceTimer);
@@ -320,7 +425,6 @@ export function startHeartbeat(provider: HeartbeatStatusProvider): () => void {
 
   startTimers();
 
-  // Auto-restart when config changes (interval, silence threshold, enabled flag)
   const unsubscribe = onHeartbeatConfigChange(() => {
     if (!stopped) {
       logger.info('Heartbeat timers restarting due to config change');

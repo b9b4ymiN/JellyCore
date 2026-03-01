@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { GROUPS_DIR, MAX_PROMPT_MESSAGES, MAX_PROMPT_CHARS, SESSION_MAX_AGE_MS } from './config.js';
+import { GROUPS_DIR, MAIN_GROUP_FOLDER, MAX_PROMPT_MESSAGES, MAX_PROMPT_CHARS, SESSION_MAX_AGE_MS } from './config.js';
 import {
   COMMAND_DEFINITIONS,
   CommandName,
@@ -17,10 +17,22 @@ import {
   TELEGRAM_COMMANDS,
 } from './command-registry.js';
 import { cmdUsage, cmdCost, cmdBudget } from './cost-intelligence.js';
-import { getSessionAge, getDb } from './db.js';
+import {
+  createHeartbeatJob,
+  deleteHeartbeatJob,
+  getAllHeartbeatJobs,
+  getDb,
+  getHeartbeatJob,
+  getSessionAge,
+  updateHeartbeatJob,
+} from './db.js';
+import { getHeartbeatConfig, patchHeartbeatConfig } from './heartbeat.js';
 import { recentErrors } from './health-server.js';
+import { writeHeartbeatJobsSnapshot } from './ipc.js';
 import { logger } from './logger.js';
 import { resourceMonitor } from './resource-monitor.js';
+import type { HeartbeatJob } from './types.js';
+import type { HeartbeatRuntimeConfig } from './heartbeat.js';
 
 export { TELEGRAM_COMMANDS };
 
@@ -530,6 +542,347 @@ function cmdReset(groupFolder?: string): string {
   }
 }
 
+const HEARTBEAT_JOB_CATEGORIES = new Set<HeartbeatJob['category']>([
+  'learning',
+  'monitor',
+  'health',
+  'custom',
+]);
+
+function normalizeGroupFolder(groupFolder?: string): string {
+  return groupFolder || MAIN_GROUP_FOLDER;
+}
+
+function isMainGroup(groupFolder?: string): boolean {
+  return normalizeGroupFolder(groupFolder) === MAIN_GROUP_FOLDER;
+}
+
+function parseOnOff(input?: string): boolean | null {
+  if (!input) return null;
+  const v = input.trim().toLowerCase();
+  if (['on', 'true', '1', 'yes'].includes(v)) return true;
+  if (['off', 'false', '0', 'no'].includes(v)) return false;
+  return null;
+}
+
+function formatHeartbeatConfigSummary(): string {
+  const cfg = getHeartbeatConfig();
+  return [
+    'Heartbeat status',
+    `- enabled: ${cfg.enabled}`,
+    `- muted: ${cfg.deliveryMuted}`,
+    `- interval_hours: ${(cfg.intervalMs / 3_600_000).toFixed(2)}`,
+    `- silence_hours: ${(cfg.silenceThresholdMs / 3_600_000).toFixed(2)}`,
+    `- show_ok: ${cfg.showOk}`,
+    `- show_alerts: ${cfg.showAlerts}`,
+    `- indicator: ${cfg.useIndicator}`,
+    `- alert_cooldown_min: ${Math.round(cfg.alertRepeatCooldownMs / 60_000)}`,
+    `- ack_max_chars: ${cfg.ackMaxChars}`,
+  ].join('\n');
+}
+
+function heartbeatHelpText(): string {
+  return [
+    'Heartbeat commands',
+    '/heartbeat status',
+    '/heartbeat on | off',
+    '/heartbeat mute | unmute',
+    '/heartbeat interval <hours>',
+    '/heartbeat silence <hours>',
+    '/heartbeat showok <on|off>',
+    '/heartbeat showalerts <on|off>',
+    '/heartbeat indicator <on|off>',
+    '/heartbeat cooldown <minutes>',
+    '/heartbeat ackmax <chars>',
+    '/heartbeat prompt <text>',
+  ].join('\n');
+}
+
+function cmdHeartbeat(args: string, groupFolder?: string): string {
+  const trimmed = args.trim();
+  const [rawAction, ...restTokens] = trimmed.split(/\s+/).filter(Boolean);
+  const action = (rawAction || 'status').toLowerCase();
+  const tail = trimmed.slice(rawAction ? rawAction.length : 0).trim();
+
+  if (action === 'help' || action === '?') {
+    return `${heartbeatHelpText()}\n\n${formatHeartbeatConfigSummary()}`;
+  }
+
+  if (action === 'status') {
+    return formatHeartbeatConfigSummary();
+  }
+
+  if (!isMainGroup(groupFolder)) {
+    return 'Only main group can change heartbeat settings. Use /heartbeat status to view.';
+  }
+
+  const patch: Partial<HeartbeatRuntimeConfig> = {};
+  switch (action) {
+    case 'on':
+      patch.enabled = true;
+      break;
+    case 'off':
+      patch.enabled = false;
+      break;
+    case 'mute':
+      patch.deliveryMuted = true;
+      break;
+    case 'unmute':
+      patch.deliveryMuted = false;
+      break;
+    case 'interval': {
+      const hours = Number(restTokens[0]);
+      if (!Number.isFinite(hours) || hours <= 0) return 'Usage: /heartbeat interval <hours>';
+      patch.intervalMs = Math.round(hours * 3_600_000);
+      break;
+    }
+    case 'silence': {
+      const hours = Number(restTokens[0]);
+      if (!Number.isFinite(hours) || hours <= 0) return 'Usage: /heartbeat silence <hours>';
+      patch.silenceThresholdMs = Math.round(hours * 3_600_000);
+      break;
+    }
+    case 'showok': {
+      const v = parseOnOff(restTokens[0]);
+      if (v === null) return 'Usage: /heartbeat showok <on|off>';
+      patch.showOk = v;
+      break;
+    }
+    case 'showalerts': {
+      const v = parseOnOff(restTokens[0]);
+      if (v === null) return 'Usage: /heartbeat showalerts <on|off>';
+      patch.showAlerts = v;
+      break;
+    }
+    case 'indicator': {
+      const v = parseOnOff(restTokens[0]);
+      if (v === null) return 'Usage: /heartbeat indicator <on|off>';
+      patch.useIndicator = v;
+      break;
+    }
+    case 'cooldown': {
+      const minutes = Number(restTokens[0]);
+      if (!Number.isFinite(minutes) || minutes < 0) return 'Usage: /heartbeat cooldown <minutes>';
+      patch.alertRepeatCooldownMs = Math.round(minutes * 60_000);
+      break;
+    }
+    case 'ackmax': {
+      const chars = Number(restTokens[0]);
+      if (!Number.isInteger(chars) || chars <= 0) return 'Usage: /heartbeat ackmax <chars>';
+      patch.ackMaxChars = chars;
+      break;
+    }
+    case 'prompt': {
+      if (!tail) return 'Usage: /heartbeat prompt <text>';
+      patch.heartbeatPrompt = tail;
+      break;
+    }
+    default:
+      return `Unknown heartbeat action: ${action}\n\n${heartbeatHelpText()}`;
+  }
+
+  patchHeartbeatConfig(patch);
+  return `Heartbeat updated\n\n${formatHeartbeatConfigSummary()}`;
+}
+
+function getScopedHeartbeatJobs(groupFolder?: string): HeartbeatJob[] {
+  const folder = normalizeGroupFolder(groupFolder);
+  const all = getAllHeartbeatJobs();
+  if (folder === MAIN_GROUP_FOLDER) return all;
+  return all.filter((job) => job.created_by === folder);
+}
+
+function resolveHeartbeatJobRef(
+  jobRef: string,
+  groupFolder?: string,
+): { ok: true; job: HeartbeatJob } | { ok: false; error: string } {
+  const trimmed = jobRef.trim();
+  if (!trimmed) return { ok: false, error: 'Job ID is required.' };
+
+  const folder = normalizeGroupFolder(groupFolder);
+  const allowAll = folder === MAIN_GROUP_FOLDER;
+  const exact = getHeartbeatJob(trimmed);
+  if (exact) {
+    if (allowAll || exact.created_by === folder) return { ok: true, job: exact };
+    return { ok: false, error: 'Permission denied for this job.' };
+  }
+
+  const scoped = getScopedHeartbeatJobs(folder);
+  const partial = scoped.find((j) => j.id.startsWith(trimmed));
+  if (!partial) return { ok: false, error: `Heartbeat job not found: ${trimmed}` };
+  return { ok: true, job: partial };
+}
+
+function formatHeartbeatJobs(groupFolder?: string): string {
+  const jobs = getScopedHeartbeatJobs(groupFolder);
+  if (jobs.length === 0) {
+    return 'No heartbeat jobs configured.\nUse /hbjob add <label>|<category>|<interval_min>|<prompt>';
+  }
+
+  const lines: string[] = ['Heartbeat jobs'];
+  for (const j of jobs) {
+    const intervalMin = j.interval_ms ? Math.round(j.interval_ms / 60_000) : 'default';
+    const last = j.last_run ? new Date(j.last_run).toLocaleString('th-TH') : 'never';
+    lines.push(
+      `- [${j.id.slice(0, 8)}] ${j.label} | ${j.category} | ${j.status} | every ${intervalMin}m | last ${last}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+function hbJobHelpText(): string {
+  return [
+    'Heartbeat job commands',
+    '/hbjob list',
+    '/hbjob add <label>|<category>|<interval_min>|<prompt>',
+    '/hbjob pause <job_id>',
+    '/hbjob resume <job_id>',
+    '/hbjob remove <job_id>',
+    '/hbjob label <job_id> <new_label>',
+    '/hbjob prompt <job_id> <new_prompt>',
+    '/hbjob interval <job_id> <minutes|default>',
+    '/hbjob category <job_id> <learning|monitor|health|custom>',
+  ].join('\n');
+}
+
+function cmdHbJob(args: string, chatJid?: string, groupFolder?: string): string {
+  const trimmed = args.trim();
+  const [rawAction, ...restTokens] = trimmed.split(/\s+/).filter(Boolean);
+  const action = (rawAction || 'list').toLowerCase();
+  const tail = trimmed.slice(rawAction ? rawAction.length : 0).trim();
+  const folder = normalizeGroupFolder(groupFolder);
+
+  if (action === 'help' || action === '?') {
+    return `${hbJobHelpText()}\n\n${formatHeartbeatJobs(folder)}`;
+  }
+
+  if (action === 'list') {
+    return formatHeartbeatJobs(folder);
+  }
+
+  if (action === 'add') {
+    if (!chatJid) return 'Cannot create heartbeat job: missing chat context.';
+    const parts = tail.split('|').map((p) => p.trim());
+    if (parts.length < 4) {
+      return 'Usage: /hbjob add <label>|<category>|<interval_min>|<prompt>';
+    }
+
+    const [label, categoryRaw, intervalRaw, ...promptParts] = parts;
+    const prompt = promptParts.join('|').trim();
+    if (!label || !prompt) {
+      return 'Usage: /hbjob add <label>|<category>|<interval_min>|<prompt>';
+    }
+
+    const category = categoryRaw as HeartbeatJob['category'];
+    if (!HEARTBEAT_JOB_CATEGORIES.has(category)) {
+      return 'Invalid category. Use learning|monitor|health|custom.';
+    }
+
+    let intervalMs: number | null = null;
+    const raw = intervalRaw.toLowerCase();
+    if (raw && raw !== 'default' && raw !== '-') {
+      const intervalMin = Number(raw);
+      if (!Number.isFinite(intervalMin) || intervalMin <= 0) {
+        return 'Invalid interval. Use positive minutes or "default".';
+      }
+      intervalMs = Math.round(intervalMin * 60_000);
+    }
+
+    const duplicates = getScopedHeartbeatJobs(folder).filter(
+      (j) => j.status === 'active' && j.label.toLowerCase() === label.toLowerCase(),
+    );
+    if (duplicates.length > 0) {
+      return `Duplicate label detected. Existing job: ${duplicates[0].id.slice(0, 8)}`;
+    }
+
+    const jobId = `hb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    createHeartbeatJob({
+      id: jobId,
+      chat_jid: chatJid,
+      label,
+      prompt,
+      category,
+      status: 'active',
+      interval_ms: intervalMs,
+      last_run: null,
+      last_result: null,
+      created_at: new Date().toISOString(),
+      created_by: folder,
+    });
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job created: ${jobId.slice(0, 8)} (${label})`;
+  }
+
+  const jobRef = restTokens[0] || '';
+  const resolved = resolveHeartbeatJobRef(jobRef, folder);
+  if (!resolved.ok) return resolved.error;
+  const job = resolved.job;
+
+  if (action === 'pause' || action === 'off') {
+    updateHeartbeatJob(job.id, { status: 'paused' });
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job paused: ${job.id.slice(0, 8)} (${job.label})`;
+  }
+
+  if (action === 'resume' || action === 'on') {
+    updateHeartbeatJob(job.id, { status: 'active' });
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job resumed: ${job.id.slice(0, 8)} (${job.label})`;
+  }
+
+  if (action === 'remove' || action === 'delete' || action === 'cancel') {
+    deleteHeartbeatJob(job.id);
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job removed: ${job.id.slice(0, 8)} (${job.label})`;
+  }
+
+  if (action === 'label') {
+    const newLabel = tail.slice(jobRef.length).trim();
+    if (!newLabel) return 'Usage: /hbjob label <job_id> <new_label>';
+    updateHeartbeatJob(job.id, { label: newLabel });
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job label updated: ${job.id.slice(0, 8)} -> ${newLabel}`;
+  }
+
+  if (action === 'prompt') {
+    const newPrompt = tail.slice(jobRef.length).trim();
+    if (!newPrompt) return 'Usage: /hbjob prompt <job_id> <new_prompt>';
+    updateHeartbeatJob(job.id, { prompt: newPrompt });
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job prompt updated: ${job.id.slice(0, 8)}`;
+  }
+
+  if (action === 'interval') {
+    const raw = tail.slice(jobRef.length).trim().toLowerCase();
+    if (!raw) return 'Usage: /hbjob interval <job_id> <minutes|default>';
+    if (raw === 'default' || raw === '-') {
+      updateHeartbeatJob(job.id, { interval_ms: null });
+      writeHeartbeatJobsSnapshot();
+      return `Heartbeat job interval reset to default: ${job.id.slice(0, 8)}`;
+    }
+    const minutes = Number(raw);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      return 'Invalid interval minutes.';
+    }
+    updateHeartbeatJob(job.id, { interval_ms: Math.round(minutes * 60_000) });
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job interval updated: ${job.id.slice(0, 8)} -> ${minutes}m`;
+  }
+
+  if (action === 'category') {
+    const newCategoryRaw = tail.slice(jobRef.length).trim().toLowerCase();
+    const newCategory = newCategoryRaw as HeartbeatJob['category'];
+    if (!HEARTBEAT_JOB_CATEGORIES.has(newCategory)) {
+      return 'Invalid category. Use learning|monitor|health|custom.';
+    }
+    updateHeartbeatJob(job.id, { category: newCategory });
+    writeHeartbeatJobsSnapshot();
+    return `Heartbeat job category updated: ${job.id.slice(0, 8)} -> ${newCategory}`;
+  }
+
+  return `Unknown hbjob action: ${action}\n\n${hbJobHelpText()}`;
+}
+
 // ─── Main Handler ────────────────────────────────────────────────────
 
 interface CommandHandlerContext {
@@ -556,6 +909,8 @@ const COMMAND_HANDLERS: Record<
   cost: () => cmdCost(),
   budget: ({ args }) => cmdBudget(args),
   containers: () => cmdContainers(),
+  heartbeat: ({ args, groupFolder }) => cmdHeartbeat(args, groupFolder),
+  hbjob: ({ args, chatJid, groupFolder }) => cmdHbJob(args, chatJid, groupFolder),
   kill: ({ args }) => cmdKill(args),
   errors: () => cmdErrors(),
   health: () => cmdHealth(),

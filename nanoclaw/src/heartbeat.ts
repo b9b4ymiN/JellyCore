@@ -23,6 +23,7 @@ export {
 
 export type { HeartbeatStatusProvider, HeartbeatReason } from './heartbeat-reporter.js';
 export {
+  parseHeartbeatOutput,
   startHeartbeat,
   triggerManualHeartbeat,
 } from './heartbeat-reporter.js';
