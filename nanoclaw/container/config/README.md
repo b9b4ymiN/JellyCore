@@ -90,6 +90,21 @@ docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/
 docker compose up -d nanoclaw
 ```
 
+### Step 5 - Verify MCP tools are callable
+
+Run from the `nanoclaw/` directory:
+
+```bash
+npm run mcp:verify
+```
+
+This performs a real MCP stdio handshake (`initialize` + `tools/list`) against each enabled external server in the agent image.
+Use strict mode if you want missing required env to fail the check:
+
+```bash
+MCP_VERIFY_STRICT=true npm run mcp:verify
+```
+
 ---
 
 ## Existing MCPs
