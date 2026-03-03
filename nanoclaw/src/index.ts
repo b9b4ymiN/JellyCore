@@ -47,6 +47,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getStableUserId,
+  getRuntimeWorkingMemory,
   getAllTasks,
   getMessageAttempts,
   getMessageReceipt,
@@ -66,7 +67,9 @@ import {
   setGlobalAgentModeDefault,
   transitionMessageStatus,
   setGroupAgentModeOverride,
+  setRuntimeWorkingMemory,
   clearGroupAgentModeOverride,
+  clearRuntimeWorkingMemory,
   clearSession,
   initDatabase,
   setRegisteredGroup,
@@ -91,9 +94,21 @@ import {
   buildTelegramOutboundPayloadFromGroupFile,
   parseTelegramMediaDirectives,
 } from './telegram-media.js';
-import { evaluateCodexAuthStatus, getCodexAuthStatus } from './codex-auth.js';
+import { evaluateCodexAuthStatus } from './codex-auth.js';
+import {
+  classifyCodexFailure,
+  codexFallbackMessage,
+  evaluateCodexRuntimeStatus,
+} from './codex-runtime.js';
+import { buildCodexWorkingSummary, persistCodexMemory } from './codex-memory.js';
 import { resolveAgentRuntime } from './agents/resolver.js';
-import type { AgentMode, AgentRuntime, CodexAuthStatus } from './agents/types.js';
+import type {
+  AgentMode,
+  AgentRuntime,
+  CodexAuthStatus,
+  CodexFailureCode,
+  CodexRuntimeStatus,
+} from './agents/types.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -107,11 +122,34 @@ let codexAuthStatus: CodexAuthStatus = {
   ready: false,
   checkedAt: '',
 };
+let codexRuntimeStatus: CodexRuntimeStatus = {
+  ready: false,
+  checkedAt: '',
+  image: process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest',
+};
+
+const codexMetrics: {
+  invocations: number;
+  fallbackToFonCount: number;
+  failuresByReason: Record<CodexFailureCode, number>;
+} = {
+  invocations: 0,
+  fallbackToFonCount: 0,
+  failuresByReason: {
+    codex_repo_trust_blocked: 0,
+    codex_runtime_unavailable: 0,
+    codex_output_parse_error: 0,
+    codex_auth_blocked: 0,
+  },
+};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 const latestFailedTracesByGroup = new Map<string, string[]>();
 const latestRejectedTracesByGroup = new Map<string, string[]>();
+const WORKING_SUMMARY_MESSAGES = 4;
+const WORKING_SUMMARY_ITEM_LIMIT = 160;
+const WORKING_SUMMARY_TOTAL_LIMIT = 500;
 
 // Global registry of active typing intervals â€” cleared on shutdown
 const activeTypingIntervals = new Set<ReturnType<typeof setInterval>>();
@@ -407,6 +445,25 @@ function markTraceStatus(
   }
 }
 
+function truncateWorkingSummaryText(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function buildWorkingSummary(messages: NewMessage[]): string {
+  const recent = messages.slice(-WORKING_SUMMARY_MESSAGES);
+  const lines = recent
+    .map((msg) => {
+      const role = msg.is_from_me || msg.sender_name === ASSISTANT_NAME ? 'assistant' : 'user';
+      const compact = msg.content.replace(/\s+/g, ' ').trim();
+      if (!compact) return '';
+      return `${role}: ${truncateWorkingSummaryText(compact, WORKING_SUMMARY_ITEM_LIMIT)}`;
+    })
+    .filter(Boolean);
+
+  if (lines.length === 0) return '';
+  return truncateWorkingSummaryText(lines.join(' | '), WORKING_SUMMARY_TOTAL_LIMIT);
+}
+
 /** Find the channel that owns a JID, or throw */
 function channelFor(jid: string): Channel {
   const ch = findChannel(channels, jid);
@@ -508,6 +565,43 @@ function refreshCodexAuthStatus(): void {
       codexAuthStatus.ready
         ? 'codex_auth_ready'
         : 'codex_auth_blocked',
+    );
+  }
+}
+
+function refreshCodexRuntimeStatus(): void {
+  const prev = codexRuntimeStatus;
+  codexRuntimeStatus = evaluateCodexRuntimeStatus();
+
+  if (
+    prev.ready !== codexRuntimeStatus.ready
+    || prev.reason !== codexRuntimeStatus.reason
+    || prev.imageRevision !== codexRuntimeStatus.imageRevision
+    || prev.driftDetected !== codexRuntimeStatus.driftDetected
+  ) {
+    logger.warn(
+      {
+        ready: codexRuntimeStatus.ready,
+        reason: codexRuntimeStatus.reason || null,
+        image: codexRuntimeStatus.image,
+        imageRevision: codexRuntimeStatus.imageRevision || null,
+        sourceRevision: codexRuntimeStatus.sourceRevision || null,
+        driftDetected: Boolean(codexRuntimeStatus.driftDetected),
+        checkedAt: codexRuntimeStatus.checkedAt,
+      },
+      codexRuntimeStatus.ready
+        ? 'codex_runtime_ready'
+        : 'codex_runtime_blocked',
+    );
+  }
+
+  if (codexRuntimeStatus.driftDetected && !prev.driftDetected) {
+    logger.warn(
+      {
+        imageRevision: codexRuntimeStatus.imageRevision || null,
+        sourceRevision: codexRuntimeStatus.sourceRevision || null,
+      },
+      'codex_image_possibly_stale',
     );
   }
 }
@@ -629,6 +723,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
     // Handle side-effects from commands
     if (action === 'clear-session') {
       clearSession(group.folder);
+      clearRuntimeWorkingMemory(group.folder);
       delete sessions[group.folder];
       delete lastAgentTimestamp[chatJid];
       saveState();
@@ -696,10 +791,12 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   try {
     const pb = getPromptBuilder();
     const stableUserId = getStableUserId(chatJid);
+    const workingSummary = buildWorkingSummary(mergedMessages);
     const ctx = await pb.buildCompactContext(
       lastMsg.content,
       group.folder,
       stableUserId,
+      workingSummary,
     );
     oracleContext = pb.formatCompact(ctx);
     if (oracleContext) {
@@ -967,6 +1064,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   refreshCodexAuthStatus();
+  refreshCodexRuntimeStatus();
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const mode = resolveAgentMode(group.folder);
   const resolution = resolveAgentRuntime({
@@ -976,6 +1074,7 @@ async function runAgent(
     codexEnabled: AGENT_CODEX_ENABLED,
     swarmEnabled: AGENT_SWARM_ENABLED,
     codexAuthReady: codexAuthStatus.ready,
+    codexRuntimeReady: codexRuntimeStatus.ready,
   });
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -1003,8 +1102,22 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
+  let lastRuntimeError: string | undefined;
+
   async function runRuntime(runtime: AgentRuntime): Promise<'success' | 'error'> {
     let sessionId: string | undefined = runtime === 'fon' ? sessions[group.folder] : undefined;
+    let runtimePrompt = prompt;
+
+    if (runtime === 'codex') {
+      const storedWorkingSummary = getRuntimeWorkingMemory(group.folder, 'codex');
+      if (storedWorkingSummary) {
+        runtimePrompt = `${prompt}\n\n<runtime_working>${storedWorkingSummary}</runtime_working>`;
+        logger.debug(
+          { group: group.name, runtime, chars: storedWorkingSummary.length },
+          'Injected stored codex working memory',
+        );
+      }
+    }
 
     // Session rotation only applies to Fon stateful runtime.
     if (runtime === 'fon' && sessionId) {
@@ -1033,7 +1146,7 @@ async function runAgent(
     const output = await runContainerAgent(
       group,
       {
-        prompt,
+        prompt: runtimePrompt,
         sessionId,
         groupFolder: group.folder,
         chatJid,
@@ -1052,6 +1165,11 @@ async function runAgent(
     }
 
     if (output.status === 'error') {
+      lastRuntimeError = output.error;
+      if (runtime === 'codex') {
+        const reasonCode = classifyCodexFailure(output.error);
+        codexMetrics.failuresByReason[reasonCode] += 1;
+      }
       logger.error(
         {
           group: group.name,
@@ -1065,10 +1183,43 @@ async function runAgent(
       );
       return 'error';
     }
+
+    if (runtime === 'codex' && typeof output.result === 'string' && output.result.trim().length > 0) {
+      const stableUserId = getStableUserId(chatJid);
+      const workingSummary = buildCodexWorkingSummary(prompt, output.result);
+      setRuntimeWorkingMemory(group.folder, 'codex', workingSummary);
+      void persistCodexMemory({
+        prompt,
+        result: output.result,
+        classificationReason,
+        groupFolder: group.folder,
+        stableUserId,
+      })
+        .then((summary) => {
+          if (summary.wrote.length > 0) {
+            logger.info(
+              {
+                group: group.name,
+                userId: stableUserId,
+                writes: summary.wrote,
+                skipped: summary.skipped,
+              },
+              'Codex memory write-back completed',
+            );
+          }
+        })
+        .catch((err) => {
+          logger.warn({ group: group.name, userId: stableUserId, err }, 'Codex memory write-back failed');
+        });
+    }
+
     return 'success';
   }
 
   try {
+    if (resolution.runtime === 'codex') {
+      codexMetrics.invocations += 1;
+    }
     logger.info(
       {
         group: group.name,
@@ -1076,6 +1227,11 @@ async function runAgent(
         mode,
         selectedRuntime: resolution.runtime,
         resolution: resolution.reason,
+        codexAuthReady: codexAuthStatus.ready,
+        codexRuntimeReady: codexRuntimeStatus.ready,
+        codexRuntimeReason: codexRuntimeStatus.reason || null,
+        codexImageRevision: codexRuntimeStatus.imageRevision || null,
+        codexDriftDetected: Boolean(codexRuntimeStatus.driftDetected),
       },
       'Agent runtime selected',
     );
@@ -1084,14 +1240,16 @@ async function runAgent(
     if (primary === 'success') return 'success';
 
     if (resolution.runtime === 'codex' && resolution.allowFallbackToFon) {
+      const reasonCode = classifyCodexFailure(lastRuntimeError);
+      codexMetrics.fallbackToFonCount += 1;
       logger.warn(
-        { group: group.name, lane, mode },
+        { group: group.name, lane, mode, reasonCode, lastRuntimeError },
         'Codex failed, falling back to Fon',
       );
       if (onOutput) {
         await onOutput({
           status: 'success',
-          result: 'ℹ️ Codex unavailable. Falling back to Fon.',
+          result: codexFallbackMessage(reasonCode),
         });
       }
       return await runRuntime('fon');
@@ -1390,6 +1548,62 @@ function ensureDockerRunning(): void {
     logger.warn({ image: agentImage, err }, 'Agent image check/build failed â€” container-tier messages may fail');
   }
 
+  // Stale image guard: if runtime probe says the configured image lacks required
+  // Codex fixes, auto-rebuild from mounted container/ source once at startup.
+  try {
+    const runtimeStatus = evaluateCodexRuntimeStatus({ force: true });
+    const staleReason =
+      runtimeStatus.reason === 'runner_missing_skip_git_repo_check'
+      || runtimeStatus.reason === 'runner_missing_json_parser';
+    if (!runtimeStatus.ready && staleReason) {
+      const containerBuildDir = path.join(process.cwd(), 'container');
+      if (fs.existsSync(path.join(containerBuildDir, 'Dockerfile'))) {
+        logger.warn(
+          {
+            image: agentImage,
+            reason: runtimeStatus.reason,
+            imageRevision: runtimeStatus.imageRevision || null,
+            sourceRevision: runtimeStatus.sourceRevision || null,
+          },
+          'Agent image appears stale â€” rebuilding configured image tag',
+        );
+        const sourceRevision = (() => {
+          try {
+            return execSync('git rev-parse --short=12 HEAD', {
+              stdio: ['pipe', 'pipe', 'pipe'],
+              encoding: 'utf-8',
+              timeout: 5000,
+            }).trim();
+          } catch {
+            return 'unknown';
+          }
+        })();
+        const buildDate = new Date().toISOString();
+        execSync(
+          `docker build --build-arg VCS_REF=${sourceRevision} --build-arg BUILD_DATE=${buildDate} -t ${agentImage} ${containerBuildDir}`,
+          {
+            stdio: 'inherit',
+            timeout: 900_000,
+          },
+        );
+        const rebuiltStatus = evaluateCodexRuntimeStatus({ force: true });
+        logger.info(
+          {
+            image: agentImage,
+            ready: rebuiltStatus.ready,
+            reason: rebuiltStatus.reason || null,
+            imageRevision: rebuiltStatus.imageRevision || null,
+          },
+          rebuiltStatus.ready
+            ? 'Agent image rebuild completed and runtime probe is healthy'
+            : 'Agent image rebuild completed but runtime probe is still blocked',
+        );
+      }
+    }
+  } catch (err) {
+    logger.warn({ image: agentImage, err }, 'Stale-image guard failed (non-fatal)');
+  }
+
   // Kill running orphans + prune exited NanoClaw containers from previous runs.
   // Running orphans: stop them first (blocks), then let --rm remove them.
   // Exited orphans: directly remove (handles transition from pre-â€“rm builds and Docker-crash leftovers).
@@ -1439,7 +1653,9 @@ async function main(): Promise<void> {
   loadState();
   ensureAgentModeDefaultConfig();
   refreshCodexAuthStatus();
+  refreshCodexRuntimeStatus();
   const codexAuthTimer = setInterval(refreshCodexAuthStatus, 60_000);
+  const codexRuntimeTimer = setInterval(refreshCodexRuntimeStatus, 60_000);
   reconcileUnfinishedReceipts();
   dockerResilience.init(() => queue.getActiveContainerNames());
   capabilityProbe.start();
@@ -1460,6 +1676,7 @@ async function main(): Promise<void> {
     capabilityProbe.stop();
     dockerResilience.stop();
     clearInterval(codexAuthTimer);
+    clearInterval(codexRuntimeTimer);
 
     // 3. Kill ALL orphan nanoclaw-* agent containers so Docker network can be freed
     try {
@@ -1644,6 +1861,12 @@ async function main(): Promise<void> {
     getDlqStats: () => getDlqCounts(),
     getCapabilityHealth: () => capabilityProbe.getState(),
     getCodexAuthStatus: () => codexAuthStatus,
+    getCodexRuntimeStatus: () => codexRuntimeStatus,
+    getCodexMetrics: () => ({
+      invocations: codexMetrics.invocations,
+      fallbackToFonCount: codexMetrics.fallbackToFonCount,
+      failuresByReason: { ...codexMetrics.failuresByReason },
+    }),
     getUptimeMs: () => Date.now() - appStartTime,
   });
   setOpsProvider({

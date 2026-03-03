@@ -61,10 +61,17 @@ interface SDKUserMessage {
   session_id: string;
 }
 
+type AgentRuntime = 'fon' | 'codex';
+
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_PROMPT_FILE = path.join(IPC_INPUT_DIR, '_prompt.txt');
 const IPC_POLL_MS = 500;
+
+const GLOBAL_SOUL_DEFAULT_FILE = '/workspace/global/SOUL.md';
+const GLOBAL_SOUL_FON_FILE = '/workspace/global/SOUL_FON.md';
+const GLOBAL_SOUL_CODEX_FILE = '/workspace/global/SOUL_CODEX.md';
+const GLOBAL_CLAUDE_FILE = '/workspace/global/CLAUDE.md';
 
 // ── External MCP server config ──────────────────────────────────────────────
 // Add entries to /app/config/mcps.json (rebuild image to pick up new installs).
@@ -684,6 +691,36 @@ function waitForIpcMessage(): Promise<string | null> {
   });
 }
 
+function resolveSoulFileForRuntime(runtime: AgentRuntime): string {
+  const preferred = runtime === 'codex' ? GLOBAL_SOUL_CODEX_FILE : GLOBAL_SOUL_FON_FILE;
+  if (fs.existsSync(preferred)) {
+    return preferred;
+  }
+  return GLOBAL_SOUL_DEFAULT_FILE;
+}
+
+function loadRuntimeSoulContext(
+  runtime: AgentRuntime,
+  isMain: boolean,
+): { filePath?: string; content?: string } {
+  if (isMain) return {};
+
+  const filePath = resolveSoulFileForRuntime(runtime);
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+
+  try {
+    return {
+      filePath,
+      content: fs.readFileSync(filePath, 'utf-8'),
+    };
+  } catch (err) {
+    log(`Failed to read runtime soul file (${filePath}): ${err instanceof Error ? err.message : String(err)}`);
+    return {};
+  }
+}
+
 /**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
@@ -695,6 +732,7 @@ async function runQuery(
   sessionId: string | undefined,
   mcpServerPath: string,
   containerInput: ContainerInput,
+  runtime: AgentRuntime,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
@@ -727,17 +765,14 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
-  // Load global personality files (shared across all groups)
-  // Priority: SOUL.md (identity/personality) → CLAUDE.md (capabilities/tools)
-  const globalFiles = [
-    '/workspace/global/SOUL.md',
-    '/workspace/global/CLAUDE.md',
-  ];
   const globalContext: string[] = [];
-  for (const filePath of globalFiles) {
-    if (!containerInput.isMain && fs.existsSync(filePath)) {
-      globalContext.push(fs.readFileSync(filePath, 'utf-8'));
-    }
+  const runtimeSoul = loadRuntimeSoulContext(runtime, containerInput.isMain);
+  if (runtimeSoul.content) {
+    globalContext.push(runtimeSoul.content);
+    log(`Loaded runtime soul file: ${runtimeSoul.filePath}`);
+  }
+  if (!containerInput.isMain && fs.existsSync(GLOBAL_CLAUDE_FILE)) {
+    globalContext.push(fs.readFileSync(GLOBAL_CLAUDE_FILE, 'utf-8'));
   }
   const globalAppendBase = globalContext.length > 0 ? globalContext.join('\n\n---\n\n') : undefined;
 
@@ -795,6 +830,9 @@ async function runQuery(
     }`,
     containerInput.agentMode === 'swarm'
       ? '- Swarm mode active: for heavy coding/research sub-tasks, use mcp__nanoclaw__delegate_to_codex.'
+      : null,
+    containerInput.agentMode === 'swarm'
+      ? '- delegate_to_codex returns a JSON envelope (version, task_id, status, result). Parse it before user-facing summaries.'
       : null,
     'Important: configured-to-load does not guarantee successful MCP handshake. If tool/function list in-session is missing a configured MCP, explicitly report it as configured but currently unavailable.',
   ].filter((v): v is string => Boolean(v)).join('\n');
@@ -1042,15 +1080,97 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
-  const runtime = containerInput.agentRuntime === 'codex' ? 'codex' : 'fon';
+  const runtime: AgentRuntime = containerInput.agentRuntime === 'codex' ? 'codex' : 'fon';
   if (runtime === 'codex') {
     const codexModel = process.env.CODEX_MODEL || 'gpt-5.3-codex';
     const codexTimeoutMs = Number.parseInt(process.env.CODEX_EXEC_TIMEOUT_MS || '600000', 10);
+    const runtimeSoul = loadRuntimeSoulContext(runtime, containerInput.isMain);
+    const resolvedOraclePolicy = resolveOracleWritePolicy(
+      containerInput.groupFolder,
+      containerInput.isMain,
+    );
+    const externalMcpEvaluations = evaluateExternalMcpServers(
+      sdkEnv,
+      containerInput.groupFolder,
+    );
+    const activeExternal = externalMcpEvaluations.filter((e) => e.active);
+    const inactiveExternal = externalMcpEvaluations.filter((e) => !e.active);
+    const externalMcpServers = buildExternalMcpServers(externalMcpEvaluations, sdkEnv);
+
+    const codexMcpEnv: Record<string, string> = {
+      ORACLE_API_URL: sdkEnv.ORACLE_API_URL || 'http://oracle:47778',
+      ORACLE_AUTH_TOKEN: sdkEnv.ORACLE_AUTH_TOKEN || '',
+      ORACLE_WRITE_MODE: resolvedOraclePolicy.mode,
+      ORACLE_ALLOWED_WRITE_TOOLS: resolvedOraclePolicy.allow.join(','),
+      ORACLE_POLICY_GROUP: containerInput.groupFolder,
+      NANOCLAW_CHAT_JID: containerInput.chatJid,
+      NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+      NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+    };
+    for (const server of Object.values(externalMcpServers)) {
+      for (const [key, value] of Object.entries(server.env || {})) {
+        codexMcpEnv[key] = value;
+      }
+    }
+
+    const codexMcpServers = {
+      nanoclaw: {
+        command: 'node',
+        args: [mcpServerPath],
+      },
+      oracle: {
+        command: 'node',
+        args: [path.join(__dirname, 'oracle-mcp-http.js')],
+      },
+      ...Object.fromEntries(
+        Object.entries(externalMcpServers).map(([name, server]) => [
+          name,
+          {
+            command: server.command,
+            args: server.args,
+          },
+        ]),
+      ),
+    };
+
+    const codexMcpContract = [
+      'Tooling contract for this Codex run:',
+      '- Oracle MCP is the primary memory brain. Before answering identity/history/preferences, query Oracle MCP first.',
+      '- Use nanoclaw MCP for agent mode/state helpers when needed.',
+      `- External MCP configured-to-load: ${
+        activeExternal.length > 0
+          ? activeExternal.map((e) => e.server.name).join(', ')
+          : '(none)'
+      }`,
+      `- External MCP not configured-to-load: ${
+        inactiveExternal.length > 0
+          ? inactiveExternal.map((e) => `${e.server.name} (${e.reason})`).join(', ')
+          : '(none)'
+      }`,
+      'If a requested MCP tool is unavailable in-session, say so explicitly and continue with best fallback.',
+    ].join('\n');
+
+    const codexPromptBody = `${codexMcpContract}\n\n---\n\n${prompt}`;
+    const codexPrompt = runtimeSoul.content
+      ? `Follow this identity file before answering:\n\n${runtimeSoul.content}\n\n---\n\n${codexPromptBody}`
+      : codexPromptBody;
+    if (runtimeSoul.filePath) {
+      log(`Loaded runtime soul file: ${runtimeSoul.filePath}`);
+    }
+    log(
+      `Codex MCP active ${activeExternal.length}/${externalMcpEvaluations.length} external servers`,
+    );
     log(`Running Codex runtime (model=${codexModel})`);
-    const codexResult = await runCodexPrompt(prompt, {
+    const codexResult = await runCodexPrompt(codexPrompt, {
       model: codexModel,
       timeoutMs: Number.isFinite(codexTimeoutMs) ? codexTimeoutMs : 600000,
       cwd: '/workspace/group',
+      env: {
+        ...sdkEnv,
+        ...codexMcpEnv,
+      },
+      mcpServers: codexMcpServers,
+      log,
     });
     writeOutput({
       status: codexResult.status,
@@ -1069,7 +1189,15 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(
+        prompt,
+        sessionId,
+        mcpServerPath,
+        containerInput,
+        runtime,
+        sdkEnv,
+        resumeAt,
+      );
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }

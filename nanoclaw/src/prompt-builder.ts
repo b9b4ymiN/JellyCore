@@ -1,5 +1,5 @@
 ﻿/**
- * Prompt Builder - Compact Context Injection (v0.8.0)
+ * Prompt Builder - Compact Context Injection (v0.9.0)
  *
  * Builds a compact <ctx> block from Oracle memory layers.
  * Budget target: <=600 tokens (~2400 chars).
@@ -14,6 +14,7 @@ const USER_MODEL_CHAR_LIMIT = 500;
 const PROCEDURAL_CHAR_LIMIT = 600;
 const EPISODES_CHAR_LIMIT = 600;
 const KNOWLEDGE_CHAR_LIMIT = 700;
+const WORKING_SUMMARY_CHAR_LIMIT = 500;
 const TOTAL_CHAR_LIMIT = 2400;
 const ORACLE_TIMEOUT_MS = 3000;
 
@@ -22,6 +23,7 @@ export interface CompactContext {
   proceduralGuidance: string;
   recentEpisodes: string;
   relevantKnowledge: string;
+  workingSummary: string;
   tokenEstimate: number;
   fromCache: boolean;
 }
@@ -251,6 +253,11 @@ function truncate(text: string, limit: number): string {
   return text.length > limit ? text.slice(0, limit) : text;
 }
 
+function normalizeWorkingSummary(summary: string | undefined): string {
+  if (!summary) return '';
+  return truncate(summary.replace(/\s+/g, ' ').trim(), WORKING_SUMMARY_CHAR_LIMIT);
+}
+
 function hashKey(text: string): string {
   return createHash('sha1').update(text).digest('hex').slice(0, 10);
 }
@@ -268,7 +275,8 @@ function enforceTotalBudget(context: Omit<CompactContext, 'tokenEstimate' | 'fro
   const current = context.userModel.length
     + context.proceduralGuidance.length
     + context.recentEpisodes.length
-    + context.relevantKnowledge.length;
+    + context.relevantKnowledge.length
+    + context.workingSummary.length;
 
   if (current <= TOTAL_CHAR_LIMIT) return context;
 
@@ -287,6 +295,7 @@ function enforceTotalBudget(context: Omit<CompactContext, 'tokenEstimate' | 'fro
     ...context,
     relevantKnowledge: trimField(context.relevantKnowledge, 180),
     recentEpisodes: trimField(context.recentEpisodes, 180),
+    workingSummary: trimField(context.workingSummary, 160),
     proceduralGuidance: trimField(context.proceduralGuidance, 180),
     userModel: trimField(context.userModel, 120),
   };
@@ -312,9 +321,11 @@ export class PromptBuilder {
     latestUserMessage: string,
     groupId: string,
     userId: string = 'default',
+    workingSummary?: string,
   ): Promise<CompactContext> {
     const normalizedMsg = latestUserMessage.trim().toLowerCase();
-    const cacheKey = `ctx:${groupId}:${userId}:${hashKey(normalizedMsg)}`;
+    const normalizedWorkingSummary = normalizeWorkingSummary(workingSummary);
+    const cacheKey = `ctx:${groupId}:${userId}:${hashKey(`${normalizedMsg}|${normalizedWorkingSummary}`)}`;
     const cached = this.cache.get(cacheKey);
     if (cached) return { ...cached, fromCache: true };
 
@@ -336,12 +347,14 @@ export class PromptBuilder {
         proceduralGuidance,
         recentEpisodes,
         relevantKnowledge,
+        workingSummary: normalizedWorkingSummary,
       });
 
       const totalChars = budgeted.userModel.length
         + budgeted.proceduralGuidance.length
         + budgeted.recentEpisodes.length
-        + budgeted.relevantKnowledge.length;
+        + budgeted.relevantKnowledge.length
+        + budgeted.workingSummary.length;
 
       const context: CompactContext = {
         ...budgeted,
@@ -359,7 +372,8 @@ export class PromptBuilder {
         proceduralGuidance: '',
         recentEpisodes: '',
         relevantKnowledge: '',
-        tokenEstimate: 0,
+        workingSummary: normalizedWorkingSummary,
+        tokenEstimate: Math.ceil(normalizedWorkingSummary.length / 4),
         fromCache: false,
       };
     }
@@ -372,6 +386,7 @@ export class PromptBuilder {
     if (ctx.proceduralGuidance) sections.push(`<procedural>\n${ctx.proceduralGuidance}\n</procedural>`);
     if (ctx.recentEpisodes) sections.push(`<recent>\n${ctx.recentEpisodes}\n</recent>`);
     if (ctx.relevantKnowledge) sections.push(`<knowledge>\n${ctx.relevantKnowledge}\n</knowledge>`);
+    if (ctx.workingSummary) sections.push(`<working>${ctx.workingSummary}</working>`);
 
     if (sections.length === 0) return '';
     return `<ctx>\n${sections.join('\n')}\n</ctx>`;

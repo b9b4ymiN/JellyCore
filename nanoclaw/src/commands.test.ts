@@ -3,6 +3,17 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { vi } from 'vitest';
+
+vi.mock('./codex-runtime.js', () => ({
+  evaluateCodexRuntimeStatus: () => ({
+    ready: false,
+    reason: 'image_not_found',
+    checkedAt: new Date().toISOString(),
+    image: 'nanoclaw-agent:latest',
+  }),
+}));
+
 import { _initTestDatabase, getGroupAgentModeOverride, getGlobalAgentModeDefault } from './db.js';
 import { classifyQuery } from './query-router.js';
 import { handleInline, InlineResult, TELEGRAM_COMMANDS } from './inline-handler.js';
@@ -118,6 +129,7 @@ describe('/mode command', () => {
     expect(result).toContain('Agent mode status');
     expect(result).toContain('effective:');
     expect(result).toContain('codex_auth_ready:');
+    expect(result).toContain('codex_runtime_ready:');
   });
 
   it('sets group mode to off', () => {

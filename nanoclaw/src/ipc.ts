@@ -35,6 +35,7 @@ import { logger } from './logger.js';
 import { RegisteredGroup, HeartbeatJob } from './types.js';
 import type { AgentMode } from './agents/types.js';
 import { evaluateCodexAuthStatus } from './codex-auth.js';
+import { evaluateCodexRuntimeStatus } from './codex-runtime.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -68,6 +69,8 @@ function codexModeBlockedReason(mode: AgentMode): string | null {
   if (!AGENT_CODEX_ENABLED) return 'AGENT_CODEX_ENABLED=false';
   const status = evaluateCodexAuthStatus();
   if (!status.ready) return `codex_auth_blocked:${status.reason || 'unknown'}`;
+  const runtime = evaluateCodexRuntimeStatus();
+  if (!runtime.ready) return `codex_runtime_blocked:${runtime.reason || 'unknown'}`;
   return null;
 }
 
@@ -697,7 +700,7 @@ export async function processTaskIpc(
       if (mode !== 'off') {
         const blocked = codexModeBlockedReason(mode);
         if (blocked) {
-          logger.warn({ sourceGroup, mode, blocked }, 'codex_auth_blocked');
+          logger.warn({ sourceGroup, mode, blocked }, 'codex_mode_blocked');
           break;
         }
       }
@@ -716,7 +719,7 @@ export async function processTaskIpc(
       if (mode !== 'off') {
         const blocked = codexModeBlockedReason(mode);
         if (blocked) {
-          logger.warn({ sourceGroup, mode, blocked }, 'codex_auth_blocked');
+          logger.warn({ sourceGroup, mode, blocked }, 'codex_mode_blocked');
           break;
         }
       }

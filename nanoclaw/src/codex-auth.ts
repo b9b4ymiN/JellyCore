@@ -19,6 +19,10 @@ let cachedStatus: CodexAuthStatus = {
   checkedAt: new Date().toISOString(),
 };
 
+function stripUtf8Bom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
+
 function hasRequiredTokens(data: CodexAuthJson): boolean {
   const t = data.tokens;
   return Boolean(
@@ -48,7 +52,8 @@ export function evaluateCodexAuthStatus(): CodexAuthStatus {
   }
 
   try {
-    const parsed = JSON.parse(fs.readFileSync(authFile, 'utf-8')) as CodexAuthJson;
+    const raw = fs.readFileSync(authFile, 'utf-8');
+    const parsed = JSON.parse(stripUtf8Bom(raw)) as CodexAuthJson;
     if (!hasRequiredTokens(parsed)) {
       cachedStatus = { ready: false, reason: 'missing_tokens_fields', checkedAt };
       return cachedStatus;
@@ -64,4 +69,3 @@ export function evaluateCodexAuthStatus(): CodexAuthStatus {
 export function getCodexAuthStatus(): CodexAuthStatus {
   return cachedStatus;
 }
-

@@ -149,6 +149,16 @@ Token-dir layout:
 | `google_docs` | Google Docs, Sheets, Drive tools | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, OAuth `token.json` |
 
 Google Docs token storage in this project:
+
+Easy install (recommended):
+- Put token in shared bootstrap path:
+  - no profile: `data/google-docs-auth/token.json`
+  - profile `main`: `data/google-docs-auth/main/token.json`
+- NanoClaw auto-copies this token into each group session namespace at runtime.
+- BOM-safe: UTF-8 BOM is stripped automatically during sync/startup.
+- Optional override path: `GOOGLE_DOCS_AUTH_PATH` (default `data/google-docs-auth`)
+
+Session runtime path (resolved after bootstrap copy):
 - Without `GOOGLE_MCP_PROFILE`:
   - Inside agent container: `/home/node/.claude/config/google-docs-mcp/token.json`
   - Host-side persistent path (inside `jellycore-nanoclaw` container volume): `/app/nanoclaw/data/sessions/<group-folder>/.claude/config/google-docs-mcp/token.json`

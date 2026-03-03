@@ -12,15 +12,18 @@ import {
   getNewMessages,
   getGroupAgentModeOverride,
   getGlobalAgentModeDefault,
+  getRuntimeWorkingMemory,
   getSession,
   getSessionAge,
   getTaskById,
   ensureMessageReceipt,
   clearGroupAgentModeOverride,
+  clearRuntimeWorkingMemory,
   clearSession,
   resolveAgentMode,
   setGlobalAgentModeDefault,
   setGroupAgentModeOverride,
+  setRuntimeWorkingMemory,
   setSession,
   storeChatMetadata,
   storeMessage,
@@ -560,5 +563,35 @@ describe('agent mode persistence', () => {
     clearGroupAgentModeOverride('team-a');
     expect(getGroupAgentModeOverride('team-a')).toBeUndefined();
     expect(resolveAgentMode('team-a')).toBe('codex');
+  });
+});
+
+describe('runtime working memory', () => {
+  it('stores and retrieves per runtime key', () => {
+    setRuntimeWorkingMemory('team-a', 'codex', 'codex-summary-v1');
+    setRuntimeWorkingMemory('team-a', 'fon', 'fon-summary-v1');
+
+    expect(getRuntimeWorkingMemory('team-a', 'codex')).toBe('codex-summary-v1');
+    expect(getRuntimeWorkingMemory('team-a', 'fon')).toBe('fon-summary-v1');
+  });
+
+  it('clears specific runtime without touching others', () => {
+    setRuntimeWorkingMemory('team-a', 'codex', 'codex-summary-v1');
+    setRuntimeWorkingMemory('team-a', 'fon', 'fon-summary-v1');
+
+    clearRuntimeWorkingMemory('team-a', 'codex');
+
+    expect(getRuntimeWorkingMemory('team-a', 'codex')).toBeUndefined();
+    expect(getRuntimeWorkingMemory('team-a', 'fon')).toBe('fon-summary-v1');
+  });
+
+  it('clears all runtime summaries for a group', () => {
+    setRuntimeWorkingMemory('team-a', 'codex', 'codex-summary-v1');
+    setRuntimeWorkingMemory('team-a', 'fon', 'fon-summary-v1');
+
+    clearRuntimeWorkingMemory('team-a');
+
+    expect(getRuntimeWorkingMemory('team-a', 'codex')).toBeUndefined();
+    expect(getRuntimeWorkingMemory('team-a', 'fon')).toBeUndefined();
   });
 });

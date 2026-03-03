@@ -12,6 +12,10 @@ data/
 # Codex ChatGPT login auth (defense-in-depth: keep explicit even though data/ is ignored)
 data/codex-auth/auth.json
 data/codex-auth/*.json
+data/google-docs-auth/token.json
+data/google-docs-auth/*/token.json
+nanoclaw/data/sessions/*/.claude/config/google-docs-mcp/token.json
+nanoclaw/data/sessions/*/.claude/config/google-docs-mcp/*/token.json
 
 # ── Dependencies ─────────────────────────────
 node_modules/

@@ -79,6 +79,8 @@ export interface StatusProvider {
   getDlqStats?: () => { open24h: number; open1h: number; retrying: number };
   getCapabilityHealth?: () => unknown;
   getCodexAuthStatus?: () => unknown;
+  getCodexRuntimeStatus?: () => unknown;
+  getCodexMetrics?: () => unknown;
   getUptimeMs: () => number;
 }
 
@@ -155,10 +157,29 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
 // â”€â”€ /health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function handleHealth(_req: http.IncomingMessage, res: http.ServerResponse): void {
+  const codexAuth = statusProvider?.getCodexAuthStatus
+    ? statusProvider.getCodexAuthStatus() as { ready?: boolean } | null
+    : null;
+  const codexRuntime = statusProvider?.getCodexRuntimeStatus
+    ? statusProvider.getCodexRuntimeStatus() as {
+        ready?: boolean;
+        reason?: string;
+        imageRevision?: string;
+      } | null
+    : null;
+
   json(res, 200, {
     status: 'ok',
     uptime: Math.floor((Date.now() - startTime) / 1000),
     version: VERSION,
+    agent: {
+      codex: {
+        auth_ready: Boolean(codexAuth?.ready),
+        runtime_ready: Boolean(codexRuntime?.ready),
+        runtime_reason: codexRuntime?.reason || null,
+        image_revision: codexRuntime?.imageRevision || null,
+      },
+    },
     timestamp: new Date().toISOString(),
   });
 }
@@ -177,6 +198,8 @@ function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): voi
         dlq: statusProvider.getDlqStats ? statusProvider.getDlqStats() : null,
         capabilities: statusProvider.getCapabilityHealth ? statusProvider.getCapabilityHealth() : null,
         codexAuth: statusProvider.getCodexAuthStatus ? statusProvider.getCodexAuthStatus() : null,
+        codexRuntime: statusProvider.getCodexRuntimeStatus ? statusProvider.getCodexRuntimeStatus() : null,
+        codexMetrics: statusProvider.getCodexMetrics ? statusProvider.getCodexMetrics() : null,
       }
     : {
         activeContainers: 0,
@@ -188,6 +211,8 @@ function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): voi
         dlq: null,
         capabilities: null,
         codexAuth: null,
+        codexRuntime: null,
+        codexMetrics: null,
       };
 
   json(res, 200, {

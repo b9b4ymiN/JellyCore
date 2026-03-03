@@ -26,6 +26,7 @@ const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 const AGENT_MODES_FILE = path.join(IPC_DIR, 'agent_modes.json');
 const CODEX_AUTH_FILE = '/home/node/.codex/auth.json';
+const CODEX_RUNNER_DIST_FILE = '/app/dist/codex-runner.js';
 
 /**
  * Sign an IPC payload with HMAC-SHA256.
@@ -62,6 +63,15 @@ interface LocalCodexAuthStatus {
   reason?: 'missing_auth_file' | 'invalid_json' | 'missing_tokens_fields';
 }
 
+interface LocalCodexRuntimeStatus {
+  ready: boolean;
+  reason?: 'runner_missing_skip_git_repo_check' | 'runner_missing_json_parser' | 'runner_file_missing';
+}
+
+function stripUtf8Bom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
+
 function parseAgentMode(mode: string | undefined): AgentMode | null {
   if (!mode) return null;
   const v = mode.trim().toLowerCase();
@@ -75,7 +85,8 @@ function getCodexAuthStatusLocal(): LocalCodexAuthStatus {
   }
 
   try {
-    const parsed = JSON.parse(fs.readFileSync(CODEX_AUTH_FILE, 'utf-8')) as {
+    const raw = fs.readFileSync(CODEX_AUTH_FILE, 'utf-8');
+    const parsed = JSON.parse(stripUtf8Bom(raw)) as {
       tokens?: {
         access_token?: string;
         refresh_token?: string;
@@ -100,6 +111,25 @@ function getCodexAuthStatusLocal(): LocalCodexAuthStatus {
     return { ready: true };
   } catch {
     return { ready: false, reason: 'invalid_json' };
+  }
+}
+
+function getCodexRuntimeStatusLocal(): LocalCodexRuntimeStatus {
+  if (!fs.existsSync(CODEX_RUNNER_DIST_FILE)) {
+    return { ready: false, reason: 'runner_file_missing' };
+  }
+
+  try {
+    const content = fs.readFileSync(CODEX_RUNNER_DIST_FILE, 'utf-8');
+    if (!content.includes('--skip-git-repo-check')) {
+      return { ready: false, reason: 'runner_missing_skip_git_repo_check' };
+    }
+    if (!content.includes('item.completed')) {
+      return { ready: false, reason: 'runner_missing_json_parser' };
+    }
+    return { ready: true };
+  } catch {
+    return { ready: false, reason: 'runner_file_missing' };
   }
 }
 
@@ -158,7 +188,7 @@ server.tool(
 
 server.tool(
   'get_agent_mode',
-  'Read current agent mode state (effective mode for current/target group, global default, and local Codex auth readiness).',
+  'Read current agent mode state (effective mode for current/target group, global default, and local Codex auth/runtime readiness).',
   {
     target_group_folder: z.string().optional().describe('Optional group folder to inspect. Defaults to current group.'),
   },
@@ -166,6 +196,7 @@ server.tool(
     const targetGroup = args.target_group_folder?.trim() || groupFolder;
     const snapshot = readAgentModeSnapshot();
     const auth = getCodexAuthStatusLocal();
+    const runtime = getCodexRuntimeStatusLocal();
     const effective = resolveEffectiveMode(snapshot, targetGroup);
     const override = snapshot.overrides[targetGroup] || null;
 
@@ -177,6 +208,8 @@ server.tool(
       group_override: override,
       codex_auth_ready: auth.ready,
       codex_auth_reason: auth.reason || null,
+      codex_runtime_ready: runtime.ready,
+      codex_runtime_reason: runtime.reason || null,
       overrides_count: Object.keys(snapshot.overrides).length,
     };
 
@@ -210,6 +243,13 @@ server.tool(
           isError: true,
         };
       }
+      const runtime = getCodexRuntimeStatusLocal();
+      if (!runtime.ready) {
+        return {
+          content: [{ type: 'text' as const, text: `Cannot enable ${args.mode}: codex_runtime_blocked:${runtime.reason || 'unknown'}` }],
+          isError: true,
+        };
+      }
     }
 
     const targetGroup = args.target_group_folder?.trim() || groupFolder;
@@ -239,8 +279,9 @@ server.tool(
 
 server.tool(
   'delegate_to_codex',
-  'Delegate a complex coding/research sub-task to Codex CLI and return its result.',
+  'Delegate a complex coding/research sub-task to Codex CLI and return a structured result envelope.',
   {
+    task_id: z.string().optional().describe('Optional caller-defined task id for traceability.'),
     task: z.string().describe('Task for Codex to execute.'),
     context: z.string().optional().describe('Optional supporting context/instructions.'),
     model: z.string().optional().describe('Optional Codex model override.'),
@@ -249,14 +290,27 @@ server.tool(
   async (args) => {
     const model = args.model?.trim() || process.env.CODEX_MODEL || 'gpt-5.3-codex';
     const timeoutMs = args.timeout_ms ?? Number.parseInt(process.env.CODEX_EXEC_TIMEOUT_MS || '600000', 10);
+    const taskId = args.task_id?.trim() || `deleg-${Date.now()}`;
+    const packet = {
+      version: 1,
+      task_id: taskId,
+      source_runtime: 'fon',
+      target_runtime: 'codex',
+      group_folder: groupFolder,
+      chat_jid: chatJid,
+      requested_at: new Date().toISOString(),
+      task: args.task.trim(),
+      context: args.context?.trim() || '',
+    };
     const prompt = [
       'You are delegated by Fon to complete this sub-task.',
+      'Follow the packet metadata and keep the output deterministic.',
       '',
-      'Task:',
-      args.task.trim(),
-      args.context?.trim() ? `\nContext:\n${args.context.trim()}` : '',
+      'Delegation packet (JSON):',
+      JSON.stringify(packet, null, 2),
       '',
-      'Return a concise, actionable result.',
+      'Return a concise, actionable result in JSON with fields:',
+      '{ "status": "success|error", "summary": "...", "details": "...", "next_actions": ["..."] }',
     ].join('\n');
 
     const result = await runCodexPrompt(prompt, {
@@ -266,14 +320,32 @@ server.tool(
     });
 
     if (result.status === 'error') {
+      const errorPayload = {
+        version: 1,
+        task_id: taskId,
+        runtime: 'codex',
+        model,
+        status: 'error',
+        error: result.error || 'unknown_error',
+      };
       return {
-        content: [{ type: 'text' as const, text: `Codex delegation failed: ${result.error || 'unknown_error'}` }],
+        content: [{ type: 'text' as const, text: JSON.stringify(errorPayload) }],
         isError: true,
       };
     }
 
+    const successPayload = {
+      version: 1,
+      task_id: taskId,
+      runtime: 'codex',
+      model,
+      status: 'success',
+      result: result.result || '(no output)',
+      completed_at: new Date().toISOString(),
+    };
+
     return {
-      content: [{ type: 'text' as const, text: result.result || '(no output)' }],
+      content: [{ type: 'text' as const, text: JSON.stringify(successPayload) }],
     };
   },
 );

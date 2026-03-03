@@ -88,6 +88,8 @@ services:
       - nanoclaw-data:/app/nanoclaw/data
       # Codex auth.json from ChatGPT login (required for codex/swarm modes)
       - ./data/codex-auth:/app/nanoclaw/data/codex-auth:ro
+      # Optional shared Google Docs MCP token bootstrap
+      - ./data/google-docs-auth:/app/nanoclaw/data/google-docs-auth:ro
       # Group workspaces (shared with agent containers)
       - ./groups:/app/nanoclaw/groups
     environment:

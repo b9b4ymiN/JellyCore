@@ -14,6 +14,7 @@ import {
   CONTAINER_TIMEOUT,
   CODEX_AUTH_PATH,
   DATA_DIR,
+  GOOGLE_DOCS_AUTH_PATH,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   IPC_SECRET,
@@ -61,7 +62,26 @@ interface DockerMount {
   Destination: string; // Container path
 }
 
+interface ContainerImageInspect {
+  Id?: string;
+  Created?: string;
+  Config?: {
+    Labels?: Record<string, string>;
+  };
+}
+
+interface ContainerImageMetadata {
+  image: string;
+  checkedAt: string;
+  imageId?: string;
+  imageCreated?: string;
+  imageRevision?: string;
+  inspectError?: string;
+}
+
 let cachedMounts: DockerMount[] | null = null;
+let cachedImageMetadata: ContainerImageMetadata | null = null;
+let cachedImageMetadataAt = 0;
 
 function loadContainerMounts(): DockerMount[] {
   if (cachedMounts) return cachedMounts;
@@ -135,6 +155,42 @@ export interface ContainerInput {
   secrets?: Record<string, string>;
 }
 
+function getContainerImageMetadata(): ContainerImageMetadata {
+  const now = Date.now();
+  if (cachedImageMetadata && now - cachedImageMetadataAt < 30_000) {
+    return cachedImageMetadata;
+  }
+
+  const base: ContainerImageMetadata = {
+    image: CONTAINER_IMAGE,
+    checkedAt: new Date().toISOString(),
+  };
+
+  try {
+    const raw = execSync(`docker image inspect ${CONTAINER_IMAGE}`, {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const parsed = JSON.parse(raw) as ContainerImageInspect[];
+    const inspected = parsed[0];
+    cachedImageMetadata = {
+      ...base,
+      imageId: inspected?.Id,
+      imageCreated: inspected?.Created,
+      imageRevision: inspected?.Config?.Labels?.['org.opencontainers.image.revision'],
+    };
+  } catch (err) {
+    cachedImageMetadata = {
+      ...base,
+      inspectError: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  cachedImageMetadataAt = now;
+  return cachedImageMetadata;
+}
+
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
@@ -161,6 +217,156 @@ function copyDirectoryRecursive(srcDir: string, dstDir: string): void {
       fs.copyFileSync(srcPath, dstPath);
     }
   }
+}
+
+function stripUtf8Bom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
+
+function readJsonFileNormalized(filePath: string): { ok: true; normalized: string } | { ok: false } {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const normalized = stripUtf8Bom(raw);
+    JSON.parse(normalized);
+    return { ok: true, normalized };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function resolveCodexBootstrapAuthFile(): string | undefined {
+  const candidate = path.join(CODEX_AUTH_PATH, 'auth.json');
+  if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+    return candidate;
+  }
+  return undefined;
+}
+
+function syncCodexBootstrapAuth(
+  groupCodexHomeDir: string,
+  groupFolder: string,
+): boolean {
+  const sourceAuth = resolveCodexBootstrapAuthFile();
+  if (!sourceAuth) return false;
+
+  fs.mkdirSync(groupCodexHomeDir, { recursive: true });
+  try { fs.chmodSync(groupCodexHomeDir, 0o777); } catch { /* best-effort on Windows */ }
+
+  const destinationAuth = path.join(groupCodexHomeDir, 'auth.json');
+  const sourceParsed = readJsonFileNormalized(sourceAuth);
+  if (!sourceParsed.ok) {
+    logger.warn(
+      {
+        group: groupFolder,
+        sourceAuth,
+      },
+      'Skipped codex auth sync: source auth.json is invalid JSON',
+    );
+    return false;
+  }
+
+  let shouldCopy = true;
+  try {
+    if (fs.existsSync(destinationAuth)) {
+      const destinationParsed = readJsonFileNormalized(destinationAuth);
+      if (destinationParsed.ok) {
+        const sourceMtime = fs.statSync(sourceAuth).mtimeMs;
+        const destinationMtime = fs.statSync(destinationAuth).mtimeMs;
+        // Keep runtime-refreshed tokens unless user replaced source auth.json.
+        shouldCopy = sourceMtime > destinationMtime + 500;
+      }
+    }
+  } catch {
+    shouldCopy = true;
+  }
+
+  if (!shouldCopy) return true;
+
+  fs.writeFileSync(destinationAuth, sourceParsed.normalized, {
+    encoding: 'utf-8',
+  });
+  try { fs.chmodSync(destinationAuth, 0o600); } catch { /* best-effort on Windows */ }
+  logger.info(
+    {
+      group: groupFolder,
+      sourceAuth,
+      destinationAuth,
+    },
+    'Synced codex auth.json from shared auth path',
+  );
+  return true;
+}
+
+function resolveGoogleDocsBootstrapToken(profile: string): string | undefined {
+  const candidates = profile
+    ? [
+        path.join(GOOGLE_DOCS_AUTH_PATH, profile, 'token.json'),
+        path.join(GOOGLE_DOCS_AUTH_PATH, 'token.json'),
+      ]
+    : [path.join(GOOGLE_DOCS_AUTH_PATH, 'token.json')];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function syncGoogleDocsBootstrapToken(
+  groupSessionsDir: string,
+  groupFolder: string,
+): void {
+  const profile = (process.env.GOOGLE_MCP_PROFILE || '').trim();
+  const sourceToken = resolveGoogleDocsBootstrapToken(profile);
+  if (!sourceToken) return;
+
+  const destinationDir = profile
+    ? path.join(groupSessionsDir, 'config', 'google-docs-mcp', profile)
+    : path.join(groupSessionsDir, 'config', 'google-docs-mcp');
+  const destinationToken = path.join(destinationDir, 'token.json');
+  fs.mkdirSync(destinationDir, { recursive: true });
+
+  const sourceParsed = readJsonFileNormalized(sourceToken);
+  if (!sourceParsed.ok) {
+    logger.warn(
+      {
+        group: groupFolder,
+        sourceToken,
+        profile: profile || null,
+      },
+      'Skipped google_docs token sync: source token.json is invalid JSON',
+    );
+    return;
+  }
+
+  let shouldCopy = true;
+  try {
+    if (fs.existsSync(destinationToken)) {
+      const destinationParsed = readJsonFileNormalized(destinationToken);
+      if (destinationParsed.ok) {
+        shouldCopy = sourceParsed.normalized !== destinationParsed.normalized;
+      }
+    }
+  } catch {
+    shouldCopy = true;
+  }
+
+  if (!shouldCopy) return;
+
+  fs.writeFileSync(destinationToken, sourceParsed.normalized, {
+    encoding: 'utf-8',
+  });
+  try { fs.chmodSync(destinationToken, 0o600); } catch { /* best-effort on Windows */ }
+  logger.info(
+    {
+      group: groupFolder,
+      sourceToken,
+      destinationToken,
+      profile: profile || null,
+    },
+    'Synced google_docs token.json from shared auth path',
+  );
 }
 
 function buildVolumeMounts(
@@ -309,20 +515,26 @@ function buildVolumeMounts(
     }
   }
 
+  // Optional Google Docs MCP token bootstrap:
+  // If shared token exists in data/google-docs-auth, copy it into this group's
+  // session namespace so users don't need per-group manual placement.
+  syncGoogleDocsBootstrapToken(groupSessionsDir, group.folder);
+
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
     readonly: false,
   });
 
-  // Optional Codex auth mount (read-only). Codex path is required only when
-  // codex runtime is selected, but mounting here keeps run args deterministic.
-  const codexAuthFile = path.join(CODEX_AUTH_PATH, 'auth.json');
-  if (fs.existsSync(codexAuthFile)) {
+  // Codex runtime home (writable) + auth bootstrap from shared data/codex-auth/auth.json.
+  // Auth file stays user-provided, while Codex can still write cache/skills metadata.
+  const groupCodexHomeDir = path.join(DATA_DIR, 'sessions', group.folder, '.codex');
+  const hasCodexAuth = syncCodexBootstrapAuth(groupCodexHomeDir, group.folder);
+  if (hasCodexAuth) {
     mounts.push({
-      hostPath: CODEX_AUTH_PATH,
+      hostPath: groupCodexHomeDir,
       containerPath: '/home/node/.codex',
-      readonly: true,
+      readonly: false,
     });
   }
 
@@ -495,6 +707,7 @@ export async function runContainerAgent(
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, group.folder);
+  const imageMeta = getContainerImageMetadata();
 
   logger.debug(
     {
@@ -515,6 +728,11 @@ export async function runContainerAgent(
       containerName,
       mountCount: mounts.length,
       isMain: input.isMain,
+      image: imageMeta.image,
+      imageRevision: imageMeta.imageRevision || null,
+      imageId: imageMeta.imageId || null,
+      imageCreated: imageMeta.imageCreated || null,
+      imageInspectError: imageMeta.inspectError || null,
     },
     'Spawning container agent',
   );
@@ -571,6 +789,7 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let lastStreamError: string | undefined;
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
@@ -608,6 +827,9 @@ export async function runContainerAgent(
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
             }
+            if (parsed.status === 'error' && typeof parsed.error === 'string' && parsed.error.trim().length > 0) {
+              lastStreamError = parsed.error;
+            }
             hadStreamingOutput = true;
             // Activity detected — reset the hard timeout
             resetTimeout();
@@ -632,7 +854,9 @@ export async function runContainerAgent(
         const isMcpRuntimeLine =
           line.includes('[agent-runner] MCP event')
           || line.includes('[agent-runner] External MCP')
-          || line.includes('[agent-runner] Runtime MCP configuration');
+          || line.includes('[agent-runner] Runtime MCP configuration')
+          || line.includes('[agent-runner] Codex MCP active')
+          || line.includes('[agent-runner] Codex MCP config applied');
         if (isMcpRuntimeLine) {
           logger.info({ container: group.folder }, line);
         } else {
@@ -815,7 +1039,9 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+          error: lastStreamError
+            ? `Container exited with code ${code}: ${lastStreamError}`
+            : `Container exited with code ${code}: ${stderr.slice(-200)}`,
         });
         return;
       }

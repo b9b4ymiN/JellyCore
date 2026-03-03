@@ -11,6 +11,7 @@ describe('agent runtime resolver', () => {
       codexEnabled: true,
       swarmEnabled: true,
       codexAuthReady: true,
+      codexRuntimeReady: true,
     });
     expect(resolved.runtime).toBe('fon');
     expect(resolved.reason).toContain('lane_scheduler_forced_fon');
@@ -24,6 +25,7 @@ describe('agent runtime resolver', () => {
       codexEnabled: true,
       swarmEnabled: true,
       codexAuthReady: true,
+      codexRuntimeReady: true,
     });
     expect(resolved.runtime).toBe('fon');
     expect(resolved.reason).toBe('mode_off');
@@ -37,6 +39,7 @@ describe('agent runtime resolver', () => {
       codexEnabled: true,
       swarmEnabled: true,
       codexAuthReady: true,
+      codexRuntimeReady: true,
     });
     expect(resolved.runtime).toBe('codex');
     expect(resolved.allowFallbackToFon).toBe(true);
@@ -51,6 +54,21 @@ describe('agent runtime resolver', () => {
       codexEnabled: true,
       swarmEnabled: true,
       codexAuthReady: false,
+      codexRuntimeReady: true,
+    });
+    expect(resolved.runtime).toBe('fon');
+    expect(resolved.reason).toBe('mode_codex_blocked');
+  });
+
+  it('falls back to Fon when mode=codex but runtime is blocked', () => {
+    const resolved = resolveAgentRuntime({
+      lane: 'user',
+      mode: 'codex',
+      classificationReason: 'general',
+      codexEnabled: true,
+      swarmEnabled: true,
+      codexAuthReady: true,
+      codexRuntimeReady: false,
     });
     expect(resolved.runtime).toBe('fon');
     expect(resolved.reason).toBe('mode_codex_blocked');
@@ -64,6 +82,7 @@ describe('agent runtime resolver', () => {
       codexEnabled: true,
       swarmEnabled: true,
       codexAuthReady: true,
+      codexRuntimeReady: true,
     });
     expect(resolved.runtime).toBe('codex');
     expect(resolved.codexDirectToUser).toBe(true);
@@ -78,6 +97,7 @@ describe('agent runtime resolver', () => {
       codexEnabled: true,
       swarmEnabled: true,
       codexAuthReady: true,
+      codexRuntimeReady: true,
     });
     expect(resolved.runtime).toBe('fon');
     expect(resolved.reason).toBe('mode_swarm_fon_default');
@@ -91,6 +111,7 @@ describe('agent runtime resolver', () => {
       codexEnabled: true,
       swarmEnabled: false,
       codexAuthReady: true,
+      codexRuntimeReady: true,
     });
     expect(resolved.runtime).toBe('fon');
     expect(resolved.reason).toBe('mode_swarm_blocked');

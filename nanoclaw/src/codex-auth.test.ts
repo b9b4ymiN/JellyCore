@@ -58,4 +58,22 @@ describe('codex auth validator', () => {
     expect(status.ready).toBe(true);
     expect(status.reason).toBeUndefined();
   });
+
+  it('accepts UTF-8 BOM prefixed auth.json', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(
+      `\uFEFF${JSON.stringify({
+        tokens: {
+          access_token: 'a',
+          refresh_token: 'b',
+          id_token: 'c',
+          account_id: 'd',
+        },
+      })}` as any,
+    );
+
+    const status = evaluateCodexAuthStatus();
+    expect(status.ready).toBe(true);
+    expect(status.reason).toBeUndefined();
+  });
 });

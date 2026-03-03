@@ -13,6 +13,7 @@ vi.mock('./config.js', () => ({
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   CODEX_AUTH_PATH: '/tmp/nanoclaw-codex-auth',
+  GOOGLE_DOCS_AUTH_PATH: '/tmp/nanoclaw-google-docs-auth',
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
@@ -90,6 +91,19 @@ vi.mock('child_process', async () => {
     exec: vi.fn((_cmd: string, _opts: unknown, cb?: (err: Error | null) => void) => {
       if (cb) cb(null);
       return new EventEmitter();
+    }),
+    execSync: vi.fn((cmd: string) => {
+      if (cmd.includes('docker inspect --format')) return '[]';
+      if (cmd.includes('docker image inspect')) {
+        return JSON.stringify([
+          {
+            Id: 'sha256:test',
+            Created: '2026-03-03T00:00:00Z',
+            Config: { Labels: { 'org.opencontainers.image.revision': 'test' } },
+          },
+        ]);
+      }
+      return '';
     }),
   };
 });

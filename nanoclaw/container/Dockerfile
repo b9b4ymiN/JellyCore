@@ -21,6 +21,11 @@ RUN npm run build
 
 # --- Runtime stage ---
 FROM node:22-slim
+ARG BUILD_DATE=unknown
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.title="nanoclaw-agent" \
+      org.opencontainers.image.created=$BUILD_DATE \
+      org.opencontainers.image.revision=$VCS_REF
 
 # Install system dependencies for Chromium + Python
 RUN apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-recommends \
@@ -126,6 +131,30 @@ set -e
 
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/home/node/.claude/config}"
 mkdir -p "${XDG_CONFIG_HOME}/google-docs-mcp"
+
+sanitize_token_json() {
+  token_path="$1"
+  [ -f "${token_path}" ] || return 1
+
+  bom_hex="$(LC_ALL=C head -c 3 "${token_path}" | od -An -tx1 | tr -d ' \n')"
+  if [ "${bom_hex}" = "efbbbf" ]; then
+    tmp_path="${token_path}.nobom"
+    tail -c +4 "${token_path}" > "${tmp_path}"
+    mv "${tmp_path}" "${token_path}"
+  fi
+
+  if ! node -e "const fs=require('fs'); JSON.parse(fs.readFileSync(process.argv[1],'utf8'));" "${token_path}" >/dev/null 2>&1; then
+    echo "google-docs-mcp: invalid token.json at ${token_path}" >&2
+    return 1
+  fi
+  return 0
+}
+
+token_dir="${XDG_CONFIG_HOME}/google-docs-mcp"
+if [ -n "${GOOGLE_MCP_PROFILE:-}" ]; then
+  sanitize_token_json "${token_dir}/${GOOGLE_MCP_PROFILE}/token.json" || true
+fi
+sanitize_token_json "${token_dir}/token.json" || true
 
 exec google-docs-mcp "$@"
 EOF

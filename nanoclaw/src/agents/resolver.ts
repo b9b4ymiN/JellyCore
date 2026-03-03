@@ -13,6 +13,7 @@ export function resolveAgentRuntime(input: AgentResolutionInput): AgentResolutio
     codexEnabled,
     swarmEnabled,
     codexAuthReady,
+    codexRuntimeReady,
   } = input;
 
   // Scheduler/heartbeat lanes are always handled by Fon.
@@ -25,7 +26,7 @@ export function resolveAgentRuntime(input: AgentResolutionInput): AgentResolutio
     };
   }
 
-  const codexReady = codexEnabled && codexAuthReady;
+  const codexReady = codexEnabled && codexAuthReady && codexRuntimeReady;
   const swarmReady = swarmEnabled && codexReady;
 
   if (mode === 'off') {
@@ -80,4 +81,3 @@ export function resolveAgentRuntime(input: AgentResolutionInput): AgentResolutio
     reason: 'mode_swarm_fon_default',
   };
 }
-

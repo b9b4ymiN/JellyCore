@@ -48,7 +48,8 @@ import { logger } from './logger.js';
 import { resourceMonitor } from './resource-monitor.js';
 import { getTelegramMediaConfig, patchTelegramMediaConfig } from './telegram-media-config.js';
 import { cleanupTelegramMediaFiles } from './telegram-media.js';
-import { getCodexAuthStatus } from './codex-auth.js';
+import { evaluateCodexAuthStatus } from './codex-auth.js';
+import { evaluateCodexRuntimeStatus } from './codex-runtime.js';
 import type { AgentMode } from './agents/types.js';
 import type { TelegramMediaKind } from './telegram-media.js';
 import type { HeartbeatJob } from './types.js';
@@ -405,9 +406,11 @@ function parseAgentMode(raw?: string): AgentMode | null {
 
 function codexModeBlockedReason(mode: AgentMode): string | null {
   if (mode === 'swarm' && !AGENT_SWARM_ENABLED) return 'AGENT_SWARM_ENABLED=false';
-  const status = getCodexAuthStatus();
+  const status = evaluateCodexAuthStatus();
+  const runtime = evaluateCodexRuntimeStatus();
   if (!AGENT_CODEX_ENABLED) return 'AGENT_CODEX_ENABLED=false';
   if (!status.ready) return `codex_auth_blocked:${status.reason || 'unknown'}`;
+  if (!runtime.ready) return `codex_runtime_blocked:${runtime.reason || 'unknown'}`;
   return null;
 }
 
@@ -429,7 +432,8 @@ function formatModeStatus(groupFolder?: string): string {
   const globalDefault = getGlobalAgentModeDefault();
   const override = getGroupAgentModeOverride(folder);
   const snapshot = getAgentModeSnapshot();
-  const codexStatus = getCodexAuthStatus();
+  const codexStatus = evaluateCodexAuthStatus();
+  const codexRuntime = evaluateCodexRuntimeStatus();
 
   return [
     'Agent mode status',
@@ -441,6 +445,10 @@ function formatModeStatus(groupFolder?: string): string {
     `- swarm_enabled: ${AGENT_SWARM_ENABLED}`,
     `- codex_auth_ready: ${codexStatus.ready}`,
     `- codex_auth_reason: ${codexStatus.reason || '(none)'}`,
+    `- codex_runtime_ready: ${codexRuntime.ready}`,
+    `- codex_runtime_reason: ${codexRuntime.reason || '(none)'}`,
+    `- codex_image_revision: ${codexRuntime.imageRevision || '(none)'}`,
+    `- codex_drift_detected: ${Boolean(codexRuntime.driftDetected)}`,
     `- override_count: ${Object.keys(snapshot.overrides).length}`,
   ].join('\n');
 }

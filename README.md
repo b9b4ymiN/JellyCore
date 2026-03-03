@@ -243,6 +243,7 @@ If you want `mode=swarm` or `mode=codex`, prepare ChatGPT login auth first:
 mkdir -p data/codex-auth
 # place your ChatGPT login file at:
 # data/codex-auth/auth.json
+# (UTF-8 BOM is tolerated and stripped automatically)
 ```
 
 Then enable runtime flags in `.env`:
@@ -256,13 +257,30 @@ CODEX_AUTH_PATH=data/codex-auth
 CODEX_MODEL=gpt-5.3-codex
 ```
 
+If you use `google_docs` MCP, you can install OAuth token with one shared file:
+
+```bash
+mkdir -p data/google-docs-auth
+# no profile:
+# data/google-docs-auth/token.json
+# with GOOGLE_MCP_PROFILE=main:
+# data/google-docs-auth/main/token.json
+```
+
 ### Step 3 — Build the Agent Container Image
 
 ```bash
-docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/container
+docker build \
+  --build-arg VCS_REF="$(git rev-parse --short=12 HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t nanoclaw-agent:latest \
+  -f nanoclaw/container/Dockerfile \
+  nanoclaw/container
 ```
 
 > **Note:** This image includes Chromium, Python, Git, and Claude Code CLI. First build takes ~5–10 minutes.
+> Rebuild this image whenever `nanoclaw/container/agent-runner` changes, otherwise Codex runtime can drift from source.
+> If `.env` sets `CONTAINER_IMAGE` to a custom tag, build that exact tag (not only `nanoclaw-agent:latest`).
 
 ### Step 4 — Start All Services
 
@@ -285,7 +303,16 @@ curl http://localhost:47778/api/health
 
 # Watch NanoClaw logs
 docker compose logs -f nanoclaw
+
+# Verify Codex readiness snapshot
+curl http://localhost:47779/health
+curl http://localhost:47779/status
 ```
+
+Codex runtime behavior (when `mode=codex`):
+1. Oracle MCP is wired as primary memory brain.
+2. Nanoclaw MCP is wired for mode/state/delegate tools.
+3. Active external MCP servers are wired from runtime config.
 
 Once all services show **healthy**, send a message to your Telegram bot — JellyCore is ready! 🪼
 
@@ -331,6 +358,7 @@ These are generated automatically on first run if left empty:
 | `AGENT_MODE_GLOBAL_DEFAULT` | `off` | Global default mode: `off\|swarm\|codex` |
 | `CODEX_AUTH_REQUIRED` | `true` | Require ChatGPT login `auth.json` for Codex |
 | `CODEX_AUTH_PATH` | `data/codex-auth` | Host path containing `auth.json` |
+| `GOOGLE_DOCS_AUTH_PATH` | `data/google-docs-auth` | Shared host path for `google_docs` OAuth `token.json` bootstrap |
 | `CODEX_MODEL` | `gpt-5.3-codex` | Codex model for direct/delegated execution |
 | `CODEX_EXEC_TIMEOUT_MS` | `600000` | Codex execution timeout in milliseconds |
 | `ENABLED_CHANNELS` | `telegram` | Comma-separated: `telegram`, `whatsapp` |
@@ -363,7 +391,9 @@ Agent behavior is configured through **group workspaces** in `groups/`:
 groups/
 ├── global/
 │   ├── CLAUDE.md       # Shared system prompt (injected into every agent)
-│   └── SOUL.md         # AI personality and identity definition
+│   ├── SOUL_FON.md     # Fon runtime identity/persona (fallback to SOUL.md)
+│   ├── SOUL_CODEX.md   # Codex runtime identity/persona (fallback to SOUL.md)
+│   └── SOUL.md         # Shared fallback identity
 └── main/
     ├── CLAUDE.md       # Main group-specific instructions (admin privileges)
     └── USER.md         # User profile (auto-maintained by AI)
@@ -398,7 +428,7 @@ You specialize in data analysis and reporting.
 | `/clear` | Clear conversation history |
 | `/reset` | Full session reset |
 | `/model` | Show or switch AI model |
-| `/mode` | Show/set runtime mode (`off`, `swarm`, `codex`) |
+| `/mode` | Show/set runtime mode + Codex auth/runtime readiness (`off`, `swarm`, `codex`) |
 | `/usage` | Token usage statistics |
 | `/cost` | Cost breakdown |
 | `/budget` | Budget management |
@@ -455,7 +485,7 @@ jellycore/
 │   └── requirements.txt             #   fastapi, uvicorn, pythainlp
 │
 ├── groups/                          # 👥 Agent Group Workspaces
-│   ├── global/                      #   Shared: CLAUDE.md (system prompt) + SOUL.md (personality)
+│   ├── global/                      #   Shared prompts + runtime souls (SOUL_FON/SOUL_CODEX/SOUL fallback)
 │   └── main/                        #   Default admin group
 │
 ├── docs/                            # 📚 Documentation
@@ -673,6 +703,7 @@ All 7 phases of the original master plan have been **completed**:
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Local development setup guide |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Linux VPS production deployment guide |
 | [docs/CODEX_AUTH_REQUIRED_SWARM.md](docs/CODEX_AUTH_REQUIRED_SWARM.md) | Swarm + Codex auth-required operations |
+| [docs/CODEX_PERSONA_ORACLE_5LAYER_PLAN_v3.md](docs/CODEX_PERSONA_ORACLE_5LAYER_PLAN_v3.md) | Detailed rollout + phase status for Codex persona and Oracle 5-layer memory |
 | [docs/MASTER_PLAN/](docs/MASTER_PLAN/) | Complete architecture roadmap (7 phases) |
 | [docs/releases/](docs/releases/) | Detailed release notes for all versions |
 | [nanoclaw/README.md](nanoclaw/README.md) | NanoClaw — orchestrator documentation |
@@ -686,6 +717,7 @@ All 7 phases of the original master plan have been **completed**:
 
 | Version | Highlights |
 |---------|-----------|
+| **v0.9.0** | Swarm+Codex hardening: auth-required Codex, dual persona, 5-layer `<ctx>` with `<working>`, Codex write-back and runtime working memory |
 | **v0.8.1** | Task scheduler fix — idle container preemption for scheduled task execution |
 | **v0.8.0** | Production polish — streaming UX, cost intelligence, context auto-compaction, observability |
 | **v0.7.1** | Memory reliability improvements and edge case fixes |

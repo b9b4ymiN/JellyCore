@@ -72,11 +72,17 @@ describe('PromptBuilder', () => {
       cacheMax: 10,
     });
 
-    const ctx = await builder.buildCompactContext('deploy telegram worker', 'main', 'u-main-1');
+    const ctx = await builder.buildCompactContext(
+      'deploy telegram worker',
+      'main',
+      'u-main-1',
+      'recent_intent: deploy + verify',
+    );
     const xml = builder.formatCompact(ctx);
 
     expect(ctx.proceduralGuidance).toContain('Deploy service');
     expect(xml).toContain('<procedural>');
+    expect(xml).toContain('<working>recent_intent: deploy + verify</working>');
     expect(ctx.tokenEstimate).toBeLessThanOrEqual(600);
   });
 
@@ -124,13 +130,19 @@ describe('PromptBuilder', () => {
     );
 
     const builder = new PromptBuilder({ oracleApiUrl: 'http://oracle:47778' });
-    const ctx = await builder.buildCompactContext('any message', 'main', 'u-main-1');
+    const ctx = await builder.buildCompactContext(
+      'any message',
+      'main',
+      'u-main-1',
+      'working snapshot',
+    );
 
     expect(ctx.userModel).toBe('');
     expect(ctx.proceduralGuidance).toBe('');
     expect(ctx.recentEpisodes).toBe('');
     expect(ctx.relevantKnowledge).toBe('');
-    expect(ctx.tokenEstimate).toBe(0);
-    expect(builder.formatCompact(ctx)).toBe('');
+    expect(ctx.workingSummary).toBe('working snapshot');
+    expect(ctx.tokenEstimate).toBe(Math.ceil('working snapshot'.length / 4));
+    expect(builder.formatCompact(ctx)).toBe('<ctx>\n<working>working snapshot</working>\n</ctx>');
   });
 });

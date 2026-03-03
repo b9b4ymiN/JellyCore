@@ -37,6 +37,10 @@ export const CODEX_AUTH_PATH = path.resolve(
   PROJECT_ROOT,
   process.env.CODEX_AUTH_PATH || 'data/codex-auth',
 );
+export const GOOGLE_DOCS_AUTH_PATH = path.resolve(
+  PROJECT_ROOT,
+  process.env.GOOGLE_DOCS_AUTH_PATH || 'data/google-docs-auth',
+);
 export const CODEX_MODEL = process.env.CODEX_MODEL || 'gpt-5.3-codex';
 export const CODEX_EXEC_TIMEOUT_MS = parseInt(
   process.env.CODEX_EXEC_TIMEOUT_MS || '600000',

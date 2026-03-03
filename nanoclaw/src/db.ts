@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { AGENT_MODE_GLOBAL_DEFAULT, DATA_DIR, STORE_DIR } from './config.js';
-import type { AgentMode } from './agents/types.js';
+import type { AgentMode, AgentRuntime } from './agents/types.js';
 import {
   DeadLetterMessage,
   HeartbeatJob,
@@ -179,6 +179,15 @@ function createSchema(database: Database.Database): void {
       updated_at TEXT NOT NULL,
       updated_by TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS runtime_working_memory (
+      group_folder TEXT NOT NULL,
+      agent_runtime TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (group_folder, agent_runtime)
+    );
+    CREATE INDEX IF NOT EXISTS idx_runtime_working_memory_updated_at
+      ON runtime_working_memory(updated_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -337,6 +346,10 @@ function nowIso(): string {
 function normalizeAgentMode(mode: string | undefined): AgentMode {
   if (mode === 'swarm' || mode === 'codex') return mode;
   return 'off';
+}
+
+function normalizeAgentRuntime(runtime: string | undefined): AgentRuntime {
+  return runtime === 'codex' ? 'codex' : 'fon';
 }
 
 function ensureAgentModeDefault(): void {
@@ -1279,6 +1292,47 @@ export function getAllSessions(): Record<string, string> {
     result[row.group_folder] = row.session_id;
   }
   return result;
+}
+
+export function getRuntimeWorkingMemory(
+  groupFolder: string,
+  runtime: AgentRuntime,
+): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT summary FROM runtime_working_memory WHERE group_folder = ? AND agent_runtime = ?`,
+    )
+    .get(groupFolder, normalizeAgentRuntime(runtime)) as { summary?: string } | undefined;
+  return row?.summary;
+}
+
+export function setRuntimeWorkingMemory(
+  groupFolder: string,
+  runtime: AgentRuntime,
+  summary: string,
+): void {
+  db.prepare(
+    `INSERT INTO runtime_working_memory (group_folder, agent_runtime, summary, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(group_folder, agent_runtime) DO UPDATE SET
+       summary = excluded.summary,
+       updated_at = excluded.updated_at`,
+  ).run(groupFolder, normalizeAgentRuntime(runtime), summary, nowIso());
+}
+
+export function clearRuntimeWorkingMemory(
+  groupFolder: string,
+  runtime?: AgentRuntime,
+): void {
+  if (runtime) {
+    db.prepare(
+      `DELETE FROM runtime_working_memory WHERE group_folder = ? AND agent_runtime = ?`,
+    ).run(groupFolder, normalizeAgentRuntime(runtime));
+    return;
+  }
+  db.prepare(
+    `DELETE FROM runtime_working_memory WHERE group_folder = ?`,
+  ).run(groupFolder);
 }
 
 // --- Agent mode default + overrides ---
