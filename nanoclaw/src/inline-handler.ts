@@ -7,7 +7,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { GROUPS_DIR, MAIN_GROUP_FOLDER, MAX_PROMPT_MESSAGES, MAX_PROMPT_CHARS, SESSION_MAX_AGE_MS } from './config.js';
+import {
+  AGENT_CODEX_ENABLED,
+  AGENT_SWARM_ENABLED,
+  GROUPS_DIR,
+  MAIN_GROUP_FOLDER,
+  MAX_PROMPT_MESSAGES,
+  MAX_PROMPT_CHARS,
+  SESSION_MAX_AGE_MS,
+} from './config.js';
 import {
   COMMAND_DEFINITIONS,
   CommandName,
@@ -19,20 +27,29 @@ import {
 import { cmdUsage, cmdCost, cmdBudget } from './cost-intelligence.js';
 import {
   createHeartbeatJob,
+  clearGroupAgentModeOverride,
   deleteHeartbeatJob,
+  getAgentModeSnapshot,
   getAllHeartbeatJobs,
   getDb,
+  getGlobalAgentModeDefault,
+  getGroupAgentModeOverride,
   getHeartbeatJob,
   getSessionAge,
+  resolveAgentMode,
+  setGlobalAgentModeDefault,
+  setGroupAgentModeOverride,
   updateHeartbeatJob,
 } from './db.js';
 import { getHeartbeatConfig, patchHeartbeatConfig } from './heartbeat.js';
 import { recentErrors } from './health-server.js';
-import { writeHeartbeatJobsSnapshot } from './ipc.js';
+import { writeAgentModesSnapshot, writeHeartbeatJobsSnapshot } from './ipc.js';
 import { logger } from './logger.js';
 import { resourceMonitor } from './resource-monitor.js';
 import { getTelegramMediaConfig, patchTelegramMediaConfig } from './telegram-media-config.js';
 import { cleanupTelegramMediaFiles } from './telegram-media.js';
+import { getCodexAuthStatus } from './codex-auth.js';
+import type { AgentMode } from './agents/types.js';
 import type { TelegramMediaKind } from './telegram-media.js';
 import type { HeartbeatJob } from './types.js';
 import type { HeartbeatRuntimeConfig } from './heartbeat.js';
@@ -377,6 +394,122 @@ function cmdErrors(): string {
     '',
     ...lines,
   ].join('\n');
+}
+
+function parseAgentMode(raw?: string): AgentMode | null {
+  if (!raw) return null;
+  const v = raw.trim().toLowerCase();
+  if (v === 'off' || v === 'swarm' || v === 'codex') return v;
+  return null;
+}
+
+function codexModeBlockedReason(mode: AgentMode): string | null {
+  if (mode === 'swarm' && !AGENT_SWARM_ENABLED) return 'AGENT_SWARM_ENABLED=false';
+  const status = getCodexAuthStatus();
+  if (!AGENT_CODEX_ENABLED) return 'AGENT_CODEX_ENABLED=false';
+  if (!status.ready) return `codex_auth_blocked:${status.reason || 'unknown'}`;
+  return null;
+}
+
+function modeHelpText(): string {
+  return [
+    'Mode commands',
+    '/mode',
+    '/mode off|swarm|codex',
+    '/mode inherit',
+    '/mode default off|swarm|codex',
+    '/mode set <group_folder> off|swarm|codex',
+    '/mode clear <group_folder>',
+  ].join('\n');
+}
+
+function formatModeStatus(groupFolder?: string): string {
+  const folder = normalizeGroupFolder(groupFolder);
+  const effective = resolveAgentMode(folder);
+  const globalDefault = getGlobalAgentModeDefault();
+  const override = getGroupAgentModeOverride(folder);
+  const snapshot = getAgentModeSnapshot();
+  const codexStatus = getCodexAuthStatus();
+
+  return [
+    'Agent mode status',
+    `- group: ${folder}`,
+    `- effective: ${effective}`,
+    `- global_default: ${globalDefault}`,
+    `- group_override: ${override || '(inherit)'}`,
+    `- codex_enabled: ${AGENT_CODEX_ENABLED}`,
+    `- swarm_enabled: ${AGENT_SWARM_ENABLED}`,
+    `- codex_auth_ready: ${codexStatus.ready}`,
+    `- codex_auth_reason: ${codexStatus.reason || '(none)'}`,
+    `- override_count: ${Object.keys(snapshot.overrides).length}`,
+  ].join('\n');
+}
+
+function cmdMode(args: string, groupFolder?: string): string {
+  const trimmed = args.trim();
+  const [head, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+  const action = (head || 'status').toLowerCase();
+  const currentFolder = normalizeGroupFolder(groupFolder);
+
+  if (action === 'help' || action === '?') {
+    return `${modeHelpText()}\n\n${formatModeStatus(currentFolder)}`;
+  }
+
+  if (action === 'status') {
+    return formatModeStatus(currentFolder);
+  }
+
+  if (action === 'inherit') {
+    clearGroupAgentModeOverride(currentFolder);
+    writeAgentModesSnapshot();
+    return `Mode override cleared for ${currentFolder}\n\n${formatModeStatus(currentFolder)}`;
+  }
+
+  if (action === 'default') {
+    const mode = parseAgentMode(rest[0]);
+    if (!mode) return 'Usage: /mode default <off|swarm|codex>';
+    if (mode !== 'off') {
+      const blocked = codexModeBlockedReason(mode);
+      if (blocked) return `Cannot set default mode to ${mode}: ${blocked}`;
+    }
+    setGlobalAgentModeDefault(mode, `inline:${currentFolder}`);
+    writeAgentModesSnapshot();
+    return `Global default mode updated: ${mode}\n\n${formatModeStatus(currentFolder)}`;
+  }
+
+  if (action === 'set') {
+    const targetFolder = rest[0];
+    const mode = parseAgentMode(rest[1]);
+    if (!targetFolder || !mode) return 'Usage: /mode set <group_folder> <off|swarm|codex>';
+    if (mode !== 'off') {
+      const blocked = codexModeBlockedReason(mode);
+      if (blocked) return `Cannot set mode to ${mode}: ${blocked}`;
+    }
+    setGroupAgentModeOverride(targetFolder, mode, `inline:${currentFolder}`);
+    writeAgentModesSnapshot();
+    return `Group mode updated: ${targetFolder} -> ${mode}\n\n${formatModeStatus(targetFolder)}`;
+  }
+
+  if (action === 'clear') {
+    const targetFolder = rest[0];
+    if (!targetFolder) return 'Usage: /mode clear <group_folder>';
+    clearGroupAgentModeOverride(targetFolder);
+    writeAgentModesSnapshot();
+    return `Group mode override cleared: ${targetFolder}\n\n${formatModeStatus(targetFolder)}`;
+  }
+
+  const mode = parseAgentMode(action);
+  if (!mode) {
+    return `Unknown mode action: ${action}\n\n${modeHelpText()}`;
+  }
+
+  if (mode !== 'off') {
+    const blocked = codexModeBlockedReason(mode);
+    if (blocked) return `Cannot set mode to ${mode}: ${blocked}`;
+  }
+  setGroupAgentModeOverride(currentFolder, mode, `inline:${currentFolder}`);
+  writeAgentModesSnapshot();
+  return `Mode updated for ${currentFolder}: ${mode}\n\n${formatModeStatus(currentFolder)}`;
 }
 
 function tgMediaHelpText(): string {
@@ -1020,6 +1153,7 @@ const COMMAND_HANDLERS: Record<
   clear: ({ groupFolder }) => cmdClear(groupFolder),
   ping: () => cmdPing(),
   model: () => cmdModel(),
+  mode: ({ args, groupFolder }) => cmdMode(args, groupFolder),
   soul: () => cmdSoul(),
   me: ({ chatJid, groupFolder }) => cmdMe(chatJid || '', groupFolder),
   reset: ({ groupFolder }) => cmdReset(groupFolder),

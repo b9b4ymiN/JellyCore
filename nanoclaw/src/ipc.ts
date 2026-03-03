@@ -4,6 +4,8 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import {
+  AGENT_CODEX_ENABLED,
+  AGENT_SWARM_ENABLED,
   ASSISTANT_NAME,
   DATA_DIR,
   IPC_POLL_INTERVAL,
@@ -12,10 +14,27 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, cancelTask, getTaskById, updateTask, findDuplicateTask, createHeartbeatJob, getHeartbeatJob, getActiveHeartbeatJobs, getAllHeartbeatJobs, updateHeartbeatJob, deleteHeartbeatJob } from './db.js';
+import {
+  cancelTask,
+  clearGroupAgentModeOverride,
+  createHeartbeatJob,
+  createTask,
+  deleteHeartbeatJob,
+  findDuplicateTask,
+  getActiveHeartbeatJobs,
+  getAgentModeSnapshot,
+  getAllHeartbeatJobs,
+  getTaskById,
+  setGlobalAgentModeDefault,
+  setGroupAgentModeOverride,
+  updateHeartbeatJob,
+  updateTask,
+} from './db.js';
 import { verifyIpcMessage } from './ipc-signing.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, HeartbeatJob } from './types.js';
+import type { AgentMode } from './agents/types.js';
+import { evaluateCodexAuthStatus } from './codex-auth.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -36,6 +55,21 @@ export interface IpcDeps {
 }
 
 let ipcWatcherRunning = false;
+
+function parseAgentMode(mode: string | undefined): AgentMode | null {
+  if (!mode) return null;
+  const v = mode.trim().toLowerCase();
+  if (v === 'off' || v === 'swarm' || v === 'codex') return v;
+  return null;
+}
+
+function codexModeBlockedReason(mode: AgentMode): string | null {
+  if (mode === 'swarm' && !AGENT_SWARM_ENABLED) return 'AGENT_SWARM_ENABLED=false';
+  if (!AGENT_CODEX_ENABLED) return 'AGENT_CODEX_ENABLED=false';
+  const status = evaluateCodexAuthStatus();
+  if (!status.ready) return `codex_auth_blocked:${status.reason || 'unknown'}`;
+  return null;
+}
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -225,6 +259,10 @@ export async function processTaskIpc(
     category?: string;
     interval_ms?: number | null;
     status?: string;
+    // For agent mode control
+    mode?: string;
+    scope?: 'group' | 'default';
+    target_group_folder?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -650,6 +688,59 @@ export async function processTaskIpc(
       break;
     }
 
+    case 'agent_mode_set_default': {
+      const mode = parseAgentMode(data.mode);
+      if (!mode) {
+        logger.warn({ sourceGroup, data }, 'agent_mode_set_default: invalid mode');
+        break;
+      }
+      if (mode !== 'off') {
+        const blocked = codexModeBlockedReason(mode);
+        if (blocked) {
+          logger.warn({ sourceGroup, mode, blocked }, 'codex_auth_blocked');
+          break;
+        }
+      }
+      setGlobalAgentModeDefault(mode, `ipc:${sourceGroup}`);
+      writeAgentModesSnapshot();
+      logger.info({ sourceGroup, mode }, 'Global agent mode updated via IPC');
+      break;
+    }
+
+    case 'agent_mode_set': {
+      const mode = parseAgentMode(data.mode);
+      if (!mode) {
+        logger.warn({ sourceGroup, data }, 'agent_mode_set: invalid mode');
+        break;
+      }
+      if (mode !== 'off') {
+        const blocked = codexModeBlockedReason(mode);
+        if (blocked) {
+          logger.warn({ sourceGroup, mode, blocked }, 'codex_auth_blocked');
+          break;
+        }
+      }
+      const targetFolder =
+        (typeof data.target_group_folder === 'string' && data.target_group_folder.trim()) ||
+        (typeof data.groupFolder === 'string' && data.groupFolder.trim()) ||
+        sourceGroup;
+      setGroupAgentModeOverride(targetFolder, mode, `ipc:${sourceGroup}`);
+      writeAgentModesSnapshot();
+      logger.info({ sourceGroup, targetFolder, mode }, 'Group agent mode updated via IPC');
+      break;
+    }
+
+    case 'agent_mode_clear': {
+      const targetFolder =
+        (typeof data.target_group_folder === 'string' && data.target_group_folder.trim()) ||
+        (typeof data.groupFolder === 'string' && data.groupFolder.trim()) ||
+        sourceGroup;
+      clearGroupAgentModeOverride(targetFolder);
+      writeAgentModesSnapshot();
+      logger.info({ sourceGroup, targetFolder }, 'Group agent mode cleared via IPC');
+      break;
+    }
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
@@ -700,5 +791,47 @@ export function writeHeartbeatJobsSnapshot(): void {
     fs.renameSync(tempPath, rootSnapshotPath);
   } catch (err) {
     logger.warn({ err }, 'Failed to write heartbeat_jobs snapshot');
+  }
+}
+
+/**
+ * Write current agent mode state to each group IPC namespace and root snapshot.
+ */
+export function writeAgentModesSnapshot(): void {
+  const snapshot = getAgentModeSnapshot();
+  const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+  const content = JSON.stringify(snapshot, null, 2);
+
+  try {
+    fs.mkdirSync(ipcBaseDir, { recursive: true });
+
+    let groupDirs: string[] = [];
+    try {
+      groupDirs = fs.readdirSync(ipcBaseDir).filter((f) => {
+        try {
+          return fs.statSync(path.join(ipcBaseDir, f)).isDirectory() && f !== 'errors';
+        } catch { return false; }
+      });
+    } catch {
+      groupDirs = [];
+    }
+
+    for (const group of groupDirs) {
+      try {
+        const targetPath = path.join(ipcBaseDir, group, 'agent_modes.json');
+        const tempPath = `${targetPath}.tmp`;
+        fs.writeFileSync(tempPath, content);
+        fs.renameSync(tempPath, targetPath);
+      } catch (err) {
+        logger.warn({ err, group }, 'Failed to write agent_modes snapshot for group');
+      }
+    }
+
+    const rootPath = path.join(ipcBaseDir, 'agent_modes.json');
+    const rootTemp = `${rootPath}.tmp`;
+    fs.writeFileSync(rootTemp, content);
+    fs.renameSync(rootTemp, rootPath);
+  } catch (err) {
+    logger.warn({ err }, 'Failed to write agent_modes snapshot');
   }
 }

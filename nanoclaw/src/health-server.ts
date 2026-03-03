@@ -78,6 +78,7 @@ export interface StatusProvider {
   };
   getDlqStats?: () => { open24h: number; open1h: number; retrying: number };
   getCapabilityHealth?: () => unknown;
+  getCodexAuthStatus?: () => unknown;
   getUptimeMs: () => number;
 }
 
@@ -175,6 +176,7 @@ function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): voi
         docker: statusProvider.getDockerResilience ? statusProvider.getDockerResilience() : null,
         dlq: statusProvider.getDlqStats ? statusProvider.getDlqStats() : null,
         capabilities: statusProvider.getCapabilityHealth ? statusProvider.getCapabilityHealth() : null,
+        codexAuth: statusProvider.getCodexAuthStatus ? statusProvider.getCodexAuthStatus() : null,
       }
     : {
         activeContainers: 0,
@@ -185,6 +187,7 @@ function handleStatus(_req: http.IncomingMessage, res: http.ServerResponse): voi
         docker: null,
         dlq: null,
         capabilities: null,
+        codexAuth: null,
       };
 
   json(res, 200, {

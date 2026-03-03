@@ -65,8 +65,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 ENV PLAYWRIGHT_BROWSERS_PATH=0
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# Install agent-browser, claude-code, and PM2 globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code pm2
+# Install agent-browser, claude-code, codex CLI, and PM2 globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code @openai/codex pm2
 
 # External MCP servers — installed from config/mcps.json
 # node_modules are intentionally kept: oura-mcp uses standard tsc output (not bundled)

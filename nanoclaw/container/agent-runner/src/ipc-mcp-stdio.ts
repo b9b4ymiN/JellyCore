@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import { runCodexPrompt } from './codex-runner.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -23,6 +24,8 @@ const IPC_SECRET = process.env.JELLYCORE_IPC_SECRET || '';
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+const AGENT_MODES_FILE = path.join(IPC_DIR, 'agent_modes.json');
+const CODEX_AUTH_FILE = '/home/node/.codex/auth.json';
 
 /**
  * Sign an IPC payload with HMAC-SHA256.
@@ -45,6 +48,84 @@ function writeIpcFile(dir: string, data: object): string {
   fs.renameSync(tempPath, filepath);
 
   return filename;
+}
+
+type AgentMode = 'off' | 'swarm' | 'codex';
+
+interface AgentModeSnapshot {
+  default: AgentMode;
+  overrides: Record<string, AgentMode>;
+}
+
+interface LocalCodexAuthStatus {
+  ready: boolean;
+  reason?: 'missing_auth_file' | 'invalid_json' | 'missing_tokens_fields';
+}
+
+function parseAgentMode(mode: string | undefined): AgentMode | null {
+  if (!mode) return null;
+  const v = mode.trim().toLowerCase();
+  if (v === 'off' || v === 'swarm' || v === 'codex') return v;
+  return null;
+}
+
+function getCodexAuthStatusLocal(): LocalCodexAuthStatus {
+  if (!fs.existsSync(CODEX_AUTH_FILE)) {
+    return { ready: false, reason: 'missing_auth_file' };
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CODEX_AUTH_FILE, 'utf-8')) as {
+      tokens?: {
+        access_token?: string;
+        refresh_token?: string;
+        id_token?: string;
+        account_id?: string;
+      };
+    };
+    const t = parsed.tokens;
+    if (
+      !t
+      || typeof t.access_token !== 'string'
+      || typeof t.refresh_token !== 'string'
+      || typeof t.id_token !== 'string'
+      || typeof t.account_id !== 'string'
+      || !t.access_token.trim()
+      || !t.refresh_token.trim()
+      || !t.id_token.trim()
+      || !t.account_id.trim()
+    ) {
+      return { ready: false, reason: 'missing_tokens_fields' };
+    }
+    return { ready: true };
+  } catch {
+    return { ready: false, reason: 'invalid_json' };
+  }
+}
+
+function readAgentModeSnapshot(): AgentModeSnapshot {
+  const fallback: AgentModeSnapshot = { default: 'off', overrides: {} };
+  try {
+    if (!fs.existsSync(AGENT_MODES_FILE)) return fallback;
+    const raw = JSON.parse(fs.readFileSync(AGENT_MODES_FILE, 'utf-8')) as Partial<AgentModeSnapshot>;
+    const normalizedDefault = parseAgentMode(raw.default) || 'off';
+    const overrides: Record<string, AgentMode> = {};
+    if (raw.overrides && typeof raw.overrides === 'object') {
+      for (const [folder, mode] of Object.entries(raw.overrides)) {
+        const normalized = parseAgentMode(mode);
+        if (normalized && folder.trim().length > 0) {
+          overrides[folder] = normalized;
+        }
+      }
+    }
+    return { default: normalizedDefault, overrides };
+  } catch {
+    return fallback;
+  }
+}
+
+function resolveEffectiveMode(snapshot: AgentModeSnapshot, folder: string): AgentMode {
+  return snapshot.overrides[folder] || snapshot.default;
 }
 
 const server = new McpServer({
@@ -72,6 +153,128 @@ server.tool(
     writeIpcFile(MESSAGES_DIR, data);
 
     return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+  },
+);
+
+server.tool(
+  'get_agent_mode',
+  'Read current agent mode state (effective mode for current/target group, global default, and local Codex auth readiness).',
+  {
+    target_group_folder: z.string().optional().describe('Optional group folder to inspect. Defaults to current group.'),
+  },
+  async (args) => {
+    const targetGroup = args.target_group_folder?.trim() || groupFolder;
+    const snapshot = readAgentModeSnapshot();
+    const auth = getCodexAuthStatusLocal();
+    const effective = resolveEffectiveMode(snapshot, targetGroup);
+    const override = snapshot.overrides[targetGroup] || null;
+
+    const payload = {
+      source_group: groupFolder,
+      target_group: targetGroup,
+      effective_mode: effective,
+      global_default: snapshot.default,
+      group_override: override,
+      codex_auth_ready: auth.ready,
+      codex_auth_reason: auth.reason || null,
+      overrides_count: Object.keys(snapshot.overrides).length,
+    };
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
+    };
+  },
+);
+
+server.tool(
+  'set_agent_mode',
+  'Set/clear agent mode via host IPC. Supports global default and per-group override.',
+  {
+    mode: z.enum(['off', 'swarm', 'codex', 'inherit']).describe('inherit clears group override; valid only for scope=group'),
+    scope: z.enum(['group', 'default']).default('group').describe('group=override a group, default=set global default'),
+    target_group_folder: z.string().optional().describe('When scope=group, target folder. Defaults to current group.'),
+  },
+  async (args) => {
+    if (args.scope === 'default' && args.mode === 'inherit') {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid request: mode=inherit is not valid for scope=default.' }],
+        isError: true,
+      };
+    }
+
+    if (args.mode === 'swarm' || args.mode === 'codex') {
+      const auth = getCodexAuthStatusLocal();
+      if (!auth.ready) {
+        return {
+          content: [{ type: 'text' as const, text: `Cannot enable ${args.mode}: codex_auth_blocked:${auth.reason || 'unknown'}` }],
+          isError: true,
+        };
+      }
+    }
+
+    const targetGroup = args.target_group_folder?.trim() || groupFolder;
+    const payload: Record<string, unknown> = {
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (args.scope === 'default') {
+      payload.type = 'agent_mode_set_default';
+      payload.mode = args.mode;
+    } else if (args.mode === 'inherit') {
+      payload.type = 'agent_mode_clear';
+      payload.target_group_folder = targetGroup;
+    } else {
+      payload.type = 'agent_mode_set';
+      payload.mode = args.mode;
+      payload.target_group_folder = targetGroup;
+    }
+
+    const filename = writeIpcFile(TASKS_DIR, payload);
+    return {
+      content: [{ type: 'text' as const, text: `Agent mode request queued (${filename}).` }],
+    };
+  },
+);
+
+server.tool(
+  'delegate_to_codex',
+  'Delegate a complex coding/research sub-task to Codex CLI and return its result.',
+  {
+    task: z.string().describe('Task for Codex to execute.'),
+    context: z.string().optional().describe('Optional supporting context/instructions.'),
+    model: z.string().optional().describe('Optional Codex model override.'),
+    timeout_ms: z.number().int().positive().max(1_200_000).optional().describe('Optional timeout in milliseconds (max 20 minutes).'),
+  },
+  async (args) => {
+    const model = args.model?.trim() || process.env.CODEX_MODEL || 'gpt-5.3-codex';
+    const timeoutMs = args.timeout_ms ?? Number.parseInt(process.env.CODEX_EXEC_TIMEOUT_MS || '600000', 10);
+    const prompt = [
+      'You are delegated by Fon to complete this sub-task.',
+      '',
+      'Task:',
+      args.task.trim(),
+      args.context?.trim() ? `\nContext:\n${args.context.trim()}` : '',
+      '',
+      'Return a concise, actionable result.',
+    ].join('\n');
+
+    const result = await runCodexPrompt(prompt, {
+      model,
+      timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 600000,
+      cwd: '/workspace/group',
+    });
+
+    if (result.status === 'error') {
+      return {
+        content: [{ type: 'text' as const, text: `Codex delegation failed: ${result.error || 'unknown_error'}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: result.result || '(no output)' }],
+    };
   },
 );
 

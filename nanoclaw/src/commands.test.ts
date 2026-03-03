@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { _initTestDatabase } from './db.js';
+import { _initTestDatabase, getGroupAgentModeOverride, getGlobalAgentModeDefault } from './db.js';
 import { classifyQuery } from './query-router.js';
 import { handleInline, InlineResult, TELEGRAM_COMMANDS } from './inline-handler.js';
 import { getTelegramMediaConfig, patchTelegramMediaConfig } from './telegram-media-config.js';
@@ -23,7 +23,7 @@ beforeEach(() => {
 // ─── Query Router: new commands ─────────────────────────────────────
 
 describe('Query Router — new commands', () => {
-  const newCmds = ['/clear', '/session', '/ping', '/model'];
+  const newCmds = ['/clear', '/session', '/ping', '/model', '/mode'];
   for (const cmd of newCmds) {
     it(`routes ${cmd} to inline tier`, () => {
       const result = classifyQuery(cmd);
@@ -112,6 +112,39 @@ describe('/model command', () => {
 
 // ─── Inline Handler: /help includes new commands ────────────────────
 
+describe('/mode command', () => {
+  it('shows mode status', () => {
+    const result = handleInline('admin-cmd', '/mode', 'tg:1', 'main') as string;
+    expect(result).toContain('Agent mode status');
+    expect(result).toContain('effective:');
+    expect(result).toContain('codex_auth_ready:');
+  });
+
+  it('sets group mode to off', () => {
+    const result = handleInline('admin-cmd', '/mode off', 'tg:1', 'team-a') as string;
+    expect(result).toContain('Mode updated for team-a: off');
+    expect(getGroupAgentModeOverride('team-a')).toBe('off');
+  });
+
+  it('rejects codex mode when codex is not available', () => {
+    const result = handleInline('admin-cmd', '/mode codex', 'tg:1', 'main') as string;
+    expect(result).toContain('Cannot set mode to codex');
+  });
+
+  it('supports default and group clear flows', () => {
+    const defaultResult = handleInline('admin-cmd', '/mode default off', 'tg:1', 'main') as string;
+    expect(defaultResult).toContain('Global default mode updated: off');
+    expect(getGlobalAgentModeDefault()).toBe('off');
+
+    handleInline('admin-cmd', '/mode set team-x off', 'tg:1', 'main');
+    expect(getGroupAgentModeOverride('team-x')).toBe('off');
+
+    const clearResult = handleInline('admin-cmd', '/mode clear team-x', 'tg:1', 'main') as string;
+    expect(clearResult).toContain('Group mode override cleared: team-x');
+    expect(getGroupAgentModeOverride('team-x')).toBeUndefined();
+  });
+});
+
 describe('/help command', () => {
   it('lists all commands including new ones', () => {
     const result = handleInline('admin-cmd', '/help') as string;
@@ -119,6 +152,7 @@ describe('/help command', () => {
     expect(result).toContain('/session');
     expect(result).toContain('/ping');
     expect(result).toContain('/model');
+    expect(result).toContain('/mode');
     expect(result).toContain('/usage');
     expect(result).toContain('/cost');
     expect(result).toContain('/budget');

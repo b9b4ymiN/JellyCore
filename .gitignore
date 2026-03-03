@@ -9,6 +9,10 @@ data/
 *.db-wal
 *.db-shm
 
+# Codex ChatGPT login auth (defense-in-depth: keep explicit even though data/ is ignored)
+data/codex-auth/auth.json
+data/codex-auth/*.json
+
 # ── Dependencies ─────────────────────────────
 node_modules/
 bun.lockb

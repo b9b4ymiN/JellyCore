@@ -12,6 +12,7 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
+  CODEX_AUTH_PATH,
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
@@ -24,6 +25,7 @@ import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { containerPool } from './container-pool.js';
 import { LaneType, RegisteredGroup } from './types.js';
+import type { AgentMode, AgentRuntime } from './agents/types.js';
 
 /** Format milliseconds as human-readable duration (e.g., "30 min", "1h 30 min"). */
 function formatMs(ms: number): string {
@@ -128,6 +130,8 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   lane?: LaneType;
+  agentRuntime?: AgentRuntime;
+  agentMode?: AgentMode;
   secrets?: Record<string, string>;
 }
 
@@ -311,6 +315,17 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Optional Codex auth mount (read-only). Codex path is required only when
+  // codex runtime is selected, but mounting here keeps run args deterministic.
+  const codexAuthFile = path.join(CODEX_AUTH_PATH, 'auth.json');
+  if (fs.existsSync(codexAuthFile)) {
+    mounts.push({
+      hostPath: CODEX_AUTH_PATH,
+      containerPath: '/home/node/.codex',
+      readonly: true,
+    });
+  }
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = path.join(DATA_DIR, 'ipc', group.folder);
@@ -466,7 +481,10 @@ export async function runContainerAgent(
   fs.mkdirSync(groupDir, { recursive: true });
 
   // Try to acquire a warm container from the pool
-  const pooled = POOL_ENABLED ? containerPool.acquire(group.folder) : null;
+  const pooled =
+    POOL_ENABLED && input.agentRuntime !== 'codex'
+      ? containerPool.acquire(group.folder)
+      : null;
   if (pooled) {
     return runPooledContainer(pooled, group, input, onProcess, onOutput, startTime);
   }
@@ -907,6 +925,8 @@ async function runPooledContainer(
     chatJid: input.chatJid,
     isMain: input.isMain,
     isScheduledTask: input.isScheduledTask,
+    agentRuntime: input.agentRuntime,
+    agentMode: input.agentMode,
     secrets: readSecrets(),
   });
 

@@ -24,6 +24,24 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
+export const AGENT_CODEX_ENABLED =
+  (process.env.AGENT_CODEX_ENABLED || 'false').toLowerCase() === 'true';
+export const AGENT_SWARM_ENABLED =
+  (process.env.AGENT_SWARM_ENABLED || 'false').toLowerCase() === 'true';
+export const AGENT_MODE_GLOBAL_DEFAULT = (
+  process.env.AGENT_MODE_GLOBAL_DEFAULT || 'off'
+).toLowerCase();
+export const CODEX_AUTH_REQUIRED =
+  (process.env.CODEX_AUTH_REQUIRED || 'true').toLowerCase() !== 'false';
+export const CODEX_AUTH_PATH = path.resolve(
+  PROJECT_ROOT,
+  process.env.CODEX_AUTH_PATH || 'data/codex-auth',
+);
+export const CODEX_MODEL = process.env.CODEX_MODEL || 'gpt-5.3-codex';
+export const CODEX_EXEC_TIMEOUT_MS = parseInt(
+  process.env.CODEX_EXEC_TIMEOUT_MS || '600000',
+  10,
+);
 /**
  * Dangerous mode: gives agent containers broad access to NanoClaw data + Docker socket.
  * Enables self-healing and full remediation workflows at the cost of security isolation.

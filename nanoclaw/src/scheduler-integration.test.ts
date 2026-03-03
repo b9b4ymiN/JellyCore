@@ -27,6 +27,7 @@ import { GroupQueue } from './group-queue.js';
 // Mock config
 vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  AGENT_MODE_GLOBAL_DEFAULT: 'off',
   MAIN_GROUP_FOLDER: 'main',
   MAX_CONCURRENT_CONTAINERS: 5,
   MAX_QUEUE_SIZE: 20,

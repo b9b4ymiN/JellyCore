@@ -28,6 +28,7 @@ import {
 } from './config.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+import type { AgentMode, AgentRuntime } from './agents/types.js';
 
 export interface PooledContainer {
   id: string;
@@ -226,6 +227,8 @@ class ContainerPool {
       chatJid: string;
       isMain: boolean;
       isScheduledTask?: boolean;
+      agentRuntime?: AgentRuntime;
+      agentMode?: AgentMode;
       secrets: Record<string, string>;
     },
   ): Promise<void> {

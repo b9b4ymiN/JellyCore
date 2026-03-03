@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { runCodexPrompt } from './codex-runner.js';
 
 // ESM doesn't have __dirname — derive it from import.meta.url
 const __filename = fileURLToPath(import.meta.url);
@@ -30,6 +31,8 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  agentRuntime?: 'fon' | 'codex';
+  agentMode?: 'off' | 'swarm' | 'codex';
   secrets?: Record<string, string>;
 }
 
@@ -790,8 +793,11 @@ async function runQuery(
         ? inactiveExternalServers.map((e) => `${e.server.name} (${e.reason})`).join(', ')
         : '(none)'
     }`,
+    containerInput.agentMode === 'swarm'
+      ? '- Swarm mode active: for heavy coding/research sub-tasks, use mcp__nanoclaw__delegate_to_codex.'
+      : null,
     'Important: configured-to-load does not guarantee successful MCP handshake. If tool/function list in-session is missing a configured MCP, explicitly report it as configured but currently unavailable.',
-  ].join('\n');
+  ].filter((v): v is string => Boolean(v)).join('\n');
   const globalAppend = [globalAppendBase, runtimeMcpAppend]
     .filter((v): v is string => typeof v === 'string' && v.length > 0)
     .join('\n\n---\n\n');
@@ -1034,6 +1040,27 @@ async function main(): Promise<void> {
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
     prompt += '\n' + pending.join('\n');
+  }
+
+  const runtime = containerInput.agentRuntime === 'codex' ? 'codex' : 'fon';
+  if (runtime === 'codex') {
+    const codexModel = process.env.CODEX_MODEL || 'gpt-5.3-codex';
+    const codexTimeoutMs = Number.parseInt(process.env.CODEX_EXEC_TIMEOUT_MS || '600000', 10);
+    log(`Running Codex runtime (model=${codexModel})`);
+    const codexResult = await runCodexPrompt(prompt, {
+      model: codexModel,
+      timeoutMs: Number.isFinite(codexTimeoutMs) ? codexTimeoutMs : 600000,
+      cwd: '/workspace/group',
+    });
+    writeOutput({
+      status: codexResult.status,
+      result: codexResult.result,
+      error: codexResult.error,
+    });
+    if (codexResult.status === 'error') {
+      process.exit(1);
+    }
+    return;
   }
 
   // Query loop: run query → wait for IPC message → run new query → repeat

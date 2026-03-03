@@ -26,7 +26,13 @@ export const COMMAND_DEFINITIONS = [
   { command: 'session', description: 'ดูข้อมูล session & context', category: 'session' },
   { command: 'clear', description: 'ล้าง session (แก้ Prompt too long)', category: 'session' },
   { command: 'reset', description: 'ล้างข้อมูลผู้ใช้ (USER.md)', category: 'session' },
-  { command: 'model', description: 'ดู model & tier ปัจจุบัน', category: 'session' },
+  { command: 'model', description: '?? model & tier ????????', category: 'session' },
+  {
+    command: 'mode',
+    description: 'Show/set agent mode',
+    helpDescription: 'Show/set mode (use: /mode help)',
+    category: 'session',
+  },
 
   { command: 'usage', description: 'สรุปการใช้งานวันนี้', category: 'cost' },
   { command: 'cost', description: 'ค่าใช้จ่ายเดือนนี้', category: 'cost' },
@@ -108,3 +114,4 @@ export function parseSlashCommand(
   const args = trimmed.slice(firstToken.length).trim();
   return { command: rawName, args };
 }
+

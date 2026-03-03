@@ -3,7 +3,8 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, STORE_DIR } from './config.js';
+import { AGENT_MODE_GLOBAL_DEFAULT, DATA_DIR, STORE_DIR } from './config.js';
+import type { AgentMode } from './agents/types.js';
 import {
   DeadLetterMessage,
   HeartbeatJob,
@@ -165,6 +166,19 @@ function createSchema(database: Database.Database): void {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_chat_user_identity_user_id ON chat_user_identity(user_id);
+
+    CREATE TABLE IF NOT EXISTS agent_mode_defaults (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mode TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS group_agent_mode_overrides (
+      group_folder TEXT PRIMARY KEY,
+      mode TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT NOT NULL
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -276,6 +290,7 @@ export function initDatabase(): void {
   db.pragma('cache_size = -20000'); // 20MB cache
 
   createSchema(db);
+  ensureAgentModeDefault();
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -285,6 +300,7 @@ export function initDatabase(): void {
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
   createSchema(db);
+  ensureAgentModeDefault();
 }
 
 /** Returns the shared database instance. Must call initDatabase() first. */
@@ -316,6 +332,27 @@ function buildStableUserId(chatJid: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function normalizeAgentMode(mode: string | undefined): AgentMode {
+  if (mode === 'swarm' || mode === 'codex') return mode;
+  return 'off';
+}
+
+function ensureAgentModeDefault(): void {
+  const row = db
+    .prepare(`SELECT mode FROM agent_mode_defaults WHERE id = 1`)
+    .get() as { mode?: string } | undefined;
+  if (row?.mode) return;
+
+  db.prepare(
+    `INSERT INTO agent_mode_defaults (id, mode, updated_at, updated_by)
+     VALUES (1, ?, ?, ?)`,
+  ).run(
+    normalizeAgentMode(AGENT_MODE_GLOBAL_DEFAULT),
+    nowIso(),
+    'system:init',
+  );
 }
 
 export function getStableUserId(chatJid: string): string {
@@ -1242,6 +1279,84 @@ export function getAllSessions(): Record<string, string> {
     result[row.group_folder] = row.session_id;
   }
   return result;
+}
+
+// --- Agent mode default + overrides ---
+
+export function getGlobalAgentModeDefault(): AgentMode {
+  const row = db
+    .prepare(`SELECT mode FROM agent_mode_defaults WHERE id = 1`)
+    .get() as { mode?: string } | undefined;
+  if (!row?.mode) return 'off';
+  return normalizeAgentMode(row.mode);
+}
+
+export function setGlobalAgentModeDefault(
+  mode: AgentMode,
+  updatedBy: string,
+): void {
+  db.prepare(
+    `INSERT INTO agent_mode_defaults (id, mode, updated_at, updated_by)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       mode = excluded.mode,
+       updated_at = excluded.updated_at,
+       updated_by = excluded.updated_by`,
+  ).run(mode, nowIso(), updatedBy);
+}
+
+export function getGroupAgentModeOverride(
+  groupFolder: string,
+): AgentMode | undefined {
+  const row = db
+    .prepare(
+      `SELECT mode FROM group_agent_mode_overrides WHERE group_folder = ?`,
+    )
+    .get(groupFolder) as { mode?: string } | undefined;
+  if (!row?.mode) return undefined;
+  return normalizeAgentMode(row.mode);
+}
+
+export function setGroupAgentModeOverride(
+  groupFolder: string,
+  mode: AgentMode,
+  updatedBy: string,
+): void {
+  db.prepare(
+    `INSERT INTO group_agent_mode_overrides (group_folder, mode, updated_at, updated_by)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(group_folder) DO UPDATE SET
+       mode = excluded.mode,
+       updated_at = excluded.updated_at,
+       updated_by = excluded.updated_by`,
+  ).run(groupFolder, mode, nowIso(), updatedBy);
+}
+
+export function clearGroupAgentModeOverride(groupFolder: string): void {
+  db.prepare(
+    `DELETE FROM group_agent_mode_overrides WHERE group_folder = ?`,
+  ).run(groupFolder);
+}
+
+export function getAgentModeSnapshot(): {
+  default: AgentMode;
+  overrides: Record<string, AgentMode>;
+} {
+  const rows = db
+    .prepare(`SELECT group_folder, mode FROM group_agent_mode_overrides`)
+    .all() as Array<{ group_folder: string; mode: string }>;
+  const overrides: Record<string, AgentMode> = {};
+  for (const row of rows) {
+    overrides[row.group_folder] = normalizeAgentMode(row.mode);
+  }
+  return {
+    default: getGlobalAgentModeDefault(),
+    overrides,
+  };
+}
+
+export function resolveAgentMode(groupFolder: string): AgentMode {
+  return getGroupAgentModeOverride(groupFolder) || getGlobalAgentModeDefault();
 }
 
 // --- Registered group accessors ---

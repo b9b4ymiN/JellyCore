@@ -237,6 +237,25 @@ TZ=Asia/Bangkok
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 ```
 
+If you want `mode=swarm` or `mode=codex`, prepare ChatGPT login auth first:
+
+```bash
+mkdir -p data/codex-auth
+# place your ChatGPT login file at:
+# data/codex-auth/auth.json
+```
+
+Then enable runtime flags in `.env`:
+
+```dotenv
+AGENT_CODEX_ENABLED=true
+AGENT_SWARM_ENABLED=true
+AGENT_MODE_GLOBAL_DEFAULT=off
+CODEX_AUTH_REQUIRED=true
+CODEX_AUTH_PATH=data/codex-auth
+CODEX_MODEL=gpt-5.3-codex
+```
+
 ### Step 3 — Build the Agent Container Image
 
 ```bash
@@ -307,6 +326,13 @@ These are generated automatically on first run if left empty:
 | `CONTAINER_CPU_LIMIT` | `1.0` | CPU limit per agent container |
 | `MAX_CONCURRENT_CONTAINERS` | `5` (dev) / `2` (prod) | Maximum simultaneous agent containers |
 | `AGENT_FULL_ACCESS` | `false` | ⚠️ Grants broad file + Docker socket access to containers |
+| `AGENT_CODEX_ENABLED` | `false` | Enable Codex runtime selection |
+| `AGENT_SWARM_ENABLED` | `false` | Enable Swarm routing mode |
+| `AGENT_MODE_GLOBAL_DEFAULT` | `off` | Global default mode: `off\|swarm\|codex` |
+| `CODEX_AUTH_REQUIRED` | `true` | Require ChatGPT login `auth.json` for Codex |
+| `CODEX_AUTH_PATH` | `data/codex-auth` | Host path containing `auth.json` |
+| `CODEX_MODEL` | `gpt-5.3-codex` | Codex model for direct/delegated execution |
+| `CODEX_EXEC_TIMEOUT_MS` | `600000` | Codex execution timeout in milliseconds |
 | `ENABLED_CHANNELS` | `telegram` | Comma-separated: `telegram`, `whatsapp` |
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Embedding model for vector search |
 | `ASSISTANT_NAME` | `Andy` | Bot display name |
@@ -372,6 +398,7 @@ You specialize in data analysis and reporting.
 | `/clear` | Clear conversation history |
 | `/reset` | Full session reset |
 | `/model` | Show or switch AI model |
+| `/mode` | Show/set runtime mode (`off`, `swarm`, `codex`) |
 | `/usage` | Token usage statistics |
 | `/cost` | Cost breakdown |
 | `/budget` | Budget management |
@@ -633,6 +660,9 @@ All 7 phases of the original master plan have been **completed**:
 - 📈 Horizontal scaling with shared state layer
 - 🎙 Voice message processing
 - 🧩 Plugin marketplace for community skills
+- 🐝 Swarm+Codex policy packs (`AGENT.md`) for per-group routing strategy
+- 📊 Codex auth/mode observability widgets and alerting
+- 🧵 Session-aware Codex runtime (optional stateful mode after v1 stabilization)
 
 ---
 
@@ -642,6 +672,7 @@ All 7 phases of the original master plan have been **completed**:
 |----------|-------------|
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Local development setup guide |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Linux VPS production deployment guide |
+| [docs/CODEX_AUTH_REQUIRED_SWARM.md](docs/CODEX_AUTH_REQUIRED_SWARM.md) | Swarm + Codex auth-required operations |
 | [docs/MASTER_PLAN/](docs/MASTER_PLAN/) | Complete architecture roadmap (7 phases) |
 | [docs/releases/](docs/releases/) | Detailed release notes for all versions |
 | [nanoclaw/README.md](nanoclaw/README.md) | NanoClaw — orchestrator documentation |

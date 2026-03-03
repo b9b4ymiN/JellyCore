@@ -3,6 +3,9 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  AGENT_CODEX_ENABLED,
+  AGENT_SWARM_ENABLED,
+  AGENT_MODE_GLOBAL_DEFAULT,
   ASSISTANT_NAME,
   DATA_DIR,
   ENABLED_CHANNELS,
@@ -37,6 +40,7 @@ import { initCostTracking, trackUsage } from './cost-tracker.js';
 import { initCostIntelligence, checkBudget, trackUsageEnhanced } from './cost-intelligence.js';
 import {
   getAllChats,
+  getAgentModeSnapshot,
   getDlqCounts,
   getDeadLetterByTrace,
   getDeadLettersByStatus,
@@ -50,13 +54,19 @@ import {
   getNewMessages,
   getRecoverableReceipts,
   getRetryingMessages,
+  getGlobalAgentModeDefault,
   getRouterState,
+  getGroupAgentModeOverride,
   getSessionAge,
   markDeadLetterRetrying,
   ensureMessageReceipt,
   moveToDeadLetter,
+  resolveAgentMode,
   resolveDeadLetter,
+  setGlobalAgentModeDefault,
   transitionMessageStatus,
+  setGroupAgentModeOverride,
+  clearGroupAgentModeOverride,
   clearSession,
   initDatabase,
   setRegisteredGroup,
@@ -67,7 +77,7 @@ import {
   updateTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { startIpcWatcher, writeHeartbeatJobsSnapshot } from './ipc.js';
+import { startIpcWatcher, writeAgentModesSnapshot, writeHeartbeatJobsSnapshot } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound, routeOutbound, routeOutboundPayload } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, LaneType, NewMessage, OutboundPayload, RegisteredGroup } from './types.js';
@@ -81,6 +91,9 @@ import {
   buildTelegramOutboundPayloadFromGroupFile,
   parseTelegramMediaDirectives,
 } from './telegram-media.js';
+import { evaluateCodexAuthStatus, getCodexAuthStatus } from './codex-auth.js';
+import { resolveAgentRuntime } from './agents/resolver.js';
+import type { AgentMode, AgentRuntime, CodexAuthStatus } from './agents/types.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -90,6 +103,10 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+let codexAuthStatus: CodexAuthStatus = {
+  ready: false,
+  checkedAt: '',
+};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -477,6 +494,38 @@ function saveState(): void {
   );
 }
 
+function refreshCodexAuthStatus(): void {
+  const prev = codexAuthStatus;
+  codexAuthStatus = evaluateCodexAuthStatus();
+
+  if (prev.ready !== codexAuthStatus.ready || prev.reason !== codexAuthStatus.reason) {
+    logger.warn(
+      {
+        ready: codexAuthStatus.ready,
+        reason: codexAuthStatus.reason || null,
+        checkedAt: codexAuthStatus.checkedAt,
+      },
+      codexAuthStatus.ready
+        ? 'codex_auth_ready'
+        : 'codex_auth_blocked',
+    );
+  }
+}
+
+function ensureAgentModeDefaultConfig(): void {
+  const current = getGlobalAgentModeDefault();
+  const desired = (
+    AGENT_MODE_GLOBAL_DEFAULT === 'swarm' || AGENT_MODE_GLOBAL_DEFAULT === 'codex'
+      ? AGENT_MODE_GLOBAL_DEFAULT
+      : 'off'
+  ) as AgentMode;
+  if (current === desired) return;
+
+  // Keep existing DB preference once it diverges from env, unless db is still empty
+  // (db initialization seeds from env, so mismatch here is likely deliberate).
+  logger.info({ current, desired }, 'Agent mode default loaded');
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
@@ -566,7 +615,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
 
   // Tier 1: Inline â€” template response, no container/API
   if (classification.tier === 'inline') {
-    const result = handleInline(classification.reason, lastMsg.content, chatJid, group.name);
+    const result = handleInline(classification.reason, lastMsg.content, chatJid, group.folder);
     const reply = typeof result === 'string' ? result : result.reply;
     const action = typeof result === 'string' ? undefined : result.action;
 
@@ -752,7 +801,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
 
   let output: 'success' | 'error';
   try {
-    output = await runAgent(group, prompt, chatJid, async (result) => {
+    output = await runAgent(group, prompt, chatJid, classification.reason, 'user', async (result) => {
       // Streaming output callback â€” called for each agent result
       try {
         if (result.result) {
@@ -913,25 +962,21 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  classificationReason: string | undefined,
+  lane: LaneType,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
+  refreshCodexAuthStatus();
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  let sessionId: string | undefined = sessions[group.folder];
-
-  // Session rotation: if session is too old, start fresh to prevent
-  // unbounded context accumulation from SDK session resume
-  if (sessionId) {
-    const age = getSessionAge(group.folder);
-    if (age !== null && age > SESSION_MAX_AGE_MS) {
-      logger.info(
-        { group: group.name, ageHours: Math.round(age / 3600000) },
-        'Session expired, rotating to fresh session',
-      );
-      clearSession(group.folder);
-      delete sessions[group.folder];
-      sessionId = undefined;
-    }
-  }
+  const mode = resolveAgentMode(group.folder);
+  const resolution = resolveAgentRuntime({
+    lane,
+    mode,
+    classificationReason,
+    codexEnabled: AGENT_CODEX_ENABLED,
+    swarmEnabled: AGENT_SWARM_ENABLED,
+    codexAuthReady: codexAuthStatus.ready,
+  });
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -958,18 +1003,33 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
-  const wrappedOnOutput = onOutput
-    ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
-        }
-        await onOutput(output);
-      }
-    : undefined;
+  async function runRuntime(runtime: AgentRuntime): Promise<'success' | 'error'> {
+    let sessionId: string | undefined = runtime === 'fon' ? sessions[group.folder] : undefined;
 
-  try {
+    // Session rotation only applies to Fon stateful runtime.
+    if (runtime === 'fon' && sessionId) {
+      const age = getSessionAge(group.folder);
+      if (age !== null && age > SESSION_MAX_AGE_MS) {
+        logger.info(
+          { group: group.name, ageHours: Math.round(age / 3600000) },
+          'Session expired, rotating to fresh session',
+        );
+        clearSession(group.folder);
+        delete sessions[group.folder];
+        sessionId = undefined;
+      }
+    }
+
+    const wrappedOnOutput = onOutput
+      ? async (output: ContainerOutput) => {
+          if (runtime === 'fon' && output.newSessionId) {
+            sessions[group.folder] = output.newSessionId;
+            setSession(group.folder, output.newSessionId);
+          }
+          await onOutput(output);
+        }
+      : undefined;
+
     const output = await runContainerAgent(
       group,
       {
@@ -978,28 +1038,68 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
-        lane: 'user',
+        lane,
+        agentRuntime: runtime,
+        agentMode: mode,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
+    if (runtime === 'fon' && output.newSessionId) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }
 
     if (output.status === 'error') {
       logger.error(
-        { group: group.name, error: output.error },
+        {
+          group: group.name,
+          runtime,
+          lane,
+          mode,
+          error: output.error,
+          resolution: resolution.reason,
+        },
         'Container agent error',
       );
       return 'error';
     }
-
     return 'success';
+  }
+
+  try {
+    logger.info(
+      {
+        group: group.name,
+        lane,
+        mode,
+        selectedRuntime: resolution.runtime,
+        resolution: resolution.reason,
+      },
+      'Agent runtime selected',
+    );
+
+    const primary = await runRuntime(resolution.runtime);
+    if (primary === 'success') return 'success';
+
+    if (resolution.runtime === 'codex' && resolution.allowFallbackToFon) {
+      logger.warn(
+        { group: group.name, lane, mode },
+        'Codex failed, falling back to Fon',
+      );
+      if (onOutput) {
+        await onOutput({
+          status: 'success',
+          result: 'ℹ️ Codex unavailable. Falling back to Fon.',
+        });
+      }
+      return await runRuntime('fon');
+    }
+
+    return primary;
   } catch (err) {
-    logger.error({ group: group.name, err }, 'Agent error');
+    logger.error({ group: group.name, lane, mode, err }, 'Agent error');
     return 'error';
   }
 }
@@ -1337,6 +1437,9 @@ async function main(): Promise<void> {
   initContainerPool();
   logger.info('Database initialized');
   loadState();
+  ensureAgentModeDefaultConfig();
+  refreshCodexAuthStatus();
+  const codexAuthTimer = setInterval(refreshCodexAuthStatus, 60_000);
   reconcileUnfinishedReceipts();
   dockerResilience.init(() => queue.getActiveContainerNames());
   capabilityProbe.start();
@@ -1356,6 +1459,7 @@ async function main(): Promise<void> {
     await queue.shutdown(10000);
     capabilityProbe.stop();
     dockerResilience.stop();
+    clearInterval(codexAuthTimer);
 
     // 3. Kill ALL orphan nanoclaw-* agent containers so Docker network can be freed
     try {
@@ -1539,6 +1643,7 @@ async function main(): Promise<void> {
     getDockerResilience: () => dockerResilience.getState(),
     getDlqStats: () => getDlqCounts(),
     getCapabilityHealth: () => capabilityProbe.getState(),
+    getCodexAuthStatus: () => codexAuthStatus,
     getUptimeMs: () => Date.now() - appStartTime,
   });
   setOpsProvider({
@@ -1605,6 +1710,7 @@ async function main(): Promise<void> {
 
   // Write initial heartbeat jobs snapshot for containers
   writeHeartbeatJobsSnapshot();
+  writeAgentModesSnapshot();
 
   // Start smart heartbeat job runner
   const stopJobRunner = startHeartbeatJobRunner({
@@ -1640,6 +1746,8 @@ async function main(): Promise<void> {
                   isMain,
                   isScheduledTask: true,
                   lane: 'heartbeat',
+                  agentRuntime: 'fon',
+                  agentMode: resolveAgentMode(group.folder),
                 },
                 (proc, containerName) => queue.registerProcess(virtualJid, proc, containerName, group.folder),
               );

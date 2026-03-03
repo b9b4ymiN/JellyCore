@@ -23,6 +23,7 @@ import {
   getTaskById,
   logTaskRun,
   resetRetryCount,
+  resolveAgentMode,
   scheduleRetry,
   updateTask,
   updateTaskAfterRun,
@@ -93,6 +94,7 @@ async function runTask(
 
   // Update tasks snapshot for container to read (filtered by group)
   const isMain = task.group_folder === MAIN_GROUP_FOLDER;
+  const effectiveMode = resolveAgentMode(task.group_folder);
   const tasks = getAllTasks();
   writeTasksSnapshot(
     task.group_folder,
@@ -154,6 +156,8 @@ async function runTask(
         isMain,
         isScheduledTask: true,
         lane: 'scheduler',
+        agentRuntime: 'fon',
+        agentMode: effectiveMode,
       },
       (proc, containerName) => deps.onProcess('_sched_' + task.id, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {

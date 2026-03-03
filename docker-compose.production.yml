@@ -130,6 +130,8 @@ services:
       # Persistent state (sessions, database, auth)
       - nanoclaw-store:/app/nanoclaw/store
       - nanoclaw-data:/app/nanoclaw/data
+      # Codex auth.json from ChatGPT login (required for codex/swarm modes)
+      - ./data/codex-auth:/app/nanoclaw/data/codex-auth:ro
       # Group workspaces (shared with agent containers via DinD resolveHostPath)
       - ./groups:/app/nanoclaw/groups
     environment:
@@ -162,6 +164,13 @@ services:
       - ASSISTANT_NAME=${ASSISTANT_NAME:-Andy}
       - CONTAINER_IMAGE=${CONTAINER_IMAGE:-nanoclaw-agent:latest}
       - AGENT_FULL_ACCESS=${AGENT_FULL_ACCESS:-true}
+      - AGENT_CODEX_ENABLED=${AGENT_CODEX_ENABLED:-false}
+      - AGENT_SWARM_ENABLED=${AGENT_SWARM_ENABLED:-false}
+      - AGENT_MODE_GLOBAL_DEFAULT=${AGENT_MODE_GLOBAL_DEFAULT:-off}
+      - CODEX_AUTH_REQUIRED=${CODEX_AUTH_REQUIRED:-true}
+      - CODEX_AUTH_PATH=${CODEX_AUTH_PATH:-data/codex-auth}
+      - CODEX_MODEL=${CODEX_MODEL:-gpt-5.3-codex}
+      - CODEX_EXEC_TIMEOUT_MS=${CODEX_EXEC_TIMEOUT_MS:-600000}
       - NODE_ENV=production
       # Docker network for agent containers to join
       - DOCKER_NETWORK=jellycore_jellycore-internal

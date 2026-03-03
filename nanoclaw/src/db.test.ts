@@ -10,11 +10,17 @@ import {
   getMessagesSince,
   getMessageAttachments,
   getNewMessages,
+  getGroupAgentModeOverride,
+  getGlobalAgentModeDefault,
   getSession,
   getSessionAge,
   getTaskById,
   ensureMessageReceipt,
+  clearGroupAgentModeOverride,
   clearSession,
+  resolveAgentMode,
+  setGlobalAgentModeDefault,
+  setGroupAgentModeOverride,
   setSession,
   storeChatMetadata,
   storeMessage,
@@ -529,5 +535,30 @@ describe('session rotation', () => {
 
   it('getSessionAge returns null for non-existent session', () => {
     expect(getSessionAge('nonexistent')).toBeNull();
+  });
+});
+
+describe('agent mode persistence', () => {
+  it('uses global default when no group override exists', () => {
+    setGlobalAgentModeDefault('off', 'test');
+    expect(getGlobalAgentModeDefault()).toBe('off');
+    expect(resolveAgentMode('team-a')).toBe('off');
+  });
+
+  it('group override takes precedence over global default', () => {
+    setGlobalAgentModeDefault('off', 'test');
+    setGroupAgentModeOverride('team-a', 'swarm', 'test');
+    expect(getGroupAgentModeOverride('team-a')).toBe('swarm');
+    expect(resolveAgentMode('team-a')).toBe('swarm');
+  });
+
+  it('clearing override falls back to global default', () => {
+    setGlobalAgentModeDefault('codex', 'test');
+    setGroupAgentModeOverride('team-a', 'off', 'test');
+    expect(resolveAgentMode('team-a')).toBe('off');
+
+    clearGroupAgentModeOverride('team-a');
+    expect(getGroupAgentModeOverride('team-a')).toBeUndefined();
+    expect(resolveAgentMode('team-a')).toBe('codex');
   });
 });
