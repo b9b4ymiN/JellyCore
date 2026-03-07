@@ -252,6 +252,16 @@ export class GroupQueue {
     if (groupFolder) state.groupFolder = groupFolder;
   }
 
+  unregisterProcess(groupJid: string): void {
+    const state = this.groups.get(groupJid);
+    if (!state) return;
+    state.process = null;
+    state.containerName = null;
+    if (!state.active && !state.pendingMessages && state.pendingTasks.length === 0) {
+      this.groups.delete(groupJid);
+    }
+  }
+
   sendMessage(groupJid: string, text: string): boolean {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder) return false;
@@ -272,7 +282,7 @@ export class GroupQueue {
 
   closeStdin(groupJid: string): void {
     const state = this.getGroup(groupJid);
-    if (!state.active || !state.groupFolder) return;
+    if (!state.groupFolder || !state.process || state.process.killed) return;
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {

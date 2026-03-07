@@ -8,6 +8,7 @@
 import { createHash } from 'crypto';
 
 import { logger } from './logger.js';
+import { attachRequestIdHeader, createRequestId } from './request-id.js';
 
 // Character budgets per section (~4 chars/token)
 const USER_MODEL_CHAR_LIMIT = 500;
@@ -91,6 +92,7 @@ class OracleClient {
     path: string,
     params?: Record<string, string | number | undefined>,
     signal?: AbortSignal,
+    requestId?: string,
   ): Promise<unknown> {
     const url = new URL(path, this.baseUrl);
     if (params) {
@@ -103,15 +105,16 @@ class OracleClient {
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.authToken) headers.Authorization = `Bearer ${this.authToken}`;
+    const mergedHeaders = attachRequestIdHeader(headers, requestId || createRequestId('ctx'));
 
-    const response = await fetch(url.toString(), { headers, signal });
+    const response = await fetch(url.toString(), { headers: mergedHeaders, signal });
     if (!response.ok) throw new Error(`Oracle ${response.status}`);
     return response.json();
   }
 
-  async getUserModel(userId: string, signal?: AbortSignal): Promise<string> {
+  async getUserModel(userId: string, signal?: AbortSignal, requestId?: string): Promise<string> {
     try {
-      const result = await this.request('/api/user-model', { userId }, signal);
+      const result = await this.request('/api/user-model', { userId }, signal, requestId);
       const obj = asObject(result);
       if (!obj) return '';
 
@@ -139,9 +142,14 @@ class OracleClient {
     }
   }
 
-  async getProceduralGuidance(query: string, limit = 2, signal?: AbortSignal): Promise<string> {
+  async getProceduralGuidance(
+    query: string,
+    limit = 2,
+    signal?: AbortSignal,
+    requestId?: string,
+  ): Promise<string> {
     try {
-      const result = await this.request('/api/procedural', { q: query, limit }, signal);
+      const result = await this.request('/api/procedural', { q: query, limit }, signal, requestId);
       const rows = extractResults(result);
       if (rows.length === 0) return '';
 
@@ -168,9 +176,10 @@ class OracleClient {
     userId: string,
     limit = 2,
     signal?: AbortSignal,
+    requestId?: string,
   ): Promise<string> {
     try {
-      const result = await this.request('/api/episodic', { q: query, userId, limit }, signal);
+      const result = await this.request('/api/episodic', { q: query, userId, limit }, signal, requestId);
       const rows = extractResults(result);
       if (rows.length === 0) return '';
 
@@ -187,9 +196,14 @@ class OracleClient {
     }
   }
 
-  async searchKnowledge(query: string, limit = 3, signal?: AbortSignal): Promise<string> {
+  async searchKnowledge(
+    query: string,
+    limit = 3,
+    signal?: AbortSignal,
+    requestId?: string,
+  ): Promise<string> {
     try {
-      const result = await this.request('/api/search', { q: query, limit, mode: 'hybrid' }, signal);
+      const result = await this.request('/api/search', { q: query, limit, mode: 'hybrid' }, signal, requestId);
       const rows = extractResults(result);
       if (rows.length === 0) return '';
 
@@ -331,13 +345,14 @@ export class PromptBuilder {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), ORACLE_TIMEOUT_MS);
+    const requestId = createRequestId('ctx');
 
     try {
       const [userModel, proceduralGuidance, recentEpisodes, relevantKnowledge] = await Promise.all([
-        this.oracleClient.getUserModel(userId, controller.signal),
-        this.oracleClient.getProceduralGuidance(latestUserMessage, 2, controller.signal),
-        this.oracleClient.getRecentEpisodes(latestUserMessage, userId, 2, controller.signal),
-        this.oracleClient.searchKnowledge(latestUserMessage, 3, controller.signal),
+        this.oracleClient.getUserModel(userId, controller.signal, requestId),
+        this.oracleClient.getProceduralGuidance(latestUserMessage, 2, controller.signal, requestId),
+        this.oracleClient.getRecentEpisodes(latestUserMessage, userId, 2, controller.signal, requestId),
+        this.oracleClient.searchKnowledge(latestUserMessage, 3, controller.signal, requestId),
       ]);
 
       clearTimeout(timeout);
@@ -366,7 +381,7 @@ export class PromptBuilder {
       return context;
     } catch (err) {
       clearTimeout(timeout);
-      logger.warn({ err, groupId, userId }, 'Oracle context injection failed, skipping');
+      logger.warn({ err, groupId, userId, requestId }, 'Oracle context injection failed, skipping');
       return {
         userModel: '',
         proceduralGuidance: '',

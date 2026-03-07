@@ -21,13 +21,23 @@ interface McpResponse {
 
 let mcpProcess: Subprocess<"pipe", "pipe", "pipe"> | null = null;
 let requestId = 0;
+const ORACLE_ROOT = import.meta.dir.replace(/[/\\]src[/\\]integration$/, "");
 
-async function sendMcpRequest(method: string, params?: Record<string, unknown>): Promise<McpResponse> {
+async function sendMcpRequest(
+  method: string,
+  params?: Record<string, unknown>,
+  timeoutMs = 10_000,
+): Promise<McpResponse> {
   if (!mcpProcess) throw new Error("MCP process not started");
 
+  if (mcpProcess.exitCode !== null) {
+    throw new Error(`MCP process exited early with code ${mcpProcess.exitCode}`);
+  }
+
+  const id = ++requestId;
   const request: McpRequest = {
     jsonrpc: "2.0",
-    id: ++requestId,
+    id,
     method,
     params,
   };
@@ -39,19 +49,26 @@ async function sendMcpRequest(method: string, params?: Record<string, unknown>):
   const reader = mcpProcess.stdout.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const deadline = Date.now() + timeoutMs;
 
   while (true) {
+    if (Date.now() > deadline) {
+      reader.releaseLock();
+      throw new Error(`MCP request timeout for method "${method}"`);
+    }
+
     const { value, done } = await reader.read();
     if (done) break;
 
     buffer += decoder.decode(value);
     const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
 
     for (const line of lines) {
       if (line.trim()) {
         try {
           const response = JSON.parse(line) as McpResponse;
-          if (response.id === requestId) {
+          if (response.id === id) {
             reader.releaseLock();
             return response;
           }
@@ -83,7 +100,7 @@ describe("MCP Integration", () => {
   beforeAll(async () => {
     // Start MCP server
     mcpProcess = Bun.spawn(["bun", "run", "src/index.ts"], {
-      cwd: import.meta.dir.replace("/src/integration", ""),
+      cwd: ORACLE_ROOT,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

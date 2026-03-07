@@ -229,6 +229,7 @@ class ContainerPool {
       isScheduledTask?: boolean;
       agentRuntime?: AgentRuntime;
       agentMode?: AgentMode;
+      requestId?: string;
       secrets: Record<string, string>;
     },
   ): Promise<void> {
@@ -349,7 +350,11 @@ class ContainerPool {
 
       const check = () => {
         if (fs.existsSync(readyPath)) {
-          try { fs.unlinkSync(readyPath); } catch { /* ok */ }
+          try {
+            fs.unlinkSync(readyPath);
+          } catch (err) {
+            logger.debug({ err, readyPath }, 'Ready sentinel cleanup skipped');
+          }
           resolve(true);
           return;
         }
@@ -372,7 +377,12 @@ class ContainerPool {
     try {
       const closeFile = path.join(DATA_DIR, 'ipc', container.groupFolder, 'input', '_close');
       fs.writeFileSync(closeFile, '');
-    } catch { /* best effort */ }
+    } catch (err) {
+      logger.warn(
+        { err, container: container.containerName, groupFolder: container.groupFolder },
+        'Failed to write close sentinel before container stop',
+      );
+    }
 
     // Force stop after 10s
     setTimeout(() => {
@@ -389,7 +399,12 @@ class ContainerPool {
       try {
         const closeFile = path.join(DATA_DIR, 'ipc', container.groupFolder, 'input', '_close');
         fs.writeFileSync(closeFile, '');
-      } catch { /* best effort */ }
+      } catch (err) {
+        logger.warn(
+          { err, container: container.containerName, groupFolder: container.groupFolder },
+          'Failed to write close sentinel during async container stop',
+        );
+      }
 
       exec(`docker stop ${container.containerName}`, { timeout: 15000 }, () => {
         resolve();

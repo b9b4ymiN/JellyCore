@@ -22,10 +22,12 @@ import {
   STORE_DIR,
 } from './config.js';
 import { dockerResilience } from './docker-resilience.js';
+import { eventBus } from './event-bus.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { containerPool } from './container-pool.js';
 import { LaneType, RegisteredGroup } from './types.js';
+import { recordNonFatalError } from './non-fatal-errors.js';
 import type { AgentMode, AgentRuntime } from './agents/types.js';
 
 /** Format milliseconds as human-readable duration (e.g., "30 min", "1h 30 min"). */
@@ -40,6 +42,26 @@ function formatMs(ms: number): string {
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+function withDockerEnv<T>(options: T): T {
+  const dockerHost = process.env.DOCKER_HOST;
+  if (!dockerHost) return options;
+  if (!options || typeof options !== 'object') return options;
+  const withEnv = options as T & { env?: NodeJS.ProcessEnv };
+  return {
+    ...withEnv,
+    env: {
+      ...process.env,
+      ...(withEnv.env || {}),
+      DOCKER_HOST: dockerHost,
+    },
+  } as T;
+}
+
+function runtimeToProvider(runtime: AgentRuntime | undefined): string {
+  if (runtime === 'codex') return 'codex';
+  return 'claude';
+}
 
 /**
  * Docker-in-Docker mount path resolution.
@@ -91,7 +113,7 @@ function loadContainerMounts(): DockerMount[] {
     const containerId = os.hostname();
     const result = execSync(
       `docker inspect --format '{{json .Mounts}}' ${containerId}`,
-      { encoding: 'utf-8', timeout: 5000 },
+      withDockerEnv({ encoding: 'utf-8', timeout: 5000 }),
     );
     cachedMounts = JSON.parse(result.trim());
     logger.info(
@@ -152,6 +174,7 @@ export interface ContainerInput {
   lane?: LaneType;
   agentRuntime?: AgentRuntime;
   agentMode?: AgentMode;
+  requestId?: string;
   secrets?: Record<string, string>;
 }
 
@@ -167,11 +190,14 @@ function getContainerImageMetadata(): ContainerImageMetadata {
   };
 
   try {
-    const raw = execSync(`docker image inspect ${CONTAINER_IMAGE}`, {
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const raw = execSync(
+      `docker image inspect ${CONTAINER_IMAGE}`,
+      withDockerEnv({
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }),
+    );
     const parsed = JSON.parse(raw) as ContainerImageInspect[];
     const inspected = parsed[0];
     cachedImageMetadata = {
@@ -229,7 +255,13 @@ function readJsonFileNormalized(filePath: string): { ok: true; normalized: strin
     const normalized = stripUtf8Bom(raw);
     JSON.parse(normalized);
     return { ok: true, normalized };
-  } catch {
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.read_json_normalized_failed',
+      err,
+      { filePath },
+      'debug',
+    );
     return { ok: false };
   }
 }
@@ -250,7 +282,16 @@ function syncCodexBootstrapAuth(
   if (!sourceAuth) return false;
 
   fs.mkdirSync(groupCodexHomeDir, { recursive: true });
-  try { fs.chmodSync(groupCodexHomeDir, 0o777); } catch { /* best-effort on Windows */ }
+  try {
+    fs.chmodSync(groupCodexHomeDir, 0o777);
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.chmod_group_codex_home_failed',
+      err,
+      { group: groupFolder, groupCodexHomeDir },
+      'debug',
+    );
+  }
 
   const destinationAuth = path.join(groupCodexHomeDir, 'auth.json');
   const sourceParsed = readJsonFileNormalized(sourceAuth);
@@ -276,7 +317,13 @@ function syncCodexBootstrapAuth(
         shouldCopy = sourceMtime > destinationMtime + 500;
       }
     }
-  } catch {
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.stat_destination_auth_failed',
+      err,
+      { group: groupFolder, destinationAuth },
+      'debug',
+    );
     shouldCopy = true;
   }
 
@@ -285,7 +332,16 @@ function syncCodexBootstrapAuth(
   fs.writeFileSync(destinationAuth, sourceParsed.normalized, {
     encoding: 'utf-8',
   });
-  try { fs.chmodSync(destinationAuth, 0o600); } catch { /* best-effort on Windows */ }
+  try {
+    fs.chmodSync(destinationAuth, 0o600);
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.chmod_destination_auth_failed',
+      err,
+      { group: groupFolder, destinationAuth },
+      'debug',
+    );
+  }
   logger.info(
     {
       group: groupFolder,
@@ -348,7 +404,13 @@ function syncGoogleDocsBootstrapToken(
         shouldCopy = sourceParsed.normalized !== destinationParsed.normalized;
       }
     }
-  } catch {
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.stat_destination_token_failed',
+      err,
+      { group: groupFolder, destinationToken, profile: profile || null },
+      'debug',
+    );
     shouldCopy = true;
   }
 
@@ -357,7 +419,16 @@ function syncGoogleDocsBootstrapToken(
   fs.writeFileSync(destinationToken, sourceParsed.normalized, {
     encoding: 'utf-8',
   });
-  try { fs.chmodSync(destinationToken, 0o600); } catch { /* best-effort on Windows */ }
+  try {
+    fs.chmodSync(destinationToken, 0o600);
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.chmod_destination_token_failed',
+      err,
+      { group: groupFolder, destinationToken, profile: profile || null },
+      'debug',
+    );
+  }
   logger.info(
     {
       group: groupFolder,
@@ -441,7 +512,16 @@ function buildVolumeMounts(
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   // Make sessions dir writable by container's node user (uid 1000)
-  try { fs.chmodSync(groupSessionsDir, 0o777); } catch { /* best-effort on Windows */ }
+  try {
+    fs.chmodSync(groupSessionsDir, 0o777);
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.chmod_group_sessions_dir_failed',
+      err,
+      { group: group.folder, groupSessionsDir },
+      'debug',
+    );
+  }
   // Always overwrite settings.json so Z.AI config changes take effect
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   fs.writeFileSync(settingsFile, JSON.stringify({
@@ -510,8 +590,13 @@ function buildVolumeMounts(
     // Keep behavior deterministic: remove stale mirrored config when project file is deleted.
     try {
       fs.rmSync(sessionMcpPath, { force: true });
-    } catch {
-      // best effort
+    } catch (err) {
+      recordNonFatalError(
+        'container_runner.remove_stale_session_mcp_failed',
+        err,
+        { group: group.folder, sessionMcpPath },
+        'debug',
+      );
     }
   }
 
@@ -550,7 +635,14 @@ function buildVolumeMounts(
     fs.chmodSync(path.join(groupIpcDir, 'messages'), 0o777);
     fs.chmodSync(path.join(groupIpcDir, 'tasks'), 0o777);
     fs.chmodSync(path.join(groupIpcDir, 'input'), 0o777);
-  } catch { /* best-effort on Windows */ }
+  } catch (err) {
+    recordNonFatalError(
+      'container_runner.chmod_group_ipc_dir_failed',
+      err,
+      { group: group.folder, groupIpcDir },
+      'debug',
+    );
+  }
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -578,6 +670,10 @@ function readSecrets(): Record<string, string> {
   const allowedVars = [
     'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL', 'ORACLE_API_URL', 'ORACLE_AUTH_TOKEN',
+    // Provider abstraction (default: claude, optional: openai/ollama)
+    'LLM_PROVIDER', 'NANOCLAW_LLM_PROVIDER',
+    'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_TIMEOUT_MS',
+    'OLLAMA_BASE_URL', 'OLLAMA_MODEL', 'OLLAMA_TIMEOUT_MS',
     // Z.AI model mapping (docs.z.ai/devpack/tool/claude#manual-configuration)
     'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
     // Oura Ring MCP (optional — set to enable health/sleep/activity data access)
@@ -631,6 +727,7 @@ function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   groupFolder?: string,
+  requestId?: string,
 ): string[] {
   // --rm: auto-remove the container when it exits (prevents Exited container accumulation).
   // This is the standard practice for ephemeral task containers.
@@ -654,6 +751,9 @@ function buildContainerArgs(
 
   // Pass timezone so container's Node.js uses correct local time (not UTC)
   args.push('-e', `TZ=${process.env.TZ || 'Asia/Bangkok'}`);
+  if (requestId) {
+    args.push('-e', `NANOCLAW_REQUEST_ID=${requestId}`);
+  }
 
   // Docker: -v with :ro suffix for readonly
   // Resolve container-internal paths to Docker host paths for DinD compatibility
@@ -706,8 +806,21 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName, group.folder);
+  const containerArgs = buildContainerArgs(mounts, containerName, group.folder, input.requestId);
   const imageMeta = getContainerImageMetadata();
+  const provider = runtimeToProvider(input.agentRuntime);
+
+  eventBus.emit('live', {
+    type: 'container:start',
+    data: {
+      containerId: containerName,
+      group: group.folder,
+      provider,
+      prompt: input.prompt.slice(0, 200),
+      startedAt: new Date().toISOString(),
+      requestId: input.requestId,
+    },
+  });
 
   logger.debug(
     {
@@ -758,9 +871,13 @@ export async function runContainerAgent(
   }
 
   return new Promise((resolve) => {
-    const container = spawn('docker', containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const container = spawn(
+      'docker',
+      containerArgs,
+      withDockerEnv({
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }),
+    );
     dockerResilience.recordSpawnSuccess();
 
     onProcess(container, containerName);
@@ -790,6 +907,22 @@ export async function runContainerAgent(
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
     let lastStreamError: string | undefined;
+    let emittedEnd = false;
+
+    const emitContainerEnd = (exitCode: number, summary: string) => {
+      if (emittedEnd) return;
+      emittedEnd = true;
+      eventBus.emit('live', {
+        type: 'container:end',
+        data: {
+          containerId: containerName,
+          exitCode,
+          durationMs: Date.now() - startTime,
+          resultSummary: summary.slice(0, 500),
+          requestId: input.requestId,
+        },
+      });
+    };
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
@@ -831,6 +964,17 @@ export async function runContainerAgent(
               lastStreamError = parsed.error;
             }
             hadStreamingOutput = true;
+            if (typeof parsed.result === 'string' && parsed.result.length > 0) {
+              eventBus.emit('live', {
+                type: 'container:output',
+                data: {
+                  containerId: containerName,
+                  chunk: parsed.result.slice(0, 2_000),
+                  timestamp: new Date().toISOString(),
+                  requestId: input.requestId,
+                },
+              });
+            }
             // Activity detected — reset the hard timeout
             resetTimeout();
             // Call onOutput for all markers (including null results)
@@ -889,7 +1033,7 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      exec(`docker stop ${containerName}`, { timeout: 15000 }, (err) => {
+      exec(`docker stop ${containerName}`, withDockerEnv({ timeout: 15000 }), (err) => {
         if (err) {
           logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');
@@ -940,6 +1084,7 @@ export async function runContainerAgent(
             'Container timed out after output (idle cleanup)',
           );
           outputChain.then(() => {
+            emitContainerEnd(code ?? -1, 'Timed out after output (idle cleanup)');
             resolve({
               status: 'success',
               result: null,
@@ -954,6 +1099,7 @@ export async function runContainerAgent(
           'Container timed out with no output',
         );
 
+        emitContainerEnd(code ?? -1, `Container timed out after ${formatMs(configTimeout)} (no output)`);
         resolve({
           status: 'error',
           result: null,
@@ -1036,6 +1182,7 @@ export async function runContainerAgent(
           'Container exited with error',
         );
 
+        emitContainerEnd(code ?? -1, lastStreamError || stderr.slice(-200) || 'Container exited with error');
         resolve({
           status: 'error',
           result: null,
@@ -1049,6 +1196,7 @@ export async function runContainerAgent(
       // Streaming mode: wait for output chain to settle, return completion marker
       if (onOutput) {
         outputChain.then(() => {
+          emitContainerEnd(code ?? 0, 'Completed');
           logger.info(
             { group: group.name, duration, newSessionId },
             'Container completed (streaming mode)',
@@ -1091,6 +1239,7 @@ export async function runContainerAgent(
           'Container completed',
         );
 
+        emitContainerEnd(code ?? 0, output.result || 'Completed');
         resolve(output);
       } catch (err) {
         logger.error(
@@ -1103,6 +1252,7 @@ export async function runContainerAgent(
           'Failed to parse container output',
         );
 
+        emitContainerEnd(code ?? -1, 'Failed to parse container output');
         resolve({
           status: 'error',
           result: null,
@@ -1115,6 +1265,7 @@ export async function runContainerAgent(
       clearTimeout(timeout);
       dockerResilience.recordSpawnFailure(`spawn_error:${err.message}`);
       logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
+      emitContainerEnd(-1, `Container spawn error: ${err.message}`);
       resolve({
         status: 'error',
         result: null,
@@ -1137,6 +1288,19 @@ async function runPooledContainer(
   startTime: number = Date.now(),
 ): Promise<ContainerOutput> {
   const containerName = pooled.containerName;
+  const provider = runtimeToProvider(input.agentRuntime);
+
+  eventBus.emit('live', {
+    type: 'container:start',
+    data: {
+      containerId: containerName,
+      group: group.folder,
+      provider,
+      prompt: input.prompt.slice(0, 200),
+      startedAt: new Date().toISOString(),
+      requestId: input.requestId,
+    },
+  });
 
   onProcess(pooled.process, containerName);
 
@@ -1153,6 +1317,7 @@ async function runPooledContainer(
     isScheduledTask: input.isScheduledTask,
     agentRuntime: input.agentRuntime,
     agentMode: input.agentMode,
+    requestId: input.requestId,
     secrets: readSecrets(),
   });
 
@@ -1167,6 +1332,22 @@ async function runPooledContainer(
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
     let parseBuffer = '';
+    let emittedEnd = false;
+
+    const emitContainerEnd = (exitCode: number, summary: string) => {
+      if (emittedEnd) return;
+      emittedEnd = true;
+      eventBus.emit('live', {
+        type: 'container:end',
+        data: {
+          containerId: containerName,
+          exitCode,
+          durationMs: Date.now() - startTime,
+          resultSummary: summary.slice(0, 500),
+          requestId: input.requestId,
+        },
+      });
+    };
 
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
@@ -1174,6 +1355,7 @@ async function runPooledContainer(
     const killOnTimeout = () => {
       logger.error({ group: group.name, containerName, pooled: true }, 'Pooled container timeout');
       containerPool.release(pooled.id, false);
+      emitContainerEnd(-1, hadStreamingOutput ? 'Timed out after output (pooled)' : 'Pooled container timeout');
       resolve({
         status: hadStreamingOutput ? 'success' : 'error',
         result: null,
@@ -1206,6 +1388,17 @@ async function runPooledContainer(
           const parsed: ContainerOutput = JSON.parse(jsonStr);
           if (parsed.newSessionId) newSessionId = parsed.newSessionId;
           hadStreamingOutput = true;
+          if (typeof parsed.result === 'string' && parsed.result.length > 0) {
+            eventBus.emit('live', {
+              type: 'container:output',
+              data: {
+                containerId: containerName,
+                chunk: parsed.result.slice(0, 2_000),
+                timestamp: new Date().toISOString(),
+                requestId: input.requestId,
+              },
+            });
+          }
           resetTimeout();
           outputChain = outputChain.then(() => onOutput(parsed));
         } catch (err) {
@@ -1229,6 +1422,7 @@ async function runPooledContainer(
         containerPool.release(pooled.id, true);
 
         outputChain.then(() => {
+          emitContainerEnd(0, 'Completed');
           resolve({
             status: 'success',
             result: null,
@@ -1249,6 +1443,10 @@ async function runPooledContainer(
       containerPool.release(pooled.id, false);
 
       outputChain.then(() => {
+        emitContainerEnd(
+          hadStreamingOutput ? 0 : -1,
+          hadStreamingOutput ? 'Completed with unexpected pooled exit' : 'Pooled container exited unexpectedly',
+        );
         resolve({
           status: hadStreamingOutput ? 'success' : 'error',
           result: null,

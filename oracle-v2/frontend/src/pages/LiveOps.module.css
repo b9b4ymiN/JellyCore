@@ -1,0 +1,47 @@
+.container {
+  max-width: 1180px;
+  margin: 24px auto;
+  padding: 0 16px 40px;
+  display: grid;
+  gap: 16px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.header h1 {
+  font-size: 30px;
+  margin: 0;
+}
+
+.section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #14162a 0%, #111323 100%);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.section h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text-primary);
+}
+
+.grid {
+  display: grid;
+  gap: 10px;
+}
+
+.empty {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  color: var(--text-muted);
+  background: rgba(9, 12, 24, 0.45);
+}

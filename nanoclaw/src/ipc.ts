@@ -592,7 +592,9 @@ export async function processTaskIpc(
               message: `Job "${data.label}" already exists (ID: ${existingActive[0].id.slice(0, 8)}). Use heartbeat_update_job to modify it.`,
             }),
           );
-        } catch { /* non-fatal */ }
+        } catch (err) {
+          logger.warn({ err, sourceGroup }, 'Failed to write heartbeat duplicate feedback (non-fatal)');
+        }
         break;
       }
       const jobId = `hb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

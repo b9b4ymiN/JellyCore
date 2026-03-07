@@ -121,7 +121,9 @@ export class WhatsAppChannel implements Channel {
         logger.info('Connected to WhatsApp');
 
         // Announce availability so WhatsApp relays subsequent presence updates (typing indicators)
-        this.sock.sendPresenceUpdate('available').catch(() => {});
+        this.sock.sendPresenceUpdate('available').catch((err) => {
+          logger.debug({ err }, 'Failed to set WhatsApp availability presence');
+        });
 
         // Build LID to phone mapping from auth state for self-chat translation
         if (this.sock.user) {

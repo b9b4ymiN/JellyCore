@@ -3,7 +3,13 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { AGENT_MODE_GLOBAL_DEFAULT, DATA_DIR, STORE_DIR } from './config.js';
+import {
+  AGENT_MODE_GLOBAL_DEFAULT,
+  DATA_DIR,
+  RETRYING_MESSAGES_LIMIT,
+  RETRYING_MESSAGES_MAX_AGE_MS,
+  STORE_DIR,
+} from './config.js';
 import type { AgentMode, AgentRuntime } from './agents/types.js';
 import {
   DeadLetterMessage,
@@ -236,8 +242,8 @@ function createSchema(database: Database.Database): void {
       SET timestamp_epoch = CAST(strftime('%s', timestamp) AS INTEGER) * 1000
       WHERE timestamp_epoch IS NULL
     `);
-  } catch {
-    /* best-effort backfill */
+  } catch (err) {
+    console.warn('[nanoclaw-db] timestamp_epoch backfill skipped:', err);
   }
 
   // --- Phase 6 migrations: retry, timeout, label ---
@@ -249,7 +255,14 @@ function createSchema(database: Database.Database): void {
     [`ALTER TABLE scheduled_tasks ADD COLUMN label TEXT`, 'label'],
   ];
   for (const [sql] of phase6Migrations) {
-    try { database.exec(sql); } catch { /* column already exists */ }
+    try {
+      database.exec(sql);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+      if (!msg.includes('duplicate column')) {
+        console.warn('[nanoclaw-db] phase6 migration warning:', err);
+      }
+    }
   }
 
   // --- Heartbeat Jobs table ---
@@ -652,6 +665,7 @@ export function moveToDeadLetter(
 }
 
 export function getRetryingMessages(chatJid: string, botPrefix: string): NewMessage[] {
+  const minEpoch = Date.now() - RETRYING_MESSAGES_MAX_AGE_MS;
   const sql = `
     SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp
     FROM message_receipts r
@@ -660,11 +674,16 @@ export function getRetryingMessages(chatJid: string, botPrefix: string): NewMess
     WHERE r.chat_jid = ?
       AND r.status = 'RETRYING'
       AND m.content NOT LIKE ?
+      AND m.sender != 'web-ui'
+      AND COALESCE(m.timestamp_epoch, CAST(strftime('%s', m.timestamp) AS INTEGER) * 1000) >= ?
+      AND NOT (m.chat_jid LIKE 'tg:%' AND COALESCE(m.is_from_me, 0) = 1)
     ORDER BY COALESCE(m.timestamp_epoch, CAST(strftime('%s', m.timestamp) AS INTEGER) * 1000)
-    LIMIT 50
+    LIMIT ?
   `;
 
-  return db.prepare(sql).all(chatJid, `${botPrefix}:%`) as NewMessage[];
+  return db
+    .prepare(sql)
+    .all(chatJid, `${botPrefix}:%`, minEpoch, RETRYING_MESSAGES_LIMIT) as NewMessage[];
 }
 
 export interface RecoverableReceipt {
@@ -746,6 +765,16 @@ export interface ChatInfo {
   jid: string;
   name: string;
   last_message_time: string;
+}
+
+export interface ChatHistoryMessage {
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: number;
 }
 
 /**
@@ -941,6 +970,8 @@ export function getNewMessages(
     WHERE COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) > ?
       AND chat_jid IN (${placeholders})
       AND content NOT LIKE ?
+      AND sender != 'web-ui'
+      AND NOT (chat_jid LIKE 'tg:%' AND COALESCE(is_from_me, 0) = 1)
     ORDER BY COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000), id
     LIMIT 200
   `;
@@ -973,6 +1004,8 @@ export function getMessagesSince(
       WHERE chat_jid = ?
         AND COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) > ?
         AND content NOT LIKE ?
+        AND sender != 'web-ui'
+        AND NOT (chat_jid LIKE 'tg:%' AND COALESCE(is_from_me, 0) = 1)
       ORDER BY COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) DESC, id DESC
       LIMIT ?
     ) sub ORDER BY ts_epoch ASC, id ASC
@@ -980,6 +1013,44 @@ export function getMessagesSince(
   return db
     .prepare(sql)
     .all(chatJid, sinceEpoch, `${botPrefix}:%`, limit) as NewMessage[];
+}
+
+export function getRecentChatHistory(
+  chatJid: string,
+  limit = 120,
+): ChatHistoryMessage[] {
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit || 120)));
+  const sql = `
+    SELECT * FROM (
+      SELECT
+        id,
+        chat_jid,
+        sender,
+        sender_name,
+        content,
+        timestamp,
+        is_from_me,
+        COALESCE(timestamp_epoch, CAST(strftime('%s', timestamp) AS INTEGER) * 1000) AS ts_epoch
+      FROM messages
+      WHERE chat_jid = ?
+      ORDER BY ts_epoch DESC, id DESC
+      LIMIT ?
+    ) sub
+    ORDER BY ts_epoch ASC, id ASC
+  `;
+
+  const rows = db.prepare(sql).all(chatJid, safeLimit) as Array<
+    ChatHistoryMessage & { ts_epoch: number }
+  >;
+  return rows.map((row) => ({
+    id: row.id,
+    chat_jid: row.chat_jid,
+    sender: row.sender,
+    sender_name: row.sender_name,
+    content: row.content,
+    timestamp: row.timestamp,
+    is_from_me: row.is_from_me,
+  }));
 }
 
 export function createTask(

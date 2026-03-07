@@ -13,6 +13,7 @@ import {
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
   POOL_ENABLED,
+  RECEIPT_RECOVERY_MAX_AGE_MS,
   SESSION_MAX_AGE_MS,
   TELEGRAM_BOT_TOKEN,
   TIMEZONE,
@@ -51,6 +52,7 @@ import {
   getAllTasks,
   getMessageAttempts,
   getMessageReceipt,
+  getRecentChatHistory,
   getMessagesSince,
   getNewMessages,
   getRecoverableReceipts,
@@ -77,6 +79,7 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  storeMessageDirect,
   updateTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
@@ -85,7 +88,9 @@ import { findChannel, formatMessages, formatOutbound, routeOutbound, routeOutbou
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, LaneType, NewMessage, OutboundPayload, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { startHealthServer, setOpsProvider, setStatusProvider, setHeartbeatProvider, setToolsProvider, recordError } from './health-server.js';
+import { startHealthServer, setOpsProvider, setStatusProvider, setHeartbeatProvider, setToolsProvider, setChatProvider, recordError } from './health-server.js';
+import { recordNonFatalError } from './non-fatal-errors.js';
+import { buildRuntimeToolsInventory } from './runtime-tools-inventory.js';
 import { resourceMonitor } from './resource-monitor.js';
 import { startHeartbeat, startHeartbeatJobRunner, patchHeartbeatConfig, recordActivity } from './heartbeat.js';
 import { dockerResilience } from './docker-resilience.js';
@@ -154,265 +159,6 @@ const WORKING_SUMMARY_TOTAL_LIMIT = 500;
 // Global registry of active typing intervals â€” cleared on shutdown
 const activeTypingIntervals = new Set<ReturnType<typeof setInterval>>();
 
-interface ExternalMcpConfig {
-  name: string;
-  description?: string;
-  command?: string;
-  args?: string[];
-  enabled?: boolean;
-  startupMode?: 'always' | 'on_demand';
-  allowGroups?: string[];
-  requiredEnv?: string[];
-  env?: Record<string, string>;
-}
-
-function uniqueSorted(values: string[]): string[] {
-  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
-}
-
-function readFileUtf8Safe(filePath: string): string | null {
-  try {
-    return fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    return null;
-  }
-}
-
-function extractMatches(content: string, pattern: RegExp): string[] {
-  const matches: string[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(content)) !== null) {
-    if (match[1]) matches.push(match[1]);
-  }
-  return uniqueSorted(matches);
-}
-
-function parseSimpleFrontmatter(content: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!fm) return out;
-  for (const line of fm[1].split(/\r?\n/)) {
-    const idx = line.indexOf(':');
-    if (idx <= 0) continue;
-    const key = line.slice(0, idx).trim();
-    const val = line.slice(idx + 1).trim();
-    if (key) out[key] = val;
-  }
-  return out;
-}
-
-function discoverSkillInventory(projectRoot: string): Array<{
-  name: string;
-  directory: string;
-  description: string | null;
-}> {
-  const skillsDir = path.join(projectRoot, 'container', 'skills');
-  if (!fs.existsSync(skillsDir)) return [];
-
-  const items: Array<{ name: string; directory: string; description: string | null }> = [];
-  for (const entry of fs.readdirSync(skillsDir)) {
-    const fullDir = path.join(skillsDir, entry);
-    if (!fs.statSync(fullDir).isDirectory()) continue;
-    const skillMdPath = path.join(fullDir, 'SKILL.md');
-    const skillContent = readFileUtf8Safe(skillMdPath);
-    const meta = skillContent ? parseSimpleFrontmatter(skillContent) : {};
-    items.push({
-      name: meta.name || entry,
-      directory: entry,
-      description: meta.description || null,
-    });
-  }
-  return items.sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function discoverNanoclawMcpTools(projectRoot: string): string[] {
-  const p = path.join(projectRoot, 'container', 'agent-runner', 'src', 'ipc-mcp-stdio.ts');
-  const content = readFileUtf8Safe(p);
-  if (!content) return [];
-  return extractMatches(content, /server\.tool\(\s*'([^']+)'/g);
-}
-
-function discoverOracleMcpTools(projectRoot: string): string[] {
-  const p = path.join(projectRoot, 'container', 'agent-runner', 'src', 'oracle-mcp-http.ts');
-  const content = readFileUtf8Safe(p);
-  if (!content) return [];
-  return extractMatches(content, /name:\s*'(oracle_[^']+)'/g);
-}
-
-function discoverAgentAllowedTools(projectRoot: string): string[] {
-  const p = path.join(projectRoot, 'container', 'agent-runner', 'src', 'index.ts');
-  const content = readFileUtf8Safe(p);
-  if (!content) return [];
-
-  const blockMatch = content.match(/allowedTools:\s*\[([\s\S]*?)\],\s*env:/m);
-  if (!blockMatch) return [];
-  return extractMatches(blockMatch[1], /'([^']+)'/g);
-}
-
-function parseMcpServersJson(raw: string): ExternalMcpConfig[] {
-  try {
-    const parsed = JSON.parse(raw) as {
-      mcpServers?: Record<string, {
-        command?: string;
-        args?: unknown;
-        env?: Record<string, unknown>;
-        description?: string;
-        enabled?: boolean;
-        startupMode?: 'always' | 'on_demand';
-        allowGroups?: string[];
-        requiredEnv?: string[];
-      }>;
-    };
-    if (!parsed.mcpServers || typeof parsed.mcpServers !== 'object') return [];
-
-    const servers: ExternalMcpConfig[] = [];
-    for (const [name, cfg] of Object.entries(parsed.mcpServers)) {
-      if (!cfg || typeof cfg !== 'object') continue;
-      if (typeof cfg.command !== 'string' || cfg.command.trim().length === 0) continue;
-      servers.push({
-        name,
-        description: cfg.description || '',
-        command: cfg.command,
-        args: Array.isArray(cfg.args)
-          ? cfg.args.filter((v): v is string => typeof v === 'string')
-          : [],
-        enabled: cfg.enabled !== false,
-        startupMode: cfg.startupMode === 'on_demand' ? 'on_demand' : 'always',
-        allowGroups: Array.isArray(cfg.allowGroups) ? cfg.allowGroups : [],
-        requiredEnv: Array.isArray(cfg.requiredEnv) ? cfg.requiredEnv : [],
-        env: {},
-      });
-    }
-    return servers;
-  } catch {
-    return [];
-  }
-}
-
-function loadExternalMcpConfigs(projectRoot: string): ExternalMcpConfig[] {
-  const merged = new Map<string, ExternalMcpConfig>();
-
-  const primaryPath = path.join(projectRoot, 'container', 'config', 'mcps.json');
-  const primaryRaw = readFileUtf8Safe(primaryPath);
-  if (primaryRaw) {
-    try {
-      const parsed = JSON.parse(primaryRaw) as { servers?: ExternalMcpConfig[] };
-      const servers = Array.isArray(parsed.servers) ? parsed.servers : [];
-      for (const server of servers) {
-        if (!server?.name) continue;
-        merged.set(server.name, server);
-      }
-    } catch {
-      // ignore malformed primary config in inventory view
-    }
-  }
-
-  const projectMcpPath = path.join(projectRoot, '.mcp.json');
-  const projectMcpRaw = readFileUtf8Safe(projectMcpPath);
-  if (projectMcpRaw) {
-    for (const server of parseMcpServersJson(projectMcpRaw)) {
-      if (!server?.name) continue;
-      merged.set(server.name, server);
-    }
-  }
-
-  // Optional per-main-group .mcp.json for runtime parity with agent-runner
-  const groupMcpPath = path.join(projectRoot, 'groups', MAIN_GROUP_FOLDER, '.mcp.json');
-  const groupMcpRaw = readFileUtf8Safe(groupMcpPath);
-  if (groupMcpRaw) {
-    for (const server of parseMcpServersJson(groupMcpRaw)) {
-      if (!server?.name) continue;
-      merged.set(server.name, server);
-    }
-  }
-
-  return [...merged.values()];
-}
-
-function buildRuntimeToolsInventory(channelNames: string[]): Record<string, unknown> {
-  const projectRoot = process.cwd();
-  const skills = discoverSkillInventory(projectRoot);
-  const nanoclawTools = discoverNanoclawMcpTools(projectRoot);
-  const oracleTools = discoverOracleMcpTools(projectRoot);
-  const staticAllowedTools = discoverAgentAllowedTools(projectRoot);
-  const externalConfigs = loadExternalMcpConfigs(projectRoot);
-
-  const externalServers = externalConfigs.map((server) => {
-    const configEnabled = server.enabled !== false;
-    const requiredEnv = Array.isArray(server.requiredEnv) ? server.requiredEnv : [];
-    const startupMode = server.startupMode === 'on_demand' ? 'on_demand' : 'always';
-    const allowGroups = Array.isArray(server.allowGroups) ? server.allowGroups : [];
-    const missingEnv = requiredEnv.filter((key) => !process.env[key]);
-    const active = configEnabled && startupMode === 'always' && missingEnv.length === 0;
-    const reason = !configEnabled
-      ? 'disabled by config'
-      : startupMode === 'on_demand'
-        ? 'startupMode=on_demand'
-        : missingEnv.length > 0
-          ? `missing required env: ${missingEnv.join(', ')}`
-          : 'ready';
-    return {
-      name: server.name,
-      description: server.description || null,
-      command: server.command || null,
-      args: Array.isArray(server.args) ? server.args : [],
-      configEnabled,
-      startupMode,
-      allowGroups,
-      requiredEnv,
-      missingEnv,
-      enabled: active,
-      reason,
-    };
-  });
-  const externalAllowedTools = externalServers
-    .filter((server) => server.enabled)
-    .map((server) => `mcp__${server.name}__*`);
-  const allowedTools = uniqueSorted([
-    ...staticAllowedTools,
-    ...externalAllowedTools,
-  ]);
-
-  return {
-    timestamp: new Date().toISOString(),
-    runtime: {
-      channels: uniqueSorted(channelNames),
-      timezone: TIMEZONE,
-      projectRoot,
-    },
-    sdk: {
-      allowedToolsCount: allowedTools.length,
-      allowedTools,
-    },
-    skills: {
-      count: skills.length,
-      items: skills,
-    },
-    mcp: {
-      nanoclaw: {
-        configured: true,
-        toolCount: nanoclawTools.length,
-        tools: nanoclawTools,
-        source: 'container/agent-runner/src/ipc-mcp-stdio.ts',
-      },
-      oracle: {
-        configured: true,
-        apiUrl: process.env.ORACLE_API_URL || 'http://oracle:47778',
-        authConfigured: Boolean(process.env.ORACLE_AUTH_TOKEN),
-        toolCount: oracleTools.length,
-        tools: oracleTools,
-        source: 'container/agent-runner/src/oracle-mcp-http.ts',
-      },
-      external: {
-        configuredCount: externalServers.length,
-        activeCount: externalServers.filter((s) => s.enabled).length,
-        servers: externalServers,
-        source: 'container/config/mcps.json',
-      },
-    },
-  };
-}
-
 function traceMessages(
   messages: NewMessage[],
   lane: LaneType = 'user',
@@ -472,8 +218,25 @@ function channelFor(jid: string): Channel {
 }
 
 /** Send a message to the right channel for this JID */
-async function sendToChannel(jid: string, text: string): Promise<void> {
+async function sendToChannel(
+  jid: string,
+  text: string,
+  options?: {
+    persist?: boolean;
+    persistSenderName?: string;
+  },
+): Promise<void> {
   await routeOutbound(channels, jid, text);
+  if (options?.persist === false || !text.trim()) return;
+  storeMessageDirect({
+    id: `out_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    chat_jid: jid,
+    sender: 'nanoclaw',
+    sender_name: options?.persistSenderName || ASSISTANT_NAME,
+    content: text,
+    timestamp: new Date().toISOString(),
+    is_from_me: true,
+  });
 }
 
 async function sendPayloadToChannel(
@@ -531,7 +294,13 @@ function loadState(): void {
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
-  } catch {
+  } catch (err) {
+    recordNonFatalError(
+      'state.last_agent_timestamp_parse_failed',
+      err,
+      { rawLength: agentTs?.length || 0 },
+      'warn',
+    );
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
@@ -700,6 +469,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   // --- Smart Query Router: classify the latest message ---
   const lastMsg = mergedMessages[mergedMessages.length - 1];
   const classification = classifyQuery(lastMsg.content);
+  const requestId = traceIds[0];
   const startTime = Date.now();
 
   logger.info(
@@ -739,7 +509,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
 
   // Tier 2: Oracle-only â€” direct Oracle API call, no container
   if (classification.tier === 'oracle-only') {
-    const reply = await handleOracleOnly(classification.reason, lastMsg.content);
+    const reply = await handleOracleOnly(classification.reason, lastMsg.content, requestId);
     if (reply) {
       const ch = channelFor(chatJid);
       await sendToChannel(chatJid, formatOutbound(ch, reply));
@@ -861,11 +631,25 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
       if (!outputSentToUser && !ttlNoticeSent) {
         ttlNoticeSent = true;
         sendToChannel(chatJid, '⏳ ยังทำงานอยู่นะครับ งานนี้ใช้เวลานานหน่อย กรุณารอสักครู่...')
-          .catch(() => {});
+          .catch((err) => {
+            recordNonFatalError(
+              'message.ttl_notice_send_failed',
+              err,
+              { chatJid, group: group.name },
+              'debug',
+            );
+          });
       }
       return;
     }
-    setTypingOnChannel(chatJid, true).catch(() => {});
+    setTypingOnChannel(chatJid, true).catch((err) => {
+      recordNonFatalError(
+        'message.typing_refresh_failed',
+        err,
+        { chatJid, group: group.name },
+        'debug',
+      );
+    });
   }, 4000);
   activeTypingIntervals.add(typingInterval);
 
@@ -874,7 +658,16 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
   const scheduleProgress = (delayMs: number, msg: string) => {
     progressTimers.push(setTimeout(async () => {
       if (!outputSentToUser) {
-        try { await sendToChannel(chatJid, msg); } catch { /* ignore */ }
+        try {
+          await sendToChannel(chatJid, msg);
+        } catch (err) {
+          recordNonFatalError(
+            'message.progress_send_failed',
+            err,
+            { chatJid, group: group.name, delayMs },
+            'debug',
+          );
+        }
       }
     }, delayMs));
   };
@@ -898,7 +691,7 @@ async function processGroupMessages(chatJid: string, retryCount: number = 0): Pr
 
   let output: 'success' | 'error';
   try {
-    output = await runAgent(group, prompt, chatJid, classification.reason, 'user', async (result) => {
+    output = await runAgent(group, prompt, chatJid, classification.reason, 'user', requestId, async (result) => {
       // Streaming output callback â€” called for each agent result
       try {
         if (result.result) {
@@ -1061,7 +854,9 @@ async function runAgent(
   chatJid: string,
   classificationReason: string | undefined,
   lane: LaneType,
+  requestId?: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  processJid?: string,
 ): Promise<'success' | 'error'> {
   refreshCodexAuthStatus();
   refreshCodexRuntimeStatus();
@@ -1154,8 +949,9 @@ async function runAgent(
         lane,
         agentRuntime: runtime,
         agentMode: mode,
+        requestId,
       },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
+      (proc, containerName) => queue.registerProcess(processJid || chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
 
@@ -1260,6 +1056,260 @@ async function runAgent(
     logger.error({ group: group.name, lane, mode, err }, 'Agent error');
     return 'error';
   }
+}
+
+function resolveChatTarget(groupFolder?: string): {
+  chatJid: string;
+  group: RegisteredGroup;
+} | null {
+  if (groupFolder) {
+    const matched = Object.entries(registeredGroups).find(([, g]) => g.folder === groupFolder);
+    if (matched) {
+      return { chatJid: matched[0], group: matched[1] };
+    }
+  }
+
+  const main = Object.entries(registeredGroups).find(([, g]) => g.folder === MAIN_GROUP_FOLDER);
+  if (main) {
+    return { chatJid: main[0], group: main[1] };
+  }
+
+  const first = Object.entries(registeredGroups)[0];
+  if (!first) return null;
+  return { chatJid: first[0], group: first[1] };
+}
+
+function getWebChatHistory(
+  groupFolder?: string,
+  limit = 120,
+): {
+  groupFolder: string;
+  chatJid: string;
+  messages: Array<{
+    id: string;
+    sender: string;
+    senderName: string;
+    content: string;
+    timestamp: string;
+    isFromMe: boolean;
+    role: 'user' | 'assistant' | 'system';
+  }>;
+} | null {
+  const target = resolveChatTarget(groupFolder);
+  if (!target) return null;
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit || 120)));
+  const history = getRecentChatHistory(target.chatJid, safeLimit);
+  const messages: Array<{
+    id: string;
+    sender: string;
+    senderName: string;
+    content: string;
+    timestamp: string;
+    isFromMe: boolean;
+    role: 'user' | 'assistant' | 'system';
+  }> = history.map((row) => {
+    const senderName = row.sender_name || '';
+    const senderLower = senderName.toLowerCase();
+    const isAssistant = senderName === ASSISTANT_NAME || (row.is_from_me === 1 && senderName !== 'Web');
+    const isSystem = senderLower === 'system' || senderLower === 'sys';
+    const role: 'user' | 'assistant' | 'system' = isSystem ? 'system' : isAssistant ? 'assistant' : 'user';
+    return {
+      id: row.id,
+      sender: row.sender,
+      senderName,
+      content: row.content,
+      timestamp: row.timestamp,
+      isFromMe: row.is_from_me === 1,
+      role,
+    };
+  });
+
+  return {
+    groupFolder: target.group.folder,
+    chatJid: target.chatJid,
+    messages,
+  };
+}
+
+async function processWebChat(
+  message: string,
+  groupFolder?: string,
+  requestIdOverride?: string,
+): Promise<{
+  reply: string;
+  groupFolder: string;
+  latencyMs: number;
+  tier: string;
+  mode?: string;
+}> {
+  const startedAt = Date.now();
+  const target = resolveChatTarget(groupFolder);
+  if (!target) {
+    throw new Error('No registered groups available for web chat');
+  }
+
+  const { chatJid, group } = target;
+  const classification = classifyQuery(message);
+  const requestId = requestIdOverride || `webchat-${Date.now().toString(36)}`;
+  recordActivity();
+
+  // Persist web-origin message so history on /chat matches Telegram timeline.
+  storeMessageDirect({
+    id: `${requestId}:web`,
+    chat_jid: chatJid,
+    sender: 'web-ui',
+    sender_name: 'Web',
+    content: message,
+    timestamp: new Date().toISOString(),
+    is_from_me: false,
+  });
+
+  // Mirror the web-side user message into Telegram chat.
+  try {
+    await routeOutbound(channels, chatJid, `[WEB] ${message}`);
+  } catch (err) {
+    logger.warn({ err, chatJid, requestId }, 'Failed to mirror web user message to channel');
+  }
+
+  const finish = async (rawReply: string): Promise<{
+    reply: string;
+    groupFolder: string;
+    latencyMs: number;
+    tier: string;
+    mode?: string;
+  }> => {
+    const reply = rawReply || '✅ ดำเนินการเสร็จสิ้นครับ (ไม่มีข้อความตอบกลับ)';
+    try {
+      const ch = channelFor(chatJid);
+      const outbound = formatOutbound(ch, reply);
+      if (outbound) {
+        storeMessageDirect({
+          id: `${requestId}:assistant`,
+          chat_jid: chatJid,
+          sender: 'nanoclaw',
+          sender_name: ASSISTANT_NAME,
+          content: outbound,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+        });
+        await sendToChannel(chatJid, outbound, { persist: false });
+      }
+    } catch (err) {
+      logger.warn({ err, chatJid, requestId }, 'Failed to mirror web assistant reply to channel');
+      // keep web response successful even if channel mirror fails.
+    }
+    return {
+      reply,
+      groupFolder: group.folder,
+      latencyMs: Date.now() - startedAt,
+      tier: classification.tier,
+      mode: classification.model,
+    };
+  };
+
+  if (classification.tier === 'inline') {
+    const result = handleInline(classification.reason, message, chatJid, group.folder);
+    const reply = typeof result === 'string' ? result : result.reply;
+    return finish(reply);
+  }
+
+  if (classification.tier === 'oracle-only') {
+    const reply = await handleOracleOnly(classification.reason, message, requestId);
+    if (reply) {
+      return finish(reply);
+    }
+  }
+
+  // Follow the same budget strategy before container execution.
+  const budget = checkBudget(classification.model, group.folder);
+  if (budget.action === 'offline') {
+    return finish(budget.message || 'ขออภัย งบประมาณเดือนนี้หมดแล้วค่ะ');
+  }
+  classification.model = budget.effectiveModel as 'haiku' | 'sonnet' | 'opus';
+
+  let oracleContext = '';
+  try {
+    const pb = getPromptBuilder();
+    const stableUserId = getStableUserId(chatJid);
+    const ctx = await pb.buildCompactContext(
+      message,
+      group.folder,
+      stableUserId,
+    );
+    oracleContext = pb.formatCompact(ctx);
+  } catch (err) {
+    logger.warn({ err, group: group.name }, 'Web chat context injection failed');
+  }
+
+  const timeHeader = `[Current time: ${new Date().toLocaleString('th-TH', {
+    timeZone: TIMEZONE,
+    dateStyle: 'short',
+    timeStyle: 'medium',
+  })} (${TIMEZONE})]`;
+  const rawPrompt = `User: ${message}`;
+  const prompt = oracleContext
+    ? `${oracleContext}\n\n${timeHeader}\n\n${rawPrompt}`
+    : `${timeHeader}\n\n${rawPrompt}`;
+
+  const streamedReplies: string[] = [];
+  const processJid = `_webchat_${group.folder}_${requestId}`;
+  let closeScheduled: ReturnType<typeof setTimeout> | null = null;
+  const scheduleClose = (delayMs: number): void => {
+    if (closeScheduled) clearTimeout(closeScheduled);
+    closeScheduled = setTimeout(() => {
+      try {
+        queue.closeStdin(processJid);
+      } catch {
+        // non-fatal: best effort close only
+      }
+    }, delayMs);
+  };
+  let outcome: 'success' | 'error' = 'error';
+  try {
+    outcome = await runAgent(
+      group,
+      prompt,
+      chatJid,
+      classification.reason,
+      'user',
+      requestId,
+      async (output) => {
+        // Web chat is single-turn. Once output starts, schedule graceful close
+        // so this request doesn't keep ingesting unrelated follow-up messages.
+        scheduleClose(2_000);
+        if (!output.result) return;
+        const clean = output.result
+          .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+          .trim();
+        if (!clean) return;
+        if (streamedReplies[streamedReplies.length - 1] === clean) return;
+        streamedReplies.push(clean);
+        // First meaningful output received: close quickly.
+        scheduleClose(250);
+      },
+      processJid,
+    );
+  } finally {
+    if (closeScheduled) {
+      clearTimeout(closeScheduled);
+    }
+    queue.closeStdin(processJid);
+    queue.unregisterProcess(processJid);
+  }
+
+  const reply = streamedReplies.join('\n\n').trim();
+  if (outcome === 'error') {
+    if (reply) {
+      logger.warn(
+        { group: group.name, chatJid, requestId },
+        'Web chat agent reported error after emitting output; returning captured reply',
+      );
+      return finish(reply);
+    }
+    throw new Error('Agent processing failed');
+  }
+
+  return finish(reply);
 }
 
 async function startMessageLoop(): Promise<void> {
@@ -1432,6 +1482,8 @@ function reconcileUnfinishedReceipts(): void {
 
   const queuedGroups = new Set<string>();
   let reconciled = 0;
+  let staleDropped = 0;
+  const minEpoch = Date.now() - RECEIPT_RECOVERY_MAX_AGE_MS;
 
   for (const item of recoverable) {
     const group = registeredGroups[item.chat_jid];
@@ -1440,6 +1492,18 @@ function reconcileUnfinishedReceipts(): void {
     // Keep non-trigger chatter in RECEIVED for groups that require explicit mention.
     if (item.status === 'RECEIVED' && group.requiresTrigger !== false && group.folder !== MAIN_GROUP_FOLDER) {
       if (!TRIGGER_PATTERN.test(item.content.trim())) continue;
+    }
+
+    const ts = Date.parse(item.timestamp);
+    if (Number.isFinite(ts) && ts < minEpoch) {
+      moveToDeadLetter(
+        item.trace_id,
+        'RECOVERY_STALE',
+        `Skipped stale unfinished message (${item.status}) older than ${RECEIPT_RECOVERY_MAX_AGE_MS}ms during restart recovery`,
+        true,
+      );
+      staleDropped += 1;
+      continue;
     }
 
     transitionMessageStatus(item.trace_id, 'RETRYING', {
@@ -1456,8 +1520,13 @@ function reconcileUnfinishedReceipts(): void {
 
   if (reconciled > 0) {
     logger.warn(
-      { reconciled, groups: queuedGroups.size },
+      { reconciled, groups: queuedGroups.size, staleDropped },
       'Recovered unfinished message receipts after restart',
+    );
+  } else if (staleDropped > 0) {
+    logger.warn(
+      { staleDropped },
+      'Skipped stale unfinished receipts during restart recovery',
     );
   }
 }
@@ -1505,6 +1574,8 @@ function ensureDockerRunning(): void {
   // This is NON-FATAL: NanoClaw starts regardless so inline/oracle commands still work.
   // Only container-tier requests (tier 3/4) will fail if the image is truly missing.
   const agentImage = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+  const defaultDockerfile = agentImage.includes('lite') ? 'Dockerfile.lite' : 'Dockerfile';
+  const agentDockerfile = process.env.AGENT_DOCKERFILE || defaultDockerfile;
   try {
     const imageId = execSync(`docker images -q ${agentImage}`, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1515,13 +1586,14 @@ function ensureDockerRunning(): void {
     if (!imageId) {
       // Image doesn't exist â€” try auto-build if build context is available
       const containerBuildDir = path.join(process.cwd(), 'container');
-      if (fs.existsSync(path.join(containerBuildDir, 'Dockerfile'))) {
+      const dockerfilePath = path.join(containerBuildDir, agentDockerfile);
+      if (fs.existsSync(dockerfilePath)) {
         logger.info(
-          { image: agentImage, buildDir: containerBuildDir },
+          { image: agentImage, buildDir: containerBuildDir, dockerfile: agentDockerfile },
           'Agent image not found â€” building automatically (first-time setup)...',
         );
         console.log(`\n⏳  Building agent image '${agentImage}' (this takes ~2-5 minutes on first run)...\n`);
-        execSync(`docker build -t ${agentImage} ${containerBuildDir}`, {
+        execSync(`docker build -f ${dockerfilePath} -t ${agentImage} ${containerBuildDir}`, {
           stdio: 'inherit',  // stream build output to console
           timeout: 600_000,  // 10 min build timeout
         });
@@ -1531,14 +1603,14 @@ function ensureDockerRunning(): void {
         // No build context available â€” warn loudly but DON'T crash.
         // Inline (/start, /help, /clear) and oracle-only commands will still work.
         logger.error(
-          { image: agentImage, buildDir: containerBuildDir },
+          { image: agentImage, buildDir: containerBuildDir, dockerfile: agentDockerfile },
           '⚠️  Agent image missing! Container-tier messages will fail. ' +
-          'Build it manually: docker build -t nanoclaw-agent:latest -f nanoclaw/container/Dockerfile nanoclaw/container/',
+          `Build it manually: docker build -t ${agentImage} -f nanoclaw/container/${agentDockerfile} nanoclaw/container/`,
         );
         console.error(`\n⚠️  WARNING: Agent image '${agentImage}' not found!`);
         console.error(`   Inline commands (/start, /help, /clear) will work.`);
         console.error(`   But AI responses (container tier) will fail until you build it:`);
-        console.error(`   docker build -t ${agentImage} -f nanoclaw/container/Dockerfile nanoclaw/container/\n`);
+        console.error(`   docker build -t ${agentImage} -f nanoclaw/container/${agentDockerfile} nanoclaw/container/\n`);
       }
     } else {
       logger.debug({ image: agentImage, imageId }, 'Agent image verified');
@@ -1557,10 +1629,12 @@ function ensureDockerRunning(): void {
       || runtimeStatus.reason === 'runner_missing_json_parser';
     if (!runtimeStatus.ready && staleReason) {
       const containerBuildDir = path.join(process.cwd(), 'container');
-      if (fs.existsSync(path.join(containerBuildDir, 'Dockerfile'))) {
+      const dockerfilePath = path.join(containerBuildDir, agentDockerfile);
+      if (fs.existsSync(dockerfilePath)) {
         logger.warn(
           {
             image: agentImage,
+            dockerfile: agentDockerfile,
             reason: runtimeStatus.reason,
             imageRevision: runtimeStatus.imageRevision || null,
             sourceRevision: runtimeStatus.sourceRevision || null,
@@ -1574,13 +1648,19 @@ function ensureDockerRunning(): void {
               encoding: 'utf-8',
               timeout: 5000,
             }).trim();
-          } catch {
+          } catch (err) {
+            recordNonFatalError(
+              'startup.git_revision_probe_failed',
+              err,
+              { image: agentImage },
+              'debug',
+            );
             return 'unknown';
           }
         })();
         const buildDate = new Date().toISOString();
         execSync(
-          `docker build --build-arg VCS_REF=${sourceRevision} --build-arg BUILD_DATE=${buildDate} -t ${agentImage} ${containerBuildDir}`,
+          `docker build -f ${dockerfilePath} --build-arg VCS_REF=${sourceRevision} --build-arg BUILD_DATE=${buildDate} -t ${agentImage} ${containerBuildDir}`,
           {
             stdio: 'inherit',
             timeout: 900_000,
@@ -1618,7 +1698,14 @@ function ensureDockerRunning(): void {
       try {
         execSync(`docker stop ${name}`, { stdio: 'pipe', timeout: 15000 });
         execSync(`docker rm -f ${name}`, { stdio: 'pipe', timeout: 10000 });
-      } catch { /* already stopped/removed */ }
+      } catch (err) {
+        recordNonFatalError(
+          'startup.orphan_running_cleanup_failed',
+          err,
+          { container: name },
+          'debug',
+        );
+      }
     }
 
     // 2. Prune leftover Exited containers (e.g. from builds without --rm, or Docker-daemon crashes)
@@ -1630,7 +1717,14 @@ function ensureDockerRunning(): void {
     if (exited.length > 0) {
       try {
         execSync(`docker rm -f ${exited.join(' ')}`, { stdio: 'pipe', timeout: 30000 });
-      } catch { /* best effort */ }
+      } catch (err) {
+        recordNonFatalError(
+          'startup.orphan_exited_cleanup_failed',
+          err,
+          { count: exited.length },
+          'debug',
+        );
+      }
       logger.info({ count: exited.length }, 'Pruned exited orphan containers');
     }
 
@@ -1700,7 +1794,16 @@ async function main(): Promise<void> {
 
     // 4. Disconnect channels
     for (const ch of channels) {
-      try { await ch.disconnect(); } catch {}
+      try {
+        await ch.disconnect();
+      } catch (err) {
+        recordNonFatalError(
+          'shutdown.channel_disconnect_failed',
+          err,
+          { channel: ch.name },
+          'debug',
+        );
+      }
     }
     process.exit(0);
   };
@@ -1918,6 +2021,10 @@ async function main(): Promise<void> {
   setToolsProvider({
     getToolsInventory: () => buildRuntimeToolsInventory(channels.map((c) => c.name)),
   });
+  setChatProvider({
+    processChat: (message, groupFolder, requestId) => processWebChat(message, groupFolder, requestId),
+    getChatHistory: (groupFolder, limit) => getWebChatHistory(groupFolder, limit),
+  });
   setHeartbeatProvider(heartbeatStatusProvider);
   startHealthServer();
 
@@ -1971,6 +2078,7 @@ async function main(): Promise<void> {
                   lane: 'heartbeat',
                   agentRuntime: 'fon',
                   agentMode: resolveAgentMode(group.folder),
+                  requestId: taskId,
                 },
                 (proc, containerName) => queue.registerProcess(virtualJid, proc, containerName, group.folder),
               );

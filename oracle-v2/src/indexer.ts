@@ -26,6 +26,8 @@ import { SmartChunker } from './chunker.js';
 import { getThaiNlpClient } from './thai-nlp-client.js';
 import { getEmbeddingCache, EmbeddingCache } from './embedding-cache.js';
 import type { OracleDocument, OracleMetadata, IndexerConfig } from './types.js';
+import { applySqlitePragmaPolicy } from './db/sqlite-policy.js';
+import { logNonFatal } from './non-fatal.js';
 
 export class OracleIndexer {
   private sqlite: Database;  // Raw bun:sqlite for FTS and schema operations
@@ -37,6 +39,7 @@ export class OracleIndexer {
   constructor(config: IndexerConfig) {
     this.config = config;
     this.sqlite = new Database(config.dbPath);  // Raw connection for FTS and schema
+    applySqlitePragmaPolicy(this.sqlite, 'indexer');
     this.db = drizzle(this.sqlite, { schema });  // Drizzle wrapper for type-safe queries
     this.project = detectProject(config.repoRoot);
     console.log(`[Indexer] Detected project: ${this.project || '(universal)'}`);
@@ -106,8 +109,13 @@ export class OracleIndexer {
     // Ensure repo_root column exists (migration)
     try {
       this.sqlite.exec('ALTER TABLE indexing_status ADD COLUMN repo_root TEXT');
-    } catch {
-      // Column already exists
+    } catch (err) {
+      logNonFatal(
+        'indexer.ensure_repo_root_column',
+        err,
+        { table: 'indexing_status' },
+        'debug',
+      );
     }
 
     this.sqlite.prepare(`

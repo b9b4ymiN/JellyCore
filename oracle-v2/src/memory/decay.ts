@@ -22,6 +22,7 @@
 import { sql } from 'drizzle-orm';
 import { db, oracleDocuments } from '../db/index.js';
 import { floatToInt } from '../types.js';
+import { logNonFatal } from '../non-fatal.js';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -130,8 +131,13 @@ export function trackAccess(docIds: string[]): void {
         })
         .where(sql`${oracleDocuments.id} = ${id}`)
         .run();
-    } catch {
-      // Non-critical — don't fail the request
+    } catch (error) {
+      logNonFatal(
+        'memory.decay.track_access',
+        error,
+        { id },
+        'debug',
+      );
     }
   }
 }

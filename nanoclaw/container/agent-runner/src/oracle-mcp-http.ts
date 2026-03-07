@@ -47,6 +47,9 @@ const ORACLE_AUDIT_LOG_PATH =
   process.env.ORACLE_AUDIT_LOG_PATH || '/workspace/ipc/oracle-write-audit.log';
 const ORACLE_POLICY_GROUP = process.env.ORACLE_POLICY_GROUP || 'unknown';
 const NANOCLAW_CHAT_JID = process.env.NANOCLAW_CHAT_JID || 'unknown';
+const NANOCLAW_REQUEST_ID = process.env.NANOCLAW_REQUEST_ID || '';
+
+let requestSequence = 0;
 
 const ORACLE_WRITE_TOOL_NAMES = new Set([
   'oracle_learn',
@@ -97,8 +100,8 @@ function recordWriteAudit(name: string, args: unknown): void {
 
   try {
     fs.appendFileSync(ORACLE_AUDIT_LOG_PATH, line, { encoding: 'utf-8' });
-  } catch {
-    // best-effort audit logging
+  } catch (err) {
+    console.error(`[Oracle Bridge] audit write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -498,6 +501,10 @@ class OracleHttpClient {
 
     if (this.authToken) {
       headers['Authorization'] = `Bearer ${this.authToken}`;
+    }
+    if (NANOCLAW_REQUEST_ID) {
+      requestSequence += 1;
+      headers['x-request-id'] = `${NANOCLAW_REQUEST_ID}:${requestSequence}`;
     }
 
     for (let attempt = 0; attempt < retries; attempt++) {

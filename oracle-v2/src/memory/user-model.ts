@@ -21,6 +21,7 @@ import {
   DEFAULT_USER_MODEL,
   floatToInt,
 } from '../types.js';
+import { logNonFatal } from '../non-fatal.js';
 
 /**
  * Deep merge two objects (recursive, not overwrite)
@@ -83,8 +84,13 @@ export class UserModelStore {
       if (modelJson) {
         return JSON.parse(modelJson) as UserModel;
       }
-    } catch {
-      // Fallback: return default
+    } catch (error) {
+      logNonFatal(
+        'memory.user_model.parse_concepts_json',
+        error,
+        { userId },
+        'debug',
+      );
     }
 
     return {

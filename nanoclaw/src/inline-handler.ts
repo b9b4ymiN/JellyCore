@@ -145,7 +145,9 @@ function cmdStatus(): string {
     );
     containerNames = output.trim().split('\n').filter(Boolean);
     containerCount = containerNames.length;
-  } catch { /* docker not accessible or no containers */ }
+  } catch (err) {
+    logger.debug({ err }, 'Docker container list unavailable while building /status');
+  }
 
   const uptime = process.uptime();
   const hours = Math.floor(uptime / 3600);
@@ -265,7 +267,9 @@ function cmdSession(groupFolder?: string): string {
     `).get(folder) as { count: number; chars: number } | undefined;
     msgCount = row?.count || 0;
     totalChars = row?.chars || 0;
-  } catch { /* DB not ready */ }
+  } catch (err) {
+    logger.debug({ err, folder }, 'Database not ready while reading /session stats');
+  }
 
   const maxAge = SESSION_MAX_AGE_MS / 3600000;
   const lines = [
@@ -657,7 +661,9 @@ function cmdHealth(): string {
       { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     containerCount = output.trim().split('\n').filter(Boolean).length;
-  } catch { /* ignore */ }
+  } catch (err) {
+    logger.debug({ err }, 'Docker container list unavailable in health check');
+  }
 
   return [
     '🏥 *Health Check*',
@@ -683,7 +689,9 @@ function cmdQueue(): string {
       { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     containerCount = output.trim().split('\n').filter(Boolean).length;
-  } catch { /* ignore */ }
+  } catch (err) {
+    logger.debug({ err }, 'Docker container list unavailable in queue check');
+  }
 
   const stats = resourceMonitor.stats;
 
@@ -712,7 +720,9 @@ function cmdRestart(groupFolder?: string): InlineResult {
     for (const name of containers) {
       try {
         execSync(`docker stop ${name}`, { timeout: 15000, stdio: 'pipe' });
-      } catch { /* already stopped */ }
+      } catch (err) {
+        logger.debug({ err, name }, 'Container stop skipped (already stopped or inaccessible)');
+      }
     }
     if (containers.length > 0) {
       return {
@@ -720,7 +730,9 @@ function cmdRestart(groupFolder?: string): InlineResult {
         action: 'clear-session',
       };
     }
-  } catch { /* ignore */ }
+  } catch (err) {
+    logger.warn({ err }, 'Restart command failed to enumerate or stop containers');
+  }
 
   return {
     reply: '🔄 *Restart*\n\nไม่มี container ที่ต้องหยุด\nล้าง session แล้ว — พิมพ์อะไรก็ได้เพื่อเริ่มใหม่ค่ะ',
@@ -759,7 +771,9 @@ function cmdDocker(): string {
         lines.push(`• ${tag}: ${size} (${created})`);
       });
     }
-  } catch { /* ignore */ }
+  } catch (err) {
+    logger.debug({ err }, 'Docker image list unavailable for /images');
+  }
 
   lines.push('', 'ล้าง unused → `docker system prune`');
   return lines.join('\n');

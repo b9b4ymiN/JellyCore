@@ -173,7 +173,11 @@ export async function createEncryptedAuthState(
               if (value) {
                 writeEncrypted(filePath, value, passphrase);
               } else {
-                try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+                try {
+                  fs.unlinkSync(filePath);
+                } catch (err) {
+                  logger.debug({ err, filePath }, 'Auth key cleanup skipped (file may already be gone)');
+                }
               }
             }
           }

@@ -124,6 +124,7 @@ export function toTelegramMarkdownV2(input: string): string {
 
   // Tables must be processed before bold/italic so that formatting inside
   // header cells does not interfere with column detection.
+  text = convertAsciiBoxTables(text, hold);
   text = convertMarkdownTables(text, hold);
 
   // ── Phase 2: Protect links ───────────────────────────────────────────────
@@ -269,6 +270,23 @@ function parseTableCells(line: string): string[] {
 }
 
 /**
+ * Normalize inline markdown in table cells so Telegram receives clean table text.
+ * This prevents leftovers like **bold** from appearing in rendered tables.
+ */
+function normalizeInlineMarkdown(text: string): string {
+  return text
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/(\*{3}|_{3})(.+?)\1/g, '$2')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '$1')
+    .replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, '$1')
+    .replace(/~(.+?)~/g, '$1')
+    .replace(/\|\|(.+?)\|\|/g, '$1')
+    .trim();
+}
+
+/**
  * Derive column alignments from the separator row.
  * Falls back to `'left'` for any column that doesn't match `:---:` / `---:`.
  */
@@ -323,10 +341,10 @@ function renderAsciiTable(
   // Normalize headers and rows to the same column count
   const normalHeaders = Array.from(
     { length: colCount },
-    (_, i) => headers[i] ?? `Col ${i + 1}`,
+    (_, i) => normalizeInlineMarkdown(headers[i] ?? `Col ${i + 1}`),
   );
   const rows = rawRows.map((cells) =>
-    Array.from({ length: colCount }, (_, i) => cells[i] ?? ''),
+    Array.from({ length: colCount }, (_, i) => normalizeInlineMarkdown(cells[i] ?? '')),
   );
 
   const alignments = parseAlignments(separatorLine, colCount);
@@ -343,6 +361,94 @@ function renderAsciiTable(
   );
 
   return [divider, headerRow, divider, ...bodyRows, divider].join('\n');
+}
+
+/**
+ * Return true if line matches an ASCII box-table border like +-----+------+.
+ */
+function isAsciiBoxBorder(line: string): boolean {
+  const t = line.trim();
+  return /^\+(?:-+\+)+$/.test(t);
+}
+
+/**
+ * Return true if line matches an ASCII box-table row like | a | b |.
+ */
+function isAsciiBoxRow(line: string): boolean {
+  const t = line.trim();
+  return /^\|.*\|$/.test(t);
+}
+
+/**
+ * Convert pre-rendered ASCII box tables into fenced code blocks so Telegram keeps
+ * alignment and does not treat table characters as Markdown.
+ */
+function convertAsciiBoxTables(text: string, hold: (s: string) => string): string {
+  const lines = text.split('\n');
+  const out: string[] = [];
+
+  let i = 0;
+  while (i < lines.length) {
+    const first = lines[i].trim();
+    if (!isAsciiBoxBorder(first)) {
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+
+    const block: string[] = [];
+    let j = i;
+    let borderCount = 0;
+    let rowCount = 0;
+
+    while (j < lines.length) {
+      const line = lines[j].trim();
+      if (isAsciiBoxBorder(line)) {
+        borderCount += 1;
+        block.push(lines[j]);
+        j++;
+        continue;
+      }
+      if (isAsciiBoxRow(line)) {
+        rowCount += 1;
+        block.push(lines[j]);
+        j++;
+        continue;
+      }
+      break;
+    }
+
+    const valid =
+      block.length >= 4
+      && borderCount >= 2
+      && rowCount >= 2
+      && isAsciiBoxBorder(block[0].trim())
+      && isAsciiBoxBorder(block[block.length - 1].trim());
+
+    if (!valid) {
+      out.push(lines[i]);
+      i += 1;
+      continue;
+    }
+
+    const rowLines = block.filter((line) => isAsciiBoxRow(line.trim()));
+    const headerCells = parseTableCells(rowLines[0]);
+    const colCount = Math.max(
+      headerCells.length,
+      ...rowLines.map((line) => parseTableCells(line).length),
+    );
+    const normalizedHeaders = Array.from(
+      { length: colCount },
+      (_, idx) => headerCells[idx] ?? `Col ${idx + 1}`,
+    );
+    const separatorLine = `| ${Array.from({ length: colCount }, () => '---').join(' | ')} |`;
+    const dataRows = rowLines.slice(1);
+    const ascii = renderAsciiTable(normalizedHeaders, dataRows, separatorLine);
+    out.push(hold(`\`\`\`\n${ascii}\n\`\`\``));
+    i = j;
+  }
+
+  return out.join('\n');
 }
 
 /**

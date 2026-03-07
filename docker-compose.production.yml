@@ -10,10 +10,10 @@
 # Required .env variables:
 #   ANTHROPIC_API_KEY          - Z.AI API key (used as ANTHROPIC_AUTH_TOKEN)
 #   TELEGRAM_BOT_TOKEN         - Telegram bot token
-#   CHROMA_AUTH_TOKEN           - ChromaDB authentication token
-#   ORACLE_AUTH_TOKEN           - Oracle API authentication token
-#   JELLYCORE_AUTH_PASSPHRASE   - WhatsApp auth encryption key (only if WhatsApp enabled)
-#   JELLYCORE_IPC_SECRET        - IPC integrity signing secret
+#   CHROMA_AUTH_TOKEN          - ChromaDB authentication token
+#   ORACLE_AUTH_TOKEN          - Oracle API authentication token
+#   JELLYCORE_AUTH_PASSPHRASE  - WhatsApp auth encryption key (only if WhatsApp enabled)
+#   JELLYCORE_IPC_SECRET       - IPC integrity signing secret
 #
 # Optional:
 #   ENABLED_CHANNELS           - Comma-separated: telegram,whatsapp (default: telegram)
@@ -28,7 +28,7 @@ services:
     image: chromadb/chroma:0.4.24
     container_name: jellycore-chromadb
     restart: unless-stopped
-    # Internal only — no port mapping (accessible via jellycore-internal network)
+    # Internal only - no port mapping (accessible via jellycore-internal network)
     volumes:
       - chromadb-data:/chroma/chroma
     environment:
@@ -70,7 +70,7 @@ services:
     restart: unless-stopped
     # Oracle port exposed only on loopback for local debugging
     ports:
-      - "127.0.0.1:47778:47778"
+      - "127.0.0.1:${ORACLE_HOST_PORT:-47778}:47778"
     volumes:
       - oracle-data:/data/oracle
       # Mount full ψ/memory so indexer + handleLearn can access ψ/memory/learnings, resonance, retrospectives
@@ -83,8 +83,13 @@ services:
       - HF_CACHE_DIR=/data/oracle/transformers-cache
       - CHROMA_URL=http://chromadb:8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
+      - THAI_NLP_URL=${THAI_NLP_URL:-http://thai-nlp:8000}
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
-      - NANOCLAW_EXTERNAL_MCP_DISABLED=${NANOCLAW_EXTERNAL_MCP_DISABLED}
+      - ORACLE_ALLOWED_ORIGINS=${ORACLE_ALLOWED_ORIGINS:-}
+      - ORACLE_RATE_LIMIT_WINDOW_MS=${ORACLE_RATE_LIMIT_WINDOW_MS:-60000}
+      - ORACLE_RATE_LIMIT_READ_LIMIT=${ORACLE_RATE_LIMIT_READ_LIMIT:-60}
+      - ORACLE_RATE_LIMIT_WRITE_LIMIT=${ORACLE_RATE_LIMIT_WRITE_LIMIT:-30}
+      - NANOCLAW_EXTERNAL_MCP_DISABLED=${NANOCLAW_EXTERNAL_MCP_DISABLED:-}
       - NODE_ENV=production
     depends_on:
       chromadb:
@@ -109,6 +114,39 @@ services:
       - jellycore-internal
 
   # ========================================
+  # Docker Socket Proxy - constrained Docker API surface for NanoClaw
+  # ========================================
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: jellycore-docker-socket-proxy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - LOG_LEVEL=warning
+      - PING=1
+      - VERSION=1
+      - INFO=1
+      - CONTAINERS=1
+      - IMAGES=1
+      - NETWORKS=1
+      - VOLUMES=1
+      - POST=1
+      - BUILD=1
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - jellycore-internal
+
+  # ========================================
   # NanoClaw - AI Orchestrator (spawns agent containers)
   # ========================================
   nanoclaw:
@@ -120,11 +158,9 @@ services:
     # Give nanoclaw enough time to kill orphan agent containers during shutdown
     stop_grace_period: 45s
     ports:
-      - "47779:47779"
+      - "127.0.0.1:${NANOCLAW_HOST_PORT:-47779}:47779"
     volumes:
-      # Docker socket — NanoClaw spawns agent containers
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Agent container image source — mounted so NanoClaw can auto-build nanoclaw-agent:latest on first start
+      # Agent container image source - mounted so NanoClaw can auto-build nanoclaw-agent:latest on first start
       # (read-only: NanoClaw never needs to write to the build context)
       - ./nanoclaw/container:/app/nanoclaw/container:ro
       # Persistent state (sessions, database, auth)
@@ -140,7 +176,7 @@ services:
       # Channels: comma-separated (telegram, whatsapp). Default: telegram only
       - ENABLED_CHANNELS=${ENABLED_CHANNELS:-telegram}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      # Z.AI GLM Coding Plan — native Anthropic-compatible endpoint
+      # Z.AI GLM Coding Plan - native Anthropic-compatible endpoint
       # https://docs.z.ai/devpack/tool/claude#manual-configuration
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_API_KEY}
       - ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
@@ -151,9 +187,9 @@ services:
       # Oracle (containers on jellycore-internal network use DNS name)
       - ORACLE_API_URL=http://oracle:47778
       - ORACLE_AUTH_TOKEN=${ORACLE_AUTH_TOKEN}
-      # Oura Ring MCP (optional) — set in .env to enable health/sleep/activity tools
+      # Oura Ring MCP (optional) - set in .env to enable health/sleep/activity tools
       - OURA_PERSONAL_ACCESS_TOKEN=${OURA_PERSONAL_ACCESS_TOKEN}
-      # Google Docs MCP (optional) — OAuth client credentials + optional profile/path override
+      # Google Docs MCP (optional) - OAuth client credentials + optional profile/path override
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_MCP_PROFILE=${GOOGLE_MCP_PROFILE}
@@ -163,12 +199,21 @@ services:
       - JELLYCORE_IPC_SECRET=${JELLYCORE_IPC_SECRET}
       # Misc
       - TZ=${TZ:-Asia/Bangkok}
-      - ASSISTANT_NAME=${ASSISTANT_NAME:-Andy}
+      - ASSISTANT_NAME=${ASSISTANT_NAME:-Fon}
       - CONTAINER_IMAGE=${CONTAINER_IMAGE:-nanoclaw-agent:latest}
-      - AGENT_FULL_ACCESS=${AGENT_FULL_ACCESS:-true}
+      - AGENT_FULL_ACCESS=${AGENT_FULL_ACCESS:-false}
       - AGENT_CODEX_ENABLED=${AGENT_CODEX_ENABLED:-false}
       - AGENT_SWARM_ENABLED=${AGENT_SWARM_ENABLED:-false}
       - AGENT_MODE_GLOBAL_DEFAULT=${AGENT_MODE_GLOBAL_DEFAULT:-off}
+      - LLM_PROVIDER=${LLM_PROVIDER:-claude}
+      - NANOCLAW_LLM_PROVIDER=${NANOCLAW_LLM_PROVIDER:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}
+      - OPENAI_TIMEOUT_MS=${OPENAI_TIMEOUT_MS:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-}
+      - OLLAMA_TIMEOUT_MS=${OLLAMA_TIMEOUT_MS:-}
       - CODEX_AUTH_REQUIRED=${CODEX_AUTH_REQUIRED:-true}
       - CODEX_AUTH_PATH=${CODEX_AUTH_PATH:-data/codex-auth}
       - CODEX_MODEL=${CODEX_MODEL:-gpt-5.3-codex}
@@ -176,6 +221,8 @@ services:
       - NODE_ENV=production
       # Docker network for agent containers to join
       - DOCKER_NETWORK=jellycore_jellycore-internal
+      # Docker API client target (via restricted socket proxy)
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
       # Health server port
       - NANOCLAW_HEALTH_PORT=47779
       # Agent container resource limits
@@ -185,6 +232,8 @@ services:
     depends_on:
       oracle:
         condition: service_healthy
+      docker-socket-proxy:
+        condition: service_started
     deploy:
       resources:
         limits:
@@ -198,7 +247,34 @@ services:
     networks:
       - jellycore-internal
 
-  # Thai NLP sidecar removed — Oracle uses whitespace tokenization fallback. See git history to restore.
+  # Thai NLP sidecar (optional profile)
+  thai-nlp:
+    build:
+      context: ./thai-nlp-sidecar
+      dockerfile: Dockerfile
+    container_name: jellycore-thai-nlp
+    restart: unless-stopped
+    profiles: ["thai-nlp"]
+    environment:
+      - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - jellycore-internal
 
 # ========================================
 # Volumes

@@ -55,11 +55,12 @@ describe('codex-memory', () => {
   });
 
   it('writes expected oracle endpoints from generated plan', async () => {
-    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const calls: Array<{ url: string; body: Record<string, unknown>; headers: Headers }> = [];
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       calls.push({
         url: String(input),
         body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {},
+        headers: new Headers(init?.headers),
       });
       return okJsonResponse();
     });
@@ -91,5 +92,12 @@ describe('codex-memory', () => {
     const episodicBody = calls.find((call) => new URL(call.url).pathname === '/api/episodic')?.body;
     expect(episodicBody?.runtime).toBe('codex');
     expect(episodicBody?.groupId).toBe('engineering');
+
+    const requestIds = calls
+      .map((call) => call.headers.get('x-request-id'))
+      .filter((v): v is string => Boolean(v));
+    expect(requestIds.length).toBe(calls.length);
+    expect(requestIds[0].startsWith('codex-')).toBe(true);
+    expect(new Set(requestIds).size).toBe(1);
   });
 });

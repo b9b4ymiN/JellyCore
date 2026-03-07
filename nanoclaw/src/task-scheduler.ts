@@ -15,6 +15,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
+import { eventBus } from './event-bus.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -70,6 +71,15 @@ async function runTask(
     { taskId: task.id, group: task.group_folder, label: task.label, timeout: effectiveTimeout },
     'Running scheduled task',
   );
+  eventBus.emit('live', {
+    type: 'task:start',
+    data: {
+      taskId: task.id,
+      label: task.label ?? task.id.slice(0, 8),
+      group: task.group_folder,
+      startedAt: new Date().toISOString(),
+    },
+  });
 
   const groups = deps.registeredGroups();
   const group = Object.values(groups).find(
@@ -88,6 +98,18 @@ async function runTask(
       status: 'error',
       result: null,
       error: `Group not found: ${task.group_folder}`,
+    });
+    eventBus.emit('live', {
+      type: 'task:complete',
+      data: {
+        taskId: task.id,
+        label: task.label ?? task.id.slice(0, 8),
+        group: task.group_folder,
+        status: 'error',
+        durationMs: Date.now() - startTime,
+        summary: `Group not found: ${task.group_folder}`,
+        completedAt: new Date().toISOString(),
+      },
     });
     return;
   }
@@ -158,6 +180,7 @@ async function runTask(
         lane: 'scheduler',
         agentRuntime: 'fon',
         agentMode: effectiveMode,
+        requestId: `sched-${task.id}-${startTime}`,
       },
       (proc, containerName) => deps.onProcess('_sched_' + task.id, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
@@ -216,6 +239,18 @@ async function runTask(
         { taskId: task.id, attempt: currentRetryCount + 1, maxRetries: effectiveMaxRetries },
         'Task failed — retry scheduled',
       );
+      eventBus.emit('live', {
+        type: 'task:complete',
+        data: {
+          taskId: task.id,
+          label: task.label ?? task.id.slice(0, 8),
+          group: task.group_folder,
+          status: 'error',
+          durationMs,
+          summary: `${error} (retry ${currentRetryCount + 1}/${effectiveMaxRetries})`,
+          completedAt: new Date().toISOString(),
+        },
+      });
       return;
     }
     // Exhausted retries or no retry configured
@@ -236,8 +271,22 @@ async function runTask(
           task.chat_jid,
           `⚠️ Task "${task.label ?? task.id.slice(0, 8)}" has failed ${effectiveMaxRetries} times in a row\n\nReason: ${error}\n\nUse resume_task to start again`,
         );
-      } catch { /* non-fatal */ }
+      } catch (notifyErr) {
+        logger.warn({ err: notifyErr, taskId: task.id }, 'Failed to send auto-pause notification (non-fatal)');
+      }
     }
+    eventBus.emit('live', {
+      type: 'task:complete',
+      data: {
+        taskId: task.id,
+        label: task.label ?? task.id.slice(0, 8),
+        group: task.group_folder,
+        status: 'error',
+        durationMs,
+        summary: error.slice(0, 500),
+        completedAt: new Date().toISOString(),
+      },
+    });
   } else {
     // Success — reset retry counter
     resetRetryCount(task.id);
@@ -248,6 +297,18 @@ async function runTask(
       status: 'success',
       result,
       error: null,
+    });
+    eventBus.emit('live', {
+      type: 'task:complete',
+      data: {
+        taskId: task.id,
+        label: task.label ?? task.id.slice(0, 8),
+        group: task.group_folder,
+        status: 'success',
+        durationMs,
+        summary: (result || 'Completed').slice(0, 500),
+        completedAt: new Date().toISOString(),
+      },
     });
   }
 
@@ -306,6 +367,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
 
         logger.info({ taskId: task.id, label: task.label }, 'Task claimed, enqueuing for execution');
+        eventBus.emit('live', {
+          type: 'task:enqueue',
+          data: {
+            taskId: task.id,
+            label: task.label ?? task.id.slice(0, 8),
+            group: task.group_folder,
+            enqueuedAt: new Date().toISOString(),
+          },
+        });
 
         // Re-fetch to get latest status (might have been paused/cancelled concurrently)
         const currentTask = getTaskById(task.id);

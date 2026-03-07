@@ -13,6 +13,7 @@ import {
 } from './config.js';
 import { recentErrors } from './health-server.js';
 import { logger } from './logger.js';
+import { eventBus } from './event-bus.js';
 import {
   getHeartbeatConfig,
   getLastActivityTime,
@@ -344,6 +345,15 @@ async function sendHeartbeat(
 
   const check = await collectHeartbeatSignal(reason, provider);
   const parsed = parseHeartbeatOutput(check.raw, cfg.ackMaxChars);
+  eventBus.emit('live', {
+    type: 'heartbeat:tick',
+    data: {
+      reason,
+      ok: parsed.ok,
+      summary: parsed.summary.slice(0, 500),
+      timestamp: new Date().toISOString(),
+    },
+  });
 
   if (!shouldDeliverHeartbeatResult(parsed, cfg)) {
     if (cfg.deliveryMuted) {

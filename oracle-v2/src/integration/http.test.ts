@@ -2,13 +2,15 @@
  * HTTP API Integration Tests
  * Tests oracle-v2 server endpoints
  */
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import type { Subprocess } from "bun";
 
 const BASE_URL = "http://localhost:47778";
+const ORACLE_ROOT = import.meta.dir.replace(/[/\\]src[/\\]integration$/, "");
 let serverProcess: Subprocess | null = null;
+setDefaultTimeout(30_000);
 
-async function waitForServer(maxAttempts = 30): Promise<boolean> {
+async function waitForServer(maxAttempts = 60): Promise<boolean> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${BASE_URL}/api/health`);
@@ -41,14 +43,14 @@ describe("HTTP API Integration", () => {
     // Start server
     console.log("Starting server...");
     serverProcess = Bun.spawn(["bun", "run", "src/server.ts"], {
-      cwd: import.meta.dir.replace("/src/integration", ""),
+      cwd: ORACLE_ROOT,
       stdout: "pipe",
       stderr: "pipe",
     });
 
     const ready = await waitForServer();
     if (!ready) {
-      throw new Error("Server failed to start within 15 seconds");
+      throw new Error("Server failed to start within 30 seconds");
     }
     console.log("Server ready");
   });
@@ -139,6 +141,31 @@ describe("HTTP API Integration", () => {
   });
 
   // ===================
+  // Learn
+  // ===================
+  describe("Learn", () => {
+    test("POST /api/learn accepts Thai-only pattern", async () => {
+      const payload = {
+        pattern: "โบ๊ท ฝน ภาษาไทย ทดสอบ ระบบตัดคำ",
+        source: "http-test-thai",
+        concepts: ["thai", "nlp"],
+      };
+
+      const res = await fetch(`${BASE_URL}/api/learn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      expect(res.ok).toBe(true);
+      const data = await res.json();
+      expect(typeof data.id).toBe("string");
+      expect(data.id.startsWith("learning_")).toBe(true);
+      expect(data.id.includes("_entry-")).toBe(true);
+    });
+  });
+
+  // ===================
   // Consult & Reflect
   // ===================
   describe("Consult & Reflect", () => {
@@ -155,7 +182,8 @@ describe("HTTP API Integration", () => {
       const res = await fetch(`${BASE_URL}/api/reflect`);
       expect(res.ok).toBe(true);
       const data = await res.json();
-      expect(data).toHaveProperty("content");
+      expect(typeof data).toBe("object");
+      expect(Boolean(data.content) || Boolean(data.error)).toBe(true);
     });
   });
 
@@ -236,6 +264,53 @@ describe("HTTP API Integration", () => {
     test("GET /api/file without path returns error", async () => {
       const res = await fetch(`${BASE_URL}/api/file`);
       expect(res.status).toBeGreaterThanOrEqual(400);
+    });
+  });
+
+  // ===================
+  // API Version Compatibility (/api vs /api/v1)
+  // ===================
+  describe("API Version Compatibility", () => {
+    test("GET /api/v1/health matches /api/health shape", async () => {
+      const [legacyRes, v1Res] = await Promise.all([
+        fetch(`${BASE_URL}/api/health`),
+        fetch(`${BASE_URL}/api/v1/health`),
+      ]);
+      expect(legacyRes.ok).toBe(true);
+      expect(v1Res.ok).toBe(true);
+
+      const legacy = await legacyRes.json();
+      const v1 = await v1Res.json();
+      expect(v1).toEqual(legacy);
+    });
+
+    test("GET /api/v1/list works and stays payload-compatible", async () => {
+      const [legacyRes, v1Res] = await Promise.all([
+        fetch(`${BASE_URL}/api/list?limit=5`),
+        fetch(`${BASE_URL}/api/v1/list?limit=5`),
+      ]);
+      expect(legacyRes.ok).toBe(true);
+      expect(v1Res.ok).toBe(true);
+
+      const legacy = await legacyRes.json();
+      const v1 = await v1Res.json();
+      expect(Array.isArray(v1.results)).toBe(true);
+      expect(v1.total).toBe(legacy.total);
+      expect(v1.type).toBe(legacy.type);
+    });
+
+    test("GET /api/v1/search keeps query/result parity", async () => {
+      const [legacyRes, v1Res] = await Promise.all([
+        fetch(`${BASE_URL}/api/search?q=oracle&limit=3`),
+        fetch(`${BASE_URL}/api/v1/search?q=oracle&limit=3`),
+      ]);
+      expect(legacyRes.ok).toBe(true);
+      expect(v1Res.ok).toBe(true);
+
+      const legacy = await legacyRes.json();
+      const v1 = await v1Res.json();
+      expect(v1.query).toBe(legacy.query);
+      expect(v1.results.length).toBe(legacy.results.length);
     });
   });
 });

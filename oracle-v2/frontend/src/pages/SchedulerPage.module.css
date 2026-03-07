@@ -1,0 +1,83 @@
+.container {
+  max-width: 1180px;
+  margin: 24px auto;
+  padding: 0 16px 36px;
+  display: grid;
+  gap: 14px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 30px;
+}
+
+.header p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.header button,
+.filters button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #1a1d32;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.filters {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #121526;
+  padding: 12px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: end;
+}
+
+.filters label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.filters select {
+  min-width: 140px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0f1120;
+  color: var(--text-primary);
+  padding: 8px 10px;
+}
+
+.list {
+  display: grid;
+  gap: 10px;
+}
+
+.empty {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  color: var(--text-muted);
+}
+
+.error {
+  border: 1px solid #7f1d1d;
+  background: #450a0a;
+  color: #fca5a5;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}

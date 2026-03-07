@@ -21,6 +21,7 @@ import { db, sqlite, oracleDocuments } from '../db/index.js';
 import { ChromaHttpClient } from '../chroma-http.js';
 import { type EpisodicMemory, floatToInt } from '../types.js';
 import { searchCache } from '../cache.js';
+import { logNonFatal } from '../non-fatal.js';
 
 /** Default TTL: 90 days in ms */
 const TTL_DEFAULT_MS = 90 * 24 * 60 * 60 * 1000;
@@ -101,7 +102,14 @@ export class EpisodicStore {
         ftsContent,
         conceptsArray.filter(c => !c.startsWith('{')).join(' '),
       );
-    } catch { /* FTS5 failure non-critical */ }
+    } catch (error) {
+      logNonFatal(
+        'memory.episodic.record.insert_fts',
+        error,
+        { docId },
+        'warn',
+      );
+    }
 
     // Index into ChromaDB
     try {
@@ -117,7 +125,14 @@ export class EpisodicStore {
           outcome: episode.outcome,
         },
       }]);
-    } catch { /* ChromaDB failure non-critical */ }
+    } catch (error) {
+      logNonFatal(
+        'memory.episodic.record.insert_chroma',
+        error,
+        { docId },
+        'warn',
+      );
+    }
 
     searchCache.invalidate();
     return docId;
@@ -162,8 +177,13 @@ export class EpisodicStore {
           }
         }
       }
-    } catch {
-      // ChromaDB unavailable — fallback to FTS5
+    } catch (error) {
+      logNonFatal(
+        'memory.episodic.find_related.chroma_query',
+        error,
+        { topicLength: topic.length, limit },
+        'debug',
+      );
     }
 
     // Strategy 2: FTS5 fallback
@@ -201,8 +221,13 @@ export class EpisodicStore {
             }
           }
         }
-      } catch {
-        // FTS5 query failed — return empty
+      } catch (error) {
+        logNonFatal(
+          'memory.episodic.find_related.fts_query',
+          error,
+          { topicLength: topic.length, limit, userId: userId || null },
+          'warn',
+        );
       }
     }
 
@@ -262,7 +287,14 @@ export class EpisodicStore {
 
         try {
           sqlite.prepare('DELETE FROM oracle_fts WHERE id = ?').run(row.id);
-        } catch { /* non-critical */ }
+        } catch (error) {
+          logNonFatal(
+            'memory.episodic.purge_expired.delete_fts',
+            error,
+            { id: row.id },
+            'debug',
+          );
+        }
 
         removed++;
       }
@@ -299,7 +331,14 @@ export class EpisodicStore {
         })
         .where(eq(oracleDocuments.id, docId))
         .run();
-    } catch { /* non-critical */ }
+    } catch (error) {
+      logNonFatal(
+        'memory.episodic.extend_ttl',
+        error,
+        { docId },
+        'debug',
+      );
+    }
   }
 
   /**
@@ -312,8 +351,8 @@ export class EpisodicStore {
       if (jsonStr) {
         return JSON.parse(jsonStr) as EpisodicMemory;
       }
-    } catch {
-      // Parse failed
+    } catch (error) {
+      logNonFatal('memory.episodic.parse_row', error, undefined, 'debug');
     }
     return null;
   }

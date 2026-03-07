@@ -37,6 +37,53 @@ function getChromaClient(): ChromaHttpClient {
   return chromaClient;
 }
 
+export interface FtsQueryPlan {
+  strictQuery: string;
+  orQuery: string | null;
+  tokens: string[];
+}
+
+const FTS_RESERVED_RE = /[?*+\-()^~"':]/g;
+
+function sanitizeFtsToken(token: string): string {
+  return token
+    .replace(FTS_RESERVED_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Build FTS query variants from segmented text.
+ *
+ * - strictQuery: default FTS query (space-separated terms = AND semantics).
+ * - orQuery: fallback query joining tokens with OR for recall when strict returns 0.
+ */
+export function buildFtsQueryPlan(segmented: string): FtsQueryPlan {
+  const tokens = segmented
+    .split(/\s+/)
+    .map(sanitizeFtsToken)
+    .filter(Boolean);
+
+  const strictQuery = tokens.join(' ').trim();
+  if (tokens.length <= 1) {
+    return {
+      strictQuery,
+      orQuery: null,
+      tokens,
+    };
+  }
+
+  const orQuery = tokens
+    .map((t) => `"${t}"`)
+    .join(' OR ');
+
+  return {
+    strictQuery,
+    orQuery,
+    tokens,
+  };
+}
+
 /**
  * Search Oracle knowledge base with hybrid search (FTS5 + Vector)
  * Uses ChromaDB HTTP client with token authentication
@@ -67,18 +114,18 @@ export async function handleSearch(
   // Phase 1: Classify query for adaptive search weights
   const queryProfile = classifySearchQuery(query);
 
-  // Thai NLP preprocessing (graceful — falls back if sidecar is down)
+  // Thai NLP preprocessing (graceful - falls back if sidecar is down)
   const thaiNlp = getThaiNlpClient();
   const { segmented } = await thaiNlp.preprocessQuery(query);
 
-  // Remove FTS5 special characters: ? * + - ( ) ^ ~ " ' : (colon is column prefix)
-  const safeQuery = segmented.replace(/[?*+\-()^~"':]/g, ' ').replace(/\s+/g, ' ').trim();
+  const ftsPlan = buildFtsQueryPlan(segmented);
 
   let warning: string | undefined;
 
   // FTS5 search (skip if vector-only mode)
   let ftsResults: SearchResult[] = [];
   let ftsTotal = 0;
+  let ftsQueryMode: 'strict' | 'or-fallback' = 'strict';
 
   // Project filter: if project specified, include project + universal (NULL)
   // If no project, only return universal (NULL)
@@ -87,7 +134,7 @@ export async function handleSearch(
     : 'd.project IS NULL';
   const projectParams = resolvedProject ? [resolvedProject] : [];
 
-  // v0.7.0: Layer filter — null treated as 'semantic' for legacy docs
+  // v0.7.0: Layer filter - null treated as 'semantic' for legacy docs
   let layerFilterSql = '';
   let layerParams: string[] = [];
   if (layerFilter && layerFilter.length > 0) {
@@ -101,8 +148,11 @@ export async function handleSearch(
     layerParams = [...layerFilter];
   }
 
-  // FTS5 search must use raw SQL (Drizzle doesn't support virtual tables)
-  if (mode !== 'vector') {
+  const runFtsSearch = (matchQuery: string): { total: number; results: SearchResult[] } => {
+    if (!matchQuery) {
+      return { total: 0, results: [] };
+    }
+
     if (type === 'all') {
       const countStmt = sqlite.prepare(`
         SELECT COUNT(*) as total
@@ -110,7 +160,7 @@ export async function handleSearch(
         JOIN oracle_documents d ON f.id = d.id
         WHERE oracle_fts MATCH ? AND ${projectFilter}${layerFilterSql}
       `);
-      ftsTotal = (countStmt.get(safeQuery, ...projectParams, ...layerParams) as { total: number }).total;
+      const total = (countStmt.get(matchQuery, ...projectParams, ...layerParams) as { total: number }).total;
 
       const stmt = sqlite.prepare(`
         SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, d.memory_layer, rank as score
@@ -120,36 +170,42 @@ export async function handleSearch(
         ORDER BY rank
         LIMIT ?
       `);
-      ftsResults = stmt.all(safeQuery, ...projectParams, ...layerParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
-        id: row.id,
-        type: row.type,
-        content: row.content,
-        source_file: row.source_file,
-        concepts: JSON.parse(row.concepts || '[]'),
-        project: row.project,
-        createdAt: row.created_at || undefined,
-        memoryLayer: row.memory_layer || null,
-        source: 'fts' as const,
-        score: normalizeRank(row.score)
-      }));
-    } else {
-      const countStmt = sqlite.prepare(`
-        SELECT COUNT(*) as total
-        FROM oracle_fts f
-        JOIN oracle_documents d ON f.id = d.id
-        WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}${layerFilterSql}
-      `);
-      ftsTotal = (countStmt.get(safeQuery, type, ...projectParams, ...layerParams) as { total: number }).total;
+      const results = stmt
+        .all(matchQuery, ...projectParams, ...layerParams, limit * queryProfile.ftsCandidateMult)
+        .map((row: any) => ({
+          id: row.id,
+          type: row.type,
+          content: row.content,
+          source_file: row.source_file,
+          concepts: JSON.parse(row.concepts || '[]'),
+          project: row.project,
+          createdAt: row.created_at || undefined,
+          memoryLayer: row.memory_layer || null,
+          source: 'fts' as const,
+          score: normalizeRank(row.score),
+        }));
+      return { total, results };
+    }
 
-      const stmt = sqlite.prepare(`
-        SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, d.memory_layer, rank as score
-        FROM oracle_fts f
-        JOIN oracle_documents d ON f.id = d.id
-        WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}${layerFilterSql}
-        ORDER BY rank
-        LIMIT ?
-      `);
-      ftsResults = stmt.all(safeQuery, type, ...projectParams, ...layerParams, limit * queryProfile.ftsCandidateMult).map((row: any) => ({
+    const countStmt = sqlite.prepare(`
+      SELECT COUNT(*) as total
+      FROM oracle_fts f
+      JOIN oracle_documents d ON f.id = d.id
+      WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}${layerFilterSql}
+    `);
+    const total = (countStmt.get(matchQuery, type, ...projectParams, ...layerParams) as { total: number }).total;
+
+    const stmt = sqlite.prepare(`
+      SELECT f.id, f.content, d.type, d.source_file, d.concepts, d.project, d.created_at, d.memory_layer, rank as score
+      FROM oracle_fts f
+      JOIN oracle_documents d ON f.id = d.id
+      WHERE oracle_fts MATCH ? AND d.type = ? AND ${projectFilter}${layerFilterSql}
+      ORDER BY rank
+      LIMIT ?
+    `);
+    const results = stmt
+      .all(matchQuery, type, ...projectParams, ...layerParams, limit * queryProfile.ftsCandidateMult)
+      .map((row: any) => ({
         id: row.id,
         type: row.type,
         content: row.content,
@@ -159,8 +215,27 @@ export async function handleSearch(
         createdAt: row.created_at || undefined,
         memoryLayer: row.memory_layer || null,
         source: 'fts' as const,
-        score: normalizeRank(row.score)
+        score: normalizeRank(row.score),
       }));
+    return { total, results };
+  };
+
+  // FTS5 search must use raw SQL (Drizzle doesn't support virtual tables)
+  if (mode !== 'vector') {
+    const strict = runFtsSearch(ftsPlan.strictQuery);
+    ftsTotal = strict.total;
+    ftsResults = strict.results;
+
+    if (ftsResults.length === 0 && ftsPlan.orQuery) {
+      const relaxed = runFtsSearch(ftsPlan.orQuery);
+      if (relaxed.results.length > 0) {
+        ftsTotal = relaxed.total;
+        ftsResults = relaxed.results;
+        ftsQueryMode = 'or-fallback';
+        warning = warning
+          ? `${warning} FTS strict query had no matches; used token OR fallback.`
+          : 'FTS strict query had no matches; used token OR fallback.';
+      }
     }
   }
 
@@ -268,6 +343,10 @@ export async function handleSearch(
       vector: vectorResults.length,
       merged: combined.length,
     },
+    fts: {
+      tokens: ftsPlan.tokens,
+      queryMode: ftsQueryMode,
+    },
     timing: {
       totalMs: searchTime,
     },
@@ -292,11 +371,11 @@ function normalizeRank(rank: number): number {
 /**
  * v0.7.0: Layer-based score boost
  *
- * Query type → preferred layers:
- *   exact query       → boost semantic (facts) = 1.0
- *   semantic (how-to) → boost procedural > semantic = 1.2
- *   semantic (recall) → boost episodic > semantic = 1.1
- *   user_model        → low boost (pulled from prompt builder, not search) = 0.5
+ * Query type -> preferred layers:
+ *   exact query       -> boost semantic (facts) = 1.0
+ *   semantic (how-to) -> boost procedural > semantic = 1.2
+ *   semantic (recall) -> boost episodic > semantic = 1.1
+ *   user_model        -> low boost (pulled from prompt builder, not search) = 0.5
  */
 function getLayerBoost(layer: string | null, queryType?: string): number {
   if (!layer || layer === 'semantic') return 1.0;
@@ -317,7 +396,7 @@ function getLayerBoost(layer: string | null, queryType?: string): number {
  * - Documents in both lists naturally score higher
  * - No need to normalize scores across different retrieval systems
  *
- * Recency boost: +0.05 × max(0, 1 - days_old/365)
+ * Recency boost: +0.05 * max(0, 1 - days_old/365)
  * - New docs (<1 year) get a small boost (max 0.05)
  * - Old docs (>1 year) get no boost
  * - Small enough to not override relevance
@@ -451,41 +530,62 @@ export function synthesizeGuidance(decision: string, principles: any[], patterns
 export async function handleConsult(decision: string, context: string = '') {
   const query = context ? `${decision} ${context}` : decision;
 
-  // Thai NLP preprocessing (graceful — falls back if sidecar is down)
+  // Thai NLP preprocessing (graceful - falls back if sidecar is down)
   const thaiNlp = getThaiNlpClient();
   const { segmented } = await thaiNlp.preprocessQuery(query);
 
-  // Remove FTS5 special characters: ? * + - ( ) ^ ~ " ' : (colon is column prefix)
-  const safeQuery = segmented.replace(/[?*+\-()^~"':]/g, ' ').replace(/\s+/g, ' ').trim();
+  const ftsPlan = buildFtsQueryPlan(segmented);
+  let consultFtsQueryMode: 'strict' | 'or-fallback' = 'strict';
 
-  // Run FTS search (must use raw SQL - Drizzle doesn't support FTS5)
-  const principleStmt = sqlite.prepare(`
-    SELECT f.id, f.content, d.source_file, rank as score
-    FROM oracle_fts f
-    JOIN oracle_documents d ON f.id = d.id
-    WHERE oracle_fts MATCH ? AND d.type = 'principle'
-    ORDER BY rank
-    LIMIT 5
-  `);
-  const ftsPrinciples = principleStmt.all(safeQuery).map((row: any) => ({
-    ...row,
-    score: normalizeRank(row.score),
-    source: 'fts' as const
-  }));
+  const runConsultFtsSearch = (docType: 'principle' | 'learning', matchQuery: string): any[] => {
+    if (!matchQuery) return [];
 
-  const learningStmt = sqlite.prepare(`
-    SELECT f.id, f.content, d.source_file, rank as score
-    FROM oracle_fts f
-    JOIN oracle_documents d ON f.id = d.id
-    WHERE oracle_fts MATCH ? AND d.type = 'learning'
-    ORDER BY rank
-    LIMIT 5
-  `);
-  const ftsPatterns = learningStmt.all(safeQuery).map((row: any) => ({
-    ...row,
-    score: normalizeRank(row.score),
-    source: 'fts' as const
-  }));
+    const stmt = sqlite.prepare(`
+      SELECT f.id, f.content, d.source_file, rank as score
+      FROM oracle_fts f
+      JOIN oracle_documents d ON f.id = d.id
+      WHERE oracle_fts MATCH ? AND d.type = ?
+      ORDER BY rank
+      LIMIT 5
+    `);
+
+    return stmt.all(matchQuery, docType).map((row: any) => ({
+      ...row,
+      score: normalizeRank(row.score),
+      source: 'fts' as const
+    }));
+  };
+
+  let ftsPrinciples = runConsultFtsSearch('principle', ftsPlan.strictQuery);
+  let ftsPatterns = runConsultFtsSearch('learning', ftsPlan.strictQuery);
+
+  if (ftsPlan.orQuery) {
+    let usedFallback = false;
+
+    if (ftsPrinciples.length === 0) {
+      const relaxedPrinciples = runConsultFtsSearch('principle', ftsPlan.orQuery);
+      if (relaxedPrinciples.length > 0) {
+        ftsPrinciples = relaxedPrinciples;
+        usedFallback = true;
+      }
+    }
+
+    if (ftsPatterns.length === 0) {
+      const relaxedPatterns = runConsultFtsSearch('learning', ftsPlan.orQuery);
+      if (relaxedPatterns.length > 0) {
+        ftsPatterns = relaxedPatterns;
+        usedFallback = true;
+      }
+    }
+
+    if (usedFallback) {
+      consultFtsQueryMode = 'or-fallback';
+    }
+  }
+
+  console.log(
+    `[Consult] FTS query mode: ${consultFtsQueryMode} (tokens=${ftsPlan.tokens.length}, principles=${ftsPrinciples.length}, patterns=${ftsPatterns.length})`,
+  );
 
   // Run vector search (always, not just fallback)
   let vectorPrinciples: any[] = [];
@@ -1003,7 +1103,9 @@ export async function handleLearn(
   const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
 
   // Generate slug from pattern (first 50 chars, alphanumeric + dash)
-  const slug = pattern
+  // Fallback is required for non-Latin text (e.g. Thai-only input), which may
+  // collapse to empty under ASCII slug rules.
+  const baseSlug = pattern
     .substring(0, 50)
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, '')
@@ -1011,12 +1113,19 @@ export async function handleLearn(
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
 
-  const filename = `${dateStr}_${slug}.md`;
-  const filePath = path.join(REPO_ROOT, 'ψ/memory/learnings', filename);
+  const learningDir = path.join(REPO_ROOT, '\u03C8/memory/learnings');
+  const slugSeed = baseSlug || `entry-${Date.now().toString(36)}`;
+  let slug = slugSeed;
+  let filename = `${dateStr}_${slug}.md`;
+  let filePath = path.join(learningDir, filename);
 
-  // Check if file already exists
-  if (fs.existsSync(filePath)) {
-    throw new Error(`File already exists: ${filename}`);
+  // Avoid collisions by suffixing -2, -3, ... when file already exists.
+  let suffix = 2;
+  while (fs.existsSync(filePath)) {
+    slug = `${slugSeed}-${suffix}`;
+    filename = `${dateStr}_${slug}.md`;
+    filePath = path.join(learningDir, filename);
+    suffix += 1;
   }
 
   // Generate title from pattern
@@ -1054,7 +1163,7 @@ export async function handleLearn(
   db.insert(oracleDocuments).values({
     id,
     type: 'learning',
-    sourceFile: `ψ/memory/learnings/${filename}`,
+    sourceFile: `\u03C8/memory/learnings/${filename}`,
     concepts: JSON.stringify(conceptsList),
     createdAt: now.getTime(),
     updatedAt: now.getTime(),
@@ -1090,12 +1199,12 @@ export async function handleLearn(
       document: content,
       metadata: {
         type: 'learning',
-        source_file: `ψ/memory/learnings/${filename}`,
+        source_file: `\u03C8/memory/learnings/${filename}`,
         concepts: conceptsList.join(', '),
       },
     }]);
   } catch (err) {
-    // ChromaDB failure should not block learning — FTS5 still works
+    // ChromaDB failure should not block learning - FTS5 still works
     console.warn('[oracle_learn] ChromaDB indexing failed (FTS5 still indexed):', err instanceof Error ? err.message : String(err));
   }
 
@@ -1108,11 +1217,11 @@ export async function handleLearn(
         type: 'potential_contradiction',
         existingId: contradiction.id,
         similarity: contradiction.score,
-        message: `พบข้อมูลที่อาจขัดแย้ง (similarity=${contradiction.score.toFixed(2)})`,
+        message: `Potential contradiction detected (similarity=${contradiction.score.toFixed(2)})`,
       };
     }
   } catch {
-    // Non-critical — don't fail the learn
+    // Non-critical - don't fail the learn
   }
 
   // Log the learning
@@ -1123,7 +1232,7 @@ export async function handleLearn(
 
   return {
     success: true,
-    file: `ψ/memory/learnings/${filename}`,
+    file: `\u03C8/memory/learnings/${filename}`,
     id,
     layer: 'semantic' as const,
     ...(warning && { warning }),
@@ -1132,7 +1241,7 @@ export async function handleLearn(
 
 /**
  * Auto-detect memory layer from content patterns
- * ถ้าไม่ระบุ layer → ใช้ heuristics เพื่อ route อัตโนมัติ
+ * If layer is omitted, use heuristics to auto-route memory layer.
  */
 function detectMemoryLayer(pattern: string, concepts?: string[]): MemoryLayer {
   // Check concepts first
@@ -1143,12 +1252,12 @@ function detectMemoryLayer(pattern: string, concepts?: string[]): MemoryLayer {
   const lower = pattern.toLowerCase();
 
   // User Model signals
-  if (/(?:user|ผู้ใช้)\s*(?:ชอบ|ไม่ชอบ|prefer|ต้องการ|expertise)/i.test(lower)) {
+  if (/(?:user|\u0E1C\u0E39\u0E49\u0E43\u0E0A\u0E49)\s*(?:\u0E0A\u0E2D\u0E1A|\u0E44\u0E21\u0E48\u0E0A\u0E2D\u0E1A|prefer|\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E32\u0E23|expertise)/i.test(lower)) {
     return 'user_model';
   }
 
   // Procedural signals
-  if (/(?:เมื่อ|when|ถ้า|if).*(?:→|ให้|then|ทำ|should)/i.test(lower)) {
+  if (/(?:\u0E40\u0E21\u0E37\u0E48\u0E2D|when|\u0E16\u0E49\u0E32|if).*(?:->|\u0E43\u0E2B\u0E49|then|\u0E17\u0E33|should)/i.test(lower)) {
     return 'procedural';
   }
 
@@ -1158,7 +1267,7 @@ function detectMemoryLayer(pattern: string, concepts?: string[]): MemoryLayer {
 
 /**
  * Search for potentially contradicting existing documents
- * High similarity (>0.85) but different content → potential contradiction
+ * High similarity (>0.85) but different content -> potential contradiction
  */
 async function searchForContradictions(newContent: string): Promise<{ id: string; score: number } | null> {
   try {
@@ -1169,7 +1278,7 @@ async function searchForContradictions(newContent: string): Promise<{ id: string
       const distance = results.distances?.[i] || 1;
       const similarity = Math.max(0, 1 - distance / 2);
 
-      // High vector similarity (>0.85) → similar topic
+      // High vector similarity (>0.85) -> similar topic
       if (similarity > 0.85) {
         const existingContent = results.documents?.[i] || '';
         // Check if content is actually different (not just similar phrasing)
@@ -1180,7 +1289,7 @@ async function searchForContradictions(newContent: string): Promise<{ id: string
       }
     }
   } catch {
-    // ChromaDB unavailable — skip contradiction check
+    // ChromaDB unavailable - skip contradiction check
   }
   return null;
 }
@@ -1203,3 +1312,4 @@ function computeTextSimilarity(a: string, b: string): number {
   const union = wordsA.size + wordsB.size - intersection;
   return union > 0 ? intersection / union : 0;
 }
+
