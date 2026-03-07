@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Oracle Nightly HTTP Server - Hono.js Version
  *
  * Modern routing with Hono.js on Bun runtime.
@@ -6,7 +6,6 @@
  */
 
 import { Hono } from 'hono';
-import { cors } from 'hono/cors';
 import { serveStatic } from 'hono/bun';
 import fs from 'fs';
 import path from 'path';
@@ -56,8 +55,6 @@ import {
 
 import { searchCache } from './cache.js';
 
-import { getUserModelStore } from './memory/user-model.js';
-import { getProceduralStore } from './memory/procedural.js';
 import { getEpisodicStore } from './memory/episodic.js';
 import { refreshAllDecayScores } from './memory/decay.js';
 
@@ -91,6 +88,15 @@ import {
   getTrace,
   getTraceChain
 } from './trace/handler.js';
+import { registerApiV1Compatibility } from './server/routes/api-v1-compat.js';
+import { registerSecurityMiddleware, renderHttpMetricsPrometheus } from './server/http-middleware.js';
+import { registerLegacyUiRoutes } from './server/routes/legacy-ui.js';
+import { registerLiveProxyRoutes } from './server/routes/live-proxy.js';
+import { registerNanoclawProxyRoutes } from './server/routes/nanoclaw-proxy.js';
+import { registerSchedulerProxyRoutes } from './server/routes/scheduler-proxy.js';
+import { registerHeartbeatProxyRoutes } from './server/routes/heartbeat-proxy.js';
+import { registerChatProxyRoutes } from './server/routes/chat-proxy.js';
+import { registerMemoryRoutes } from './server/routes/memory-routes.js';
 
 // Frontend static file serving
 const FRONTEND_DIST = path.join(import.meta.dirname || __dirname, '..', 'frontend', 'dist');
@@ -109,7 +115,7 @@ try {
     .set({ isIndexing: 0 })
     .where(eq(indexingStatus.id, 1))
     .run();
-  console.log('🔮 Reset indexing status on startup');
+  console.log('ðŸ”® Reset indexing status on startup');
 } catch (e) {
   // Table might not exist yet - that's fine
 }
@@ -123,21 +129,50 @@ writePidFile({ pid: process.pid, port: Number(PORT), startedAt: new Date().toISO
 
 // Register graceful shutdown handlers
 registerSignalHandlers(async () => {
-  console.log('\n🔮 Shutting down gracefully...');
+  console.log('\nðŸ”® Shutting down gracefully...');
   await performGracefulShutdown({
     closeables: [
       { name: 'database', close: () => { closeDb(); return Promise.resolve(); } }
     ]
   });
   removePidFile();
-  console.log('👋 Oracle Nightly HTTP Server stopped.');
+  console.log('ðŸ‘‹ Oracle Nightly HTTP Server stopped.');
 });
 
 // Create Hono app
 const app = new Hono();
+registerApiV1Compatibility(app);
 
-// CORS middleware
-app.use('*', cors());
+const ADMIN_AUTH_TOKEN = process.env.ORACLE_AUTH_TOKEN || '';
+const NANOCLAW_INTERNAL_URL = process.env.NANOCLAW_URL || 'http://nanoclaw:47779';
+const RATE_LIMIT_WINDOW_MS = Math.max(
+  1000,
+  Number.parseInt(process.env.ORACLE_RATE_LIMIT_WINDOW_MS || '60000', 10) || 60000,
+);
+const RATE_LIMIT_READ_LIMIT = Math.max(
+  1,
+  Number.parseInt(process.env.ORACLE_RATE_LIMIT_READ_LIMIT || '60', 10) || 60,
+);
+const RATE_LIMIT_WRITE_LIMIT = Math.max(
+  1,
+  Number.parseInt(process.env.ORACLE_RATE_LIMIT_WRITE_LIMIT || '30', 10) || 30,
+);
+
+const defaultCorsOrigins = [
+  'http://localhost:47778',
+  'http://127.0.0.1:47778',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
+
+const { adminAuth } = registerSecurityMiddleware(app, {
+  adminAuthToken: ADMIN_AUTH_TOKEN,
+  defaultCorsOrigins,
+  allowedOriginsFromEnv: process.env.ORACLE_ALLOWED_ORIGINS || '',
+  rateLimitWindowMs: RATE_LIMIT_WINDOW_MS,
+  rateLimitReadLimit: RATE_LIMIT_READ_LIMIT,
+  rateLimitWriteLimit: RATE_LIMIT_WRITE_LIMIT,
+});
 
 // ============================================================================
 // API Routes
@@ -146,6 +181,13 @@ app.use('*', cors());
 // Health check
 app.get('/api/health', (c) => {
   return c.json({ status: 'ok', server: 'oracle-nightly', port: PORT, oracleV2: 'connected' });
+});
+
+// Prometheus metrics
+app.get('/metrics', (c) => {
+  return c.body(renderHttpMetricsPrometheus(), 200, {
+    'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+  });
 });
 
 // Search
@@ -841,166 +883,9 @@ app.get('/api/traces/:id/linked-chain', async (c) => {
 });
 
 // ============================================================================
-// Memory Layer Routes (v0.7.0 Phase 4)
+// Memory Layer Routes (modularized)
 // ============================================================================
-
-// User Model (Layer 1) — ข้อมูลเกี่ยวกับ user
-app.get('/api/user-model', async (c) => {
-  try {
-    const userId = c.req.query('userId') || 'default';
-    const store = getUserModelStore();
-    const model = await store.get(userId);
-    return c.json(model);
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-app.post('/api/user-model', async (c) => {
-  try {
-    const data = await c.req.json();
-    const userId = data.userId || 'default';
-    const updates = data.updates || data;
-    // Remove userId from updates to avoid confusion
-    delete updates.userId;
-    delete updates.updates;
-
-    const store = getUserModelStore();
-    const model = await store.update(userId, updates);
-
-    // Invalidate search cache — context changed
-    searchCache.invalidate();
-
-    return c.json({ success: true, model });
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-app.delete('/api/user-model', async (c) => {
-  try {
-    const userId = c.req.query('userId') || 'default';
-    const store = getUserModelStore();
-    await store.reset(userId);
-    return c.json({ success: true });
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-// Procedural Memory (Layer 2) — "วิธีทำงาน" ที่ AI เรียนรู้
-app.get('/api/procedural', async (c) => {
-  try {
-    const q = c.req.query('q') || '';
-    const limit = parseInt(c.req.query('limit') || '3');
-
-    if (!q) {
-      return c.json({ error: 'Missing required query parameter: q' }, 400);
-    }
-
-    const store = getProceduralStore();
-    const results = await store.find(q, limit);
-    return c.json({ results, total: results.length });
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-app.post('/api/procedural', async (c) => {
-  try {
-    const data = await c.req.json();
-    if (!data.trigger || !data.procedure) {
-      return c.json({ error: 'Missing required fields: trigger, procedure' }, 400);
-    }
-    if (!Array.isArray(data.procedure)) {
-      return c.json({ error: 'procedure must be an array of strings' }, 400);
-    }
-
-    const store = getProceduralStore();
-    const id = await store.learn({
-      trigger: data.trigger,
-      procedure: data.procedure,
-      source: data.source || 'explicit',
-    });
-
-    return c.json({ success: true, id });
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-app.post('/api/procedural/usage', async (c) => {
-  try {
-    const data = await c.req.json();
-    if (!data.id) {
-      return c.json({ error: 'Missing required field: id' }, 400);
-    }
-
-    const store = getProceduralStore();
-    await store.recordUsage(data.id);
-    return c.json({ success: true });
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-// Episodic Memory (Layer 4) — conversation summaries + interaction records
-app.post('/api/episodic', async (c) => {
-  try {
-    const data = await c.req.json();
-    if (!data.summary) {
-      return c.json({ error: 'Missing required field: summary' }, 400);
-    }
-
-    const store = getEpisodicStore();
-    const id = await store.record({
-      userId: data.userId || 'default',
-      groupId: data.groupId || 'default',
-      summary: data.summary,
-      topics: data.topics || [],
-      outcome: data.outcome || 'unknown',
-      durationMs: data.durationMs || 0,
-    });
-
-    return c.json({ success: true, id });
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-app.get('/api/episodic', async (c) => {
-  try {
-    const q = c.req.query('q') || '';
-    const userId = c.req.query('userId');
-    const limit = parseInt(c.req.query('limit') || '5');
-
-    if (!q) {
-      return c.json({ error: 'Missing required query parameter: q' }, 400);
-    }
-
-    const store = getEpisodicStore();
-    const results = await store.findRelated(q, userId || undefined, limit);
-    return c.json({ results, total: results.length });
-  } catch (error) {
-    return c.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
+registerMemoryRoutes(app);
 
 // ============================================================================
 // Learn Route
@@ -1049,69 +934,36 @@ app.post('/api/ask', async (c) => {
   }
 });
 
-// ============================================================================
-// Legacy HTML UIs
-// ============================================================================
-
-app.get('/legacy/arthur', (c) => {
-  const content = fs.readFileSync(ARTHUR_UI_PATH, 'utf-8');
-  return c.html(content);
+registerLegacyUiRoutes(app, {
+  arthurPath: ARTHUR_UI_PATH,
+  oracleUiPath: UI_PATH,
+  dashboardPath: DASHBOARD_PATH,
 });
 
-app.get('/legacy/oracle', (c) => {
-  const content = fs.readFileSync(UI_PATH, 'utf-8');
-  return c.html(content);
+registerNanoclawProxyRoutes(app, {
+  adminAuth,
+  nanoclawInternalUrl: NANOCLAW_INTERNAL_URL,
 });
 
-app.get('/legacy/dashboard', (c) => {
-  const content = fs.readFileSync(DASHBOARD_PATH, 'utf-8');
-  return c.html(content);
+registerLiveProxyRoutes(app, {
+  adminAuth,
+  nanoclawInternalUrl: NANOCLAW_INTERNAL_URL,
+  adminAuthToken: ADMIN_AUTH_TOKEN,
 });
 
-// ============================================================================
-// NanoClaw Proxy + Admin Auth (v0.7.1)
-// ============================================================================
-
-const ADMIN_AUTH_TOKEN = process.env.ORACLE_AUTH_TOKEN || '';
-const NANOCLAW_INTERNAL_URL = process.env.NANOCLAW_URL || 'http://nanoclaw:47779';
-
-// Simple Bearer token auth for admin routes
-const adminAuth = async (c: any, next: any) => {
-  if (!ADMIN_AUTH_TOKEN) return next(); // No token = no auth (dev mode)
-  const authHeader = c.req.header('Authorization') || '';
-  const token = authHeader.replace('Bearer ', '');
-  if (token !== ADMIN_AUTH_TOKEN) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-  return next();
-};
-
-// Proxy NanoClaw health
-app.get('/api/nanoclaw/health', adminAuth, async (c) => {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const resp = await fetch(`${NANOCLAW_INTERNAL_URL}/health`, { signal: controller.signal });
-    clearTimeout(timeout);
-    const data = await resp.json();
-    return c.json(data);
-  } catch (err: any) {
-    return c.json({ status: 'unreachable', error: err.message }, 503);
-  }
+registerSchedulerProxyRoutes(app, {
+  adminAuth,
+  nanoclawInternalUrl: NANOCLAW_INTERNAL_URL,
 });
 
-// Proxy NanoClaw status
-app.get('/api/nanoclaw/status', adminAuth, async (c) => {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const resp = await fetch(`${NANOCLAW_INTERNAL_URL}/status`, { signal: controller.signal });
-    clearTimeout(timeout);
-    const data = await resp.json();
-    return c.json(data);
-  } catch (err: any) {
-    return c.json({ status: 'unreachable', error: err.message }, 503);
-  }
+registerHeartbeatProxyRoutes(app, {
+  adminAuth,
+  nanoclawInternalUrl: NANOCLAW_INTERNAL_URL,
+});
+
+registerChatProxyRoutes(app, {
+  adminAuth,
+  nanoclawInternalUrl: NANOCLAW_INTERNAL_URL,
 });
 
 // ============================================================================
@@ -1164,7 +1016,7 @@ setInterval(async () => {
 }, 6 * 60 * 60 * 1000);
 
 console.log(`
-🔮 Oracle Nightly HTTP Server running! (Hono.js)
+ðŸ”® Oracle Nightly HTTP Server running! (Hono.js)
 
    URL: http://localhost:${PORT}
 

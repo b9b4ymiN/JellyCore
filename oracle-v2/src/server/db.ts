@@ -6,6 +6,8 @@ import { Database } from 'bun:sqlite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { applySqlitePragmaPolicy } from '../db/sqlite-policy.js';
+import { logNonFatal } from '../non-fatal.js';
 
 // ES Module compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -16,9 +18,9 @@ export const PORT = process.env.ORACLE_PORT || 47778;
 export const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '/tmp';
 export const ORACLE_DATA_DIR = process.env.ORACLE_DATA_DIR || path.join(HOME_DIR, '.oracle-v2');
 export const DB_PATH = process.env.ORACLE_DB_PATH || path.join(ORACLE_DATA_DIR, 'oracle.db');
-export const UI_PATH = path.join(__dirname, '..', 'ui.html');
-export const DASHBOARD_PATH = path.join(__dirname, '..', 'dashboard.html');
-export const ARTHUR_UI_PATH = path.join(__dirname, '..', 'arthur.html');
+export const UI_PATH = path.join(__dirname, '..', 'legacy', 'ui.html');
+export const DASHBOARD_PATH = path.join(__dirname, '..', 'legacy', 'dashboard.html');
+export const ARTHUR_UI_PATH = path.join(__dirname, '..', 'legacy', 'arthur.html');
 
 // REPO_ROOT for features that need knowledge base context
 // When running from source: defaults to project root (where ψ/ lives)
@@ -35,12 +37,7 @@ if (!fs.existsSync(ORACLE_DATA_DIR)) {
 
 // Initialize database connection
 export const db = new Database(DB_PATH);
-
-// Performance: WAL mode + busy timeout for concurrent access
-db.exec('PRAGMA journal_mode = WAL');
-db.exec('PRAGMA busy_timeout = 30000');
-db.exec('PRAGMA synchronous = NORMAL');
-db.exec('PRAGMA cache_size = -20000'); // 20MB cache
+export const sqlitePragmaSnapshot = applySqlitePragmaPolicy(db, 'server/db');
 
 /**
  * Bootstrap core tables for fresh bunx installs
@@ -225,8 +222,13 @@ export function initLoggingTables() {
   for (const table of tables) {
     try {
       db.exec(`ALTER TABLE ${table} ADD COLUMN project TEXT`);
-    } catch {
-      // Column already exists, ignore
+    } catch (err) {
+      logNonFatal(
+        'server.db.add_project_column',
+        err,
+        { table },
+        'debug',
+      );
     }
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_search_project ON search_log(project)`);

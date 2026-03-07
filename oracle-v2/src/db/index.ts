@@ -6,6 +6,8 @@ import { drizzle } from 'drizzle-orm/bun-sqlite';
 import { Database } from 'bun:sqlite';
 import path from 'path';
 import * as schema from './schema.js';
+import { applySqlitePragmaPolicy } from './sqlite-policy.js';
+import { logNonFatal } from '../non-fatal.js';
 
 // Configuration - central location: ~/.oracle-v2/
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '/tmp';
@@ -14,6 +16,7 @@ export const DB_PATH = process.env.ORACLE_DB_PATH || path.join(ORACLE_DATA_DIR, 
 
 // Create bun:sqlite connection
 const sqlite = new Database(DB_PATH);
+export const sqlitePragmaSnapshot = applySqlitePragmaPolicy(sqlite, 'db/index');
 
 // Create Drizzle ORM instance
 export const db = drizzle(sqlite, { schema });
@@ -88,7 +91,14 @@ export function ensureSchema() {
     try {
       sqlite.exec('ALTER TABLE search_log ADD COLUMN results TEXT');
       console.log('[Schema] Added missing column: search_log.results');
-    } catch { /* table might not exist yet */ }
+    } catch (err) {
+      logNonFatal(
+        'db.ensure_schema_add_results_column',
+        err,
+        { table: 'search_log' },
+        'debug',
+      );
+    }
   }
 }
 

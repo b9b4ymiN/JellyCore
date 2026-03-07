@@ -1,15 +1,19 @@
 :root {
-  --bg-primary: #0a0a0f;
-  --bg-secondary: #0f0f1a;
-  --bg-card: #1a1a2e;
-  --border: #2a2a3a;
-  --text-primary: #e0e0e0;
-  --text-secondary: #888;
-  --text-muted: #666;
-  --accent: #a78bfa;
-  --accent-hover: #6d28d9;
-  --success: #4ade80;
-  --warning: #fbbf24;
+  --bg-primary: #05070c;
+  --bg-secondary: #0a1012;
+  --bg-card: #0d1716;
+  --border: #1d3530;
+  --border-strong: #2b5e50;
+  --text-primary: #d9ffe9;
+  --text-secondary: #96c3b2;
+  --text-muted: #628979;
+  --accent: #98ffc9;
+  --accent-hover: #6cffb4;
+  --success: #71ffc5;
+  --warning: #ffd37f;
+  --terminal-green: #8fffd0;
+  --terminal-green-soft: #ccffe8;
+  --danger: #ff8f8f;
 }
 
 * {
@@ -18,19 +22,94 @@
   padding: 0;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  overflow-x: hidden;
+}
+
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'SF Mono', 'JetBrains Mono', 'Menlo', ui-monospace, SFMono-Regular, monospace;
   background: var(--bg-primary);
   color: var(--text-primary);
   min-height: 100vh;
-  line-height: 1.6;
+  min-height: 100dvh;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  position: relative;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(152, 255, 201, 0.04) 0%, rgba(0, 0, 0, 0) 70%),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(220, 255, 239, 0.02) 0px,
+      rgba(220, 255, 239, 0.02) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  z-index: 0;
 }
 
 a {
-  color: inherit;
+  color: var(--accent);
   text-decoration: none;
 }
 
 #root {
   min-height: 100vh;
+  position: relative;
+  z-index: 1;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+button {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #10211d 0%, #0b1714 100%);
+  color: var(--terminal-green);
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  color: #d6ffec;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+input,
+textarea,
+select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #081110;
+  color: var(--text-primary);
+  padding: 8px 10px;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(152, 255, 201, 0.12);
 }

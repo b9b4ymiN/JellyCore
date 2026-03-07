@@ -130,7 +130,7 @@ describe('TelegramChannel', () => {
         'tg:123': {
           name: 'Chat',
           folder: 'main',
-          trigger: '@Andy',
+          trigger: '@Fon',
           added_at: '2024-01-01T00:00:00.000Z',
         },
       }),

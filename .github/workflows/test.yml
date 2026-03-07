@@ -1,0 +1,73 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  nanoclaw:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: nanoclaw/package-lock.json
+      - name: Install NanoClaw deps
+        working-directory: nanoclaw
+        run: npm ci
+      - name: Run NanoClaw tests
+        working-directory: nanoclaw
+        run: npm test
+      - name: Build agent-runner TypeScript
+        working-directory: nanoclaw/container/agent-runner
+        run: |
+          npm ci
+          npm run build
+
+  oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.6"
+      - name: Install Oracle deps
+        working-directory: oracle-v2
+        run: bun install --frozen-lockfile
+      - name: Oracle HTTP integration
+        working-directory: oracle-v2
+        run: bun test src/integration/http.test.ts
+      - name: Oracle memory + sqlite policy integration
+        working-directory: oracle-v2
+        run: bun test src/integration/decay.test.ts src/integration/procedural.test.ts src/integration/episodic.test.ts src/integration/user-model.test.ts src/integration/sqlite-policy.test.ts
+      - name: Oracle frontend build
+        working-directory: oracle-v2/frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+  thai_nlp_sidecar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Thai sidecar deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r thai-nlp-sidecar/requirements.txt pytest
+      - name: Run Thai sidecar tests
+        run: pytest thai-nlp-sidecar/tests -q
+
+  compose_validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose files
+        run: |
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.production.yml config -q

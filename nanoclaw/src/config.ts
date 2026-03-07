@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Andy';
+export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Fon';
 export const POLL_INTERVAL = 30000; // Fallback only — event-driven via MessageBus
 export const SCHEDULER_POLL_INTERVAL = parseInt(
   process.env.SCHEDULER_POLL_INTERVAL || '10000',
@@ -51,7 +51,7 @@ export const CODEX_EXEC_TIMEOUT_MS = parseInt(
  * Enables self-healing and full remediation workflows at the cost of security isolation.
  */
 export const AGENT_FULL_ACCESS =
-  (process.env.AGENT_FULL_ACCESS || 'true').toLowerCase() === 'true';
+  (process.env.AGENT_FULL_ACCESS || 'false').toLowerCase() === 'true';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -118,6 +118,18 @@ export const USER_MESSAGE_RETRY_JITTER_PCT = Math.max(
   0,
   Math.min(100, parseInt(process.env.USER_MESSAGE_RETRY_JITTER_PCT || '20', 10) || 20),
 );
+export const RETRYING_MESSAGES_LIMIT = Math.max(
+  1,
+  Math.min(50, parseInt(process.env.RETRYING_MESSAGES_LIMIT || '10', 10) || 10),
+);
+export const RETRYING_MESSAGES_MAX_AGE_MS = Math.max(
+  60_000,
+  parseInt(process.env.RETRYING_MESSAGES_MAX_AGE_MS || '1800000', 10) || 1_800_000,
+); // 30 min
+export const RECEIPT_RECOVERY_MAX_AGE_MS = Math.max(
+  60_000,
+  parseInt(process.env.RECEIPT_RECOVERY_MAX_AGE_MS || '1800000', 10) || 1_800_000,
+); // 30 min
 
 // User-facing status timings
 export const USER_ACK_TARGET_MS = parseInt(
@@ -294,10 +306,11 @@ export const IPC_SECRET = (() => {
     if (fs.existsSync(secretFile)) {
       return fs.readFileSync(secretFile, 'utf-8').trim();
     }
-  } catch { /* fall through to generate */ }
+  } catch (err) {
+    console.warn('[config] failed to read IPC secret file, generating new secret:', err);
+  }
   const secret = crypto.randomBytes(32).toString('hex');
   fs.mkdirSync(STORE_DIR, { recursive: true });
   fs.writeFileSync(secretFile, secret, { mode: 0o600 });
   return secret;
 })();
-

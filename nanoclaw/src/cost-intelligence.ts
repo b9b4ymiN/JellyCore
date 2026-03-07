@@ -13,6 +13,7 @@
 
 import { getDb } from './db.js';
 import { logger } from './logger.js';
+import { recordNonFatalError } from './non-fatal-errors.js';
 import type { QueryTier } from './query-router.js';
 
 // ─── Model Pricing ──────────────────────────────────────────────────
@@ -101,7 +102,16 @@ export function initCostIntelligence(): void {
     'ALTER TABLE usage_tracking ADD COLUMN cache_hit INTEGER DEFAULT 0',
   ];
   for (const sql of migrations) {
-    try { db.exec(sql); } catch { /* column already exists */ }
+    try {
+      db.exec(sql);
+    } catch (err) {
+      recordNonFatalError(
+        'cost_intelligence.migration_skipped',
+        err,
+        { sql },
+        'debug',
+      );
+    }
   }
 
   // Budget configuration table
@@ -205,7 +215,13 @@ export function getSpend(): { todayUsd: number; monthUsd: number } {
     const result = { todayUsd: today.cost, monthUsd: month.cost };
     spendCache = { ...result, cachedAt: Date.now() };
     return result;
-  } catch {
+  } catch (err) {
+    recordNonFatalError(
+      'cost_intelligence.get_spend_failed',
+      err,
+      {},
+      'warn',
+    );
     return { todayUsd: 0, monthUsd: 0 };
   }
 }
@@ -344,7 +360,7 @@ export function trackUsageEnhanced(params: {
     // Invalidate spend cache after new tracking entry
     invalidateSpendCache();
   } catch (err) {
-    logger.warn({ err }, 'Failed to track usage');
+    recordNonFatalError('cost_intelligence.track_usage_failed', err);
   }
 }
 
@@ -381,7 +397,11 @@ function logAlert(
       'Budget alert triggered',
     );
   } catch (err) {
-    logger.warn({ err }, 'Failed to log cost alert');
+    recordNonFatalError(
+      'cost_intelligence.log_alert_failed',
+      err,
+      { groupId, alertType, action },
+    );
   }
 }
 
@@ -438,7 +458,8 @@ export function cmdUsage(): string {
     }
 
     return lines.join('\n');
-  } catch {
+  } catch (err) {
+    recordNonFatalError('cost_intelligence.cmd_usage_failed', err, {}, 'warn');
     return '❌ ไม่สามารถดึงข้อมูลการใช้งานได้ค่ะ';
   }
 }
@@ -499,7 +520,8 @@ export function cmdCost(): string {
     }
 
     return lines.join('\n');
-  } catch {
+  } catch (err) {
+    recordNonFatalError('cost_intelligence.cmd_cost_failed', err, {}, 'warn');
     return '❌ ไม่สามารถดึงข้อมูล cost ได้ค่ะ';
   }
 }

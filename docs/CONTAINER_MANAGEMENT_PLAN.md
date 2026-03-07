@@ -319,7 +319,7 @@ telegramConnected: channels.find(c => c.name === 'telegram')?.isConnected() ?? n
 
 ```env
 # Core
-ASSISTANT_NAME=Andy
+ASSISTANT_NAME=Fon
 TELEGRAM_BOT_TOKEN=<token>
 CONTAINER_IMAGE=nanoclaw-agent:latest
 

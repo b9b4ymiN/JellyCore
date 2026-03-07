@@ -55,10 +55,27 @@ export interface NanoClawStatus {
   activeContainers: number;
   queueDepth: number;
   registeredGroups: string[];
+  laneStats?: {
+    active: { user: number; scheduler: number; heartbeat: number };
+    queueDepth: { user: number; scheduler: number; heartbeat: number };
+    reservedUserSlots: number;
+    maxConcurrency: number;
+  } | null;
   resources: {
     currentMax: number;
     cpuUsage: number;
     memoryFree: number;
+  } | null;
+  docker?: {
+    healthy?: boolean;
+    errorStreak?: number;
+    lastProbeAt?: number;
+    lastHealthyAt?: number;
+    spawnFailureStreak?: number;
+    circuitOpen?: boolean;
+    circuitOpenUntil?: number;
+    circuitLastError?: string | null;
+    orphanSweepKills?: number;
   } | null;
   recentErrors: Array<{
     timestamp: string;

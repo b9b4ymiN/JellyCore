@@ -16,9 +16,10 @@
 
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { runCodexPrompt } from './codex-runner.js';
+import { createLlmProvider } from './llm-provider.js';
 
 // ESM doesn't have __dirname — derive it from import.meta.url
 const __filename = fileURLToPath(import.meta.url);
@@ -33,6 +34,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   agentRuntime?: 'fon' | 'codex';
   agentMode?: 'off' | 'swarm' | 'codex';
+  requestId?: string;
   secrets?: Record<string, string>;
 }
 
@@ -615,7 +617,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   lines.push('');
 
   for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'Andy';
+    const sender = msg.role === 'user' ? 'User' : 'Fon';
     const content = msg.content.length > 2000
       ? msg.content.slice(0, 2000) + '...'
       : msg.content;
@@ -840,92 +842,102 @@ async function runQuery(
     .filter((v): v is string => typeof v === 'string' && v.length > 0)
     .join('\n\n---\n\n');
 
-  for await (const message of query({
-    prompt: stream,
-    options: {
-      cwd: '/workspace/group',
-      additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
-      resume: sessionId,
-      resumeSessionAt: resumeAt,
-      systemPrompt: globalAppend
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalAppend }
-        : undefined,
-      allowedTools: [
-        'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
-        'Task', 'TaskOutput', 'TaskStop',
-        'TeamCreate', 'TeamDelete', 'SendMessage',
-        'TodoWrite', 'ToolSearch', 'Skill',
-        'NotebookEdit',
-        'mcp__nanoclaw__*',
-        'mcp__oracle__*',
-        ...externalMcpAllowedTools(externalMcpEvaluations),
-      ],
-      env: sdkEnv,
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-          },
+  const provider = createLlmProvider(sdkEnv);
+  if (!provider.supportsMcp) {
+    log(
+      `Provider '${provider.id}' active: MCP tools disabled for this run; falling back to prompt-only mode`,
+    );
+  } else {
+    log(`Provider '${provider.id}' active with MCP/tool support`);
+  }
+
+  const providerEvents = provider.run({
+    prompt,
+    promptStream: stream,
+    sessionId,
+    resumeAt,
+    cwd: '/workspace/group',
+    additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+    systemPrompt: globalAppend
+      ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalAppend }
+      : undefined,
+    allowedTools: [
+      'Bash',
+      'Read', 'Write', 'Edit', 'Glob', 'Grep',
+      'WebSearch', 'WebFetch',
+      'Task', 'TaskOutput', 'TaskStop',
+      'TeamCreate', 'TeamDelete', 'SendMessage',
+      'TodoWrite', 'ToolSearch', 'Skill',
+      'NotebookEdit',
+      'mcp__nanoclaw__*',
+      'mcp__oracle__*',
+      ...externalMcpAllowedTools(externalMcpEvaluations),
+    ],
+    sdkEnv,
+    mcpServers: {
+      nanoclaw: {
+        command: 'node',
+        args: [mcpServerPath],
+        env: {
+          NANOCLAW_CHAT_JID: containerInput.chatJid,
+          NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+          NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+          NANOCLAW_REQUEST_ID: containerInput.requestId || sdkEnv.NANOCLAW_REQUEST_ID || '',
         },
-        oracle: {
-          command: 'node',
-          args: [path.join(__dirname, 'oracle-mcp-http.js')],
-          env: {
-            ORACLE_API_URL: process.env.ORACLE_API_URL || 'http://oracle:47778',
-            ORACLE_AUTH_TOKEN: process.env.ORACLE_AUTH_TOKEN || '',
-            ORACLE_WRITE_MODE: resolvedOraclePolicy.mode,
-            ORACLE_ALLOWED_WRITE_TOOLS: resolvedOraclePolicy.allow.join(','),
-            ORACLE_POLICY_GROUP: containerInput.groupFolder,
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-          },
+      },
+      oracle: {
+        command: 'node',
+        args: [path.join(__dirname, 'oracle-mcp-http.js')],
+        env: {
+          ORACLE_API_URL: process.env.ORACLE_API_URL || 'http://oracle:47778',
+          ORACLE_AUTH_TOKEN: process.env.ORACLE_AUTH_TOKEN || '',
+          ORACLE_WRITE_MODE: resolvedOraclePolicy.mode,
+          ORACLE_ALLOWED_WRITE_TOOLS: resolvedOraclePolicy.allow.join(','),
+          ORACLE_POLICY_GROUP: containerInput.groupFolder,
+          NANOCLAW_CHAT_JID: containerInput.chatJid,
+          NANOCLAW_REQUEST_ID: containerInput.requestId || sdkEnv.NANOCLAW_REQUEST_ID || '',
         },
-        // External MCP servers — loaded from /app/config/mcps.json
-        // Activation policy: enabled + allowGroups + startupMode + requiredEnv + env override
-        ...buildExternalMcpServers(externalMcpEvaluations, sdkEnv),
       },
-      hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook()] }],
-        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
-      },
-    }
-  })) {
+      // External MCP servers — loaded from /app/config/mcps.json
+      // Activation policy: enabled + allowGroups + startupMode + requiredEnv + env override
+      ...buildExternalMcpServers(externalMcpEvaluations, sdkEnv),
+    },
+    hooks: {
+      PreCompact: [{ hooks: [createPreCompactHook()] }],
+      PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
+    },
+  });
+
+  for await (const message of providerEvents) {
+    const msg = message as any;
     messageCount++;
-    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
+    const msgType = msg.type === 'system' ? `system/${msg.subtype}` : msg.type;
     log(`[msg #${messageCount}] type=${msgType}`);
-    if (message.type === 'system') {
-      const sys = message as { subtype?: string };
+    if (msg.type === 'system') {
+      const sys = msg as { subtype?: string };
       if (sys.subtype === 'mcp_status' || sys.subtype === 'mcp_message') {
-        log(`MCP event (${sys.subtype}): ${JSON.stringify(message)}`);
+        log(`MCP event (${sys.subtype}): ${JSON.stringify(msg)}`);
       }
     }
 
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
+    if (msg.type === 'assistant' && typeof msg.uuid === 'string') {
+      lastAssistantUuid = msg.uuid;
     }
 
-    if (message.type === 'system' && message.subtype === 'init') {
-      newSessionId = message.session_id;
+    if (msg.type === 'system' && msg.subtype === 'init') {
+      newSessionId = msg.session_id;
       log(`Session initialized: ${newSessionId}`);
     }
 
-    if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
-      const tn = message as { task_id: string; status: string; summary: string };
+    if (msg.type === 'system' && msg.subtype === 'task_notification') {
+      const tn = msg as { task_id: string; status: string; summary: string };
       log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
     }
 
-    if (message.type === 'result') {
+    if (msg.type === 'result') {
       resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      const textResult = typeof msg.result === 'string' ? msg.result : null;
+      log(`Result #${resultCount}: subtype=${msg.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
       writeOutput({
         status: 'success',
         result: textResult || null,
@@ -974,8 +986,8 @@ async function recordEpisode(groupFolder: string, isMain: boolean): Promise<void
         for (const line of lines) {
           if (line.startsWith('**User**: ')) {
             userMessages.push(line.replace('**User**: ', '').slice(0, 200));
-          } else if (line.startsWith('**Andy**: ')) {
-            assistantMessages.push(line.replace('**Andy**: ', '').slice(0, 200));
+          } else if (line.startsWith('**Fon**: ')) {
+            assistantMessages.push(line.replace('**Fon**: ', '').slice(0, 200));
           }
         }
       }
@@ -1031,7 +1043,12 @@ async function main(): Promise<void> {
     containerInput = JSON.parse(stdinData);
     // Delete the temp file the entrypoint wrote — it contains secrets
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
-    log(`Received input for group: ${containerInput.groupFolder}`);
+    const inboundRequestId = containerInput.requestId || process.env.NANOCLAW_REQUEST_ID || '';
+    if (inboundRequestId) {
+      log(`Received input for group: ${containerInput.groupFolder} requestId=${inboundRequestId}`);
+    } else {
+      log(`Received input for group: ${containerInput.groupFolder}`);
+    }
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -1046,6 +1063,9 @@ async function main(): Promise<void> {
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
   for (const [key, value] of Object.entries(containerInput.secrets || {})) {
     sdkEnv[key] = value;
+  }
+  if (containerInput.requestId) {
+    sdkEnv.NANOCLAW_REQUEST_ID = containerInput.requestId;
   }
 
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
@@ -1106,6 +1126,7 @@ async function main(): Promise<void> {
       NANOCLAW_CHAT_JID: containerInput.chatJid,
       NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
       NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+      NANOCLAW_REQUEST_ID: containerInput.requestId || sdkEnv.NANOCLAW_REQUEST_ID || '',
     };
     for (const server of Object.values(externalMcpServers)) {
       for (const [key, value] of Object.entries(server.env || {})) {

@@ -12,6 +12,24 @@ import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import path from 'path';
 import fs from 'fs';
+import { tmpdir } from 'os';
+
+async function removePathWithRetry(targetPath: string, attempts = 10, delayMs = 50): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      if (fs.existsSync(targetPath)) {
+        fs.rmSync(targetPath, { recursive: true, force: true });
+      }
+      return;
+    } catch (error) {
+      if (attempt === attempts - 1) {
+        // Windows can keep a transient lock on sqlite temp files; cleanup is best-effort in tests.
+        return;
+      }
+      await Bun.sleep(delayMs);
+    }
+  }
+}
 
 // ============================================================================
 // Test Utilities - Extracted functions for testing
@@ -437,9 +455,13 @@ describe('Query-Aware Weights', () => {
 
 describe('Database Integration', () => {
   let db: Database.Database;
-  const testDbPath = '/tmp/oracle-test.db';
+  let testDbDir: string;
+  let testDbPath: string;
 
   beforeAll(() => {
+    testDbDir = fs.mkdtempSync(path.join(tmpdir(), 'oracle-core-db-'));
+    testDbPath = path.join(testDbDir, 'oracle-test.db');
+
     // Create test database
     db = new Database(testDbPath);
 
@@ -483,11 +505,10 @@ describe('Database Integration', () => {
     }
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     db.close();
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
+    await Bun.sleep(50);
+    await removePathWithRetry(testDbDir);
   });
 
   it('should have test data in database', () => {
@@ -571,8 +592,13 @@ describe('Path Security', () => {
   });
 
   it('should handle absolute paths', () => {
-    expect(isPathSafe('/etc/passwd', '/')).toBe(true); // Relative to /
-    expect(isPathSafe('/etc/passwd', REPO_ROOT)).toBe(false);
+    const insideRepoAbsolute = path.resolve(REPO_ROOT, 'src/index.ts');
+    const outsideAbsolute = process.platform === 'win32'
+      ? 'C:\\Windows\\System32\\drivers\\etc\\hosts'
+      : '/etc/passwd';
+
+    expect(isPathSafe(insideRepoAbsolute, REPO_ROOT)).toBe(true);
+    expect(isPathSafe(outsideAbsolute, REPO_ROOT)).toBe(false);
   });
 });
 
@@ -582,9 +608,13 @@ describe('Path Security', () => {
 
 describe('Dashboard Logging Functions', () => {
   let testDb: Database.Database;
-  const testDbPath = '/tmp/oracle-dashboard-test.db';
+  let testDbDir: string;
+  let testDbPath: string;
 
   beforeAll(() => {
+    testDbDir = fs.mkdtempSync(path.join(tmpdir(), 'oracle-core-dashboard-'));
+    testDbPath = path.join(testDbDir, 'oracle-dashboard-test.db');
+
     // Create test database with logging tables
     testDb = new Database(testDbPath);
 
@@ -621,11 +651,10 @@ describe('Dashboard Logging Functions', () => {
     `);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     testDb.close();
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
+    await Bun.sleep(50);
+    await removePathWithRetry(testDbDir);
   });
 
   it('should insert search log entries', () => {

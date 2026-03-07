@@ -20,10 +20,12 @@ import { Database } from 'bun:sqlite';
 import { drizzle, BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { eq, sql, and, ne, isNotNull, inArray } from 'drizzle-orm';
 import * as schema from './db/schema.js';
+import { applySqlitePragmaPolicy } from './db/sqlite-policy.js';
 import { oracleDocuments, consultLog } from './db/schema.js';
 import { ChromaHttpClient } from './chroma-http.js';
 import path from 'path';
 import fs from 'fs';
+import { homedir } from 'os';
 import {
   handleThreadMessage,
   listThreads,
@@ -221,9 +223,11 @@ class OracleMCPServer {
     );
 
     // Initialize SQLite database (central location: ~/.oracle-v2/)
-    const oracleDataDir = process.env.ORACLE_DATA_DIR || path.join(homeDir, '.oracle-v2');
+    const userHome = process.env.HOME || process.env.USERPROFILE || homedir();
+    const oracleDataDir = process.env.ORACLE_DATA_DIR || path.join(userHome, '.oracle-v2');
     const dbPath = process.env.ORACLE_DB_PATH || path.join(oracleDataDir, 'oracle.db');
     this.sqlite = new Database(dbPath);  // Raw connection for FTS operations
+    applySqlitePragmaPolicy(this.sqlite, 'index.mcp-server');
     this.db = drizzle(this.sqlite, { schema });  // Drizzle wrapper for type-safe queries
 
     this.setupHandlers();

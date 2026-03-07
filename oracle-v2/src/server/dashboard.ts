@@ -7,6 +7,7 @@
 import { sql, gt, and, gte, lt, desc } from 'drizzle-orm';
 import { db, oracleDocuments, consultLog, searchLog, learnLog } from '../db/index.js';
 import type { DashboardSummary, DashboardActivity, DashboardGrowth } from './types.js';
+import { logNonFatal } from '../non-fatal.js';
 
 /**
  * Dashboard summary - aggregated stats for the dashboard
@@ -44,7 +45,9 @@ export function handleDashboardSummary(): DashboardSummary {
           conceptCounts.set(c, (conceptCounts.get(c) || 0) + 1);
         });
       }
-    } catch {}
+    } catch (error) {
+      logNonFatal('dashboard.parse_concepts', error, { scope: 'summary' }, 'debug');
+    }
   }
 
   const topConcepts = Array.from(conceptCounts.entries())
@@ -65,7 +68,9 @@ export function handleDashboardSummary(): DashboardSummary {
       .where(gt(consultLog.createdAt, sevenDaysAgo))
       .get();
     consultations7d = consultResult?.count || 0;
-  } catch {}
+  } catch (error) {
+    logNonFatal('dashboard.consultations_7d', error, undefined, 'debug');
+  }
 
   try {
     const searchResult = db.select({ count: sql<number>`count(*)` })
@@ -73,7 +78,9 @@ export function handleDashboardSummary(): DashboardSummary {
       .where(gt(searchLog.createdAt, sevenDaysAgo))
       .get();
     searches7d = searchResult?.count || 0;
-  } catch {}
+  } catch (error) {
+    logNonFatal('dashboard.searches_7d', error, undefined, 'debug');
+  }
 
   try {
     const learnResult = db.select({ count: sql<number>`count(*)` })
@@ -81,7 +88,9 @@ export function handleDashboardSummary(): DashboardSummary {
       .where(gt(learnLog.createdAt, sevenDaysAgo))
       .get();
     learnings7d = learnResult?.count || 0;
-  } catch {}
+  } catch (error) {
+    logNonFatal('dashboard.learnings_7d', error, undefined, 'debug');
+  }
 
   // Health status
   const lastIndexedResult = db.select({ lastIndexed: sql<number | null>`max(${oracleDocuments.indexedAt})` })
@@ -138,7 +147,9 @@ export function handleDashboardActivity(days: number = 7): DashboardActivity {
       patterns_found: row.patternsFound,
       created_at: new Date(row.createdAt).toISOString()
     }));
-  } catch {}
+  } catch (error) {
+    logNonFatal('dashboard.activity.consultations', error, { days }, 'debug');
+  }
 
   // Recent searches
   let searches: DashboardActivity['searches'] = [];
@@ -163,7 +174,9 @@ export function handleDashboardActivity(days: number = 7): DashboardActivity {
       search_time_ms: row.searchTimeMs,
       created_at: new Date(row.createdAt).toISOString()
     }));
-  } catch {}
+  } catch (error) {
+    logNonFatal('dashboard.activity.searches', error, { days }, 'debug');
+  }
 
   // Recent learnings
   let learnings: DashboardActivity['learnings'] = [];
@@ -188,7 +201,9 @@ export function handleDashboardActivity(days: number = 7): DashboardActivity {
       concepts: JSON.parse(row.concepts || '[]'),
       created_at: new Date(row.createdAt).toISOString()
     }));
-  } catch {}
+  } catch (error) {
+    logNonFatal('dashboard.activity.learnings', error, { days }, 'debug');
+  }
 
   return { consultations, searches, learnings, days };
 }
@@ -232,7 +247,9 @@ export function handleDashboardGrowth(period: string = 'week'): DashboardGrowth 
         ))
         .get();
       consultCount = consultResult?.count || 0;
-    } catch {}
+    } catch (error) {
+      logNonFatal('dashboard.growth.consultations', error, { date }, 'debug');
+    }
 
     // Searches that day
     let searchCount = 0;
@@ -245,7 +262,9 @@ export function handleDashboardGrowth(period: string = 'week'): DashboardGrowth 
         ))
         .get();
       searchCount = searchResult?.count || 0;
-    } catch {}
+    } catch (error) {
+      logNonFatal('dashboard.growth.searches', error, { date }, 'debug');
+    }
 
     data.push({
       date,

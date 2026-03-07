@@ -106,7 +106,7 @@ cat > /workspace/ipc/tasks/add_group_$(date +%s).json << 'EOF'
   "jid": "120363336345536173@g.us",
   "name": "Family Chat",
   "folder": "family-chat",
-  "trigger": "@Andy"
+  "trigger": "@Fon"
 }
 EOF
 ```
@@ -125,7 +125,7 @@ Groups can have extra directories mounted. Add `containerConfig` to their entry:
   "1234567890@g.us": {
     "name": "Dev Team",
     "folder": "dev-team",
-    "trigger": "@Andy",
+    "trigger": "@Fon",
     "added_at": "2026-01-31T12:00:00Z",
     "containerConfig": {
       "additionalMounts": [

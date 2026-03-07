@@ -15,6 +15,13 @@ import { Decisions } from './pages/Decisions';
 import { Evolution } from './pages/Evolution';
 import { Traces } from './pages/Traces';
 import { Superseded } from './pages/Superseded';
+import { LiveOps } from './pages/LiveOps';
+import { SchedulerPage } from './pages/SchedulerPage';
+import { JobDetailPage } from './pages/JobDetailPage';
+import { SystemHealth } from './pages/SystemHealth';
+import { HeartbeatConfigPage } from './pages/HeartbeatConfigPage';
+import { Chat } from './pages/Chat';
+import { AdminTokenGate } from './components/AdminTokenGate';
 
 // Lazy-loaded admin pages (not needed on every page load)
 const Admin = lazy(() => import('./pages/Admin').then(m => ({ default: m.Admin })));
@@ -28,7 +35,9 @@ function App() {
       <Suspense fallback={<div style={{ textAlign: 'center', padding: '2rem', color: '#888' }}>Loading...</div>}>
         <Routes>
           <Route path="/" element={<Overview />} />
+          <Route path="/live" element={<AdminTokenGate><LiveOps /></AdminTokenGate>} />
           <Route path="/feed" element={<Feed />} />
+          <Route path="/chat" element={<AdminTokenGate><Chat /></AdminTokenGate>} />
           <Route path="/doc/:id" element={<DocDetail />} />
           <Route path="/search" element={<Search />} />
           <Route path="/consult" element={<Consult />} />
@@ -42,6 +51,10 @@ function App() {
           <Route path="/traces" element={<Traces />} />
           <Route path="/traces/:id" element={<Traces />} />
           <Route path="/superseded" element={<Superseded />} />
+          <Route path="/scheduler" element={<AdminTokenGate><SchedulerPage /></AdminTokenGate>} />
+          <Route path="/scheduler/:id" element={<AdminTokenGate><JobDetailPage /></AdminTokenGate>} />
+          <Route path="/health" element={<AdminTokenGate><SystemHealth /></AdminTokenGate>} />
+          <Route path="/heartbeat" element={<AdminTokenGate><HeartbeatConfigPage /></AdminTokenGate>} />
           {/* Admin dashboard — lazy loaded */}
           <Route path="/admin" element={<Admin />} />
           <Route path="/admin/memory" element={<AdminMemory />} />

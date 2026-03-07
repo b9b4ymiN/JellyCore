@@ -120,8 +120,14 @@ async function connectSocket(phoneNumber?: string): Promise<void> {
 
     if (connection === 'open') {
       fs.writeFileSync(STATUS_FILE, 'authenticated');
-      // Clean up QR file now that we're connected
-      try { fs.unlinkSync(QR_FILE); } catch {}
+      // Clean up QR file now that we're connected.
+      try {
+        fs.unlinkSync(QR_FILE);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn('Failed to remove QR file:', err);
+        }
+      }
       console.log('\n✓ Successfully authenticated with WhatsApp!');
       console.log('  Credentials saved to store/auth/');
       console.log('  You can now start the NanoClaw service.\n');
@@ -137,9 +143,21 @@ async function connectSocket(phoneNumber?: string): Promise<void> {
 async function authenticate(): Promise<void> {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-  // Clean up any stale QR/status files from previous runs
-  try { fs.unlinkSync(QR_FILE); } catch {}
-  try { fs.unlinkSync(STATUS_FILE); } catch {}
+  // Clean up any stale QR/status files from previous runs.
+  try {
+    fs.unlinkSync(QR_FILE);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn('Failed to remove stale QR file:', err);
+    }
+  }
+  try {
+    fs.unlinkSync(STATUS_FILE);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn('Failed to remove stale status file:', err);
+    }
+  }
 
   let phoneNumber = phoneArg;
   if (usePairingCode && !phoneNumber) {

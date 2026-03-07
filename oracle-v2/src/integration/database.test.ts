@@ -21,6 +21,59 @@ const PROJECT_ROOT = join(import.meta.dir, "../..");
 let sqlite: Database;
 let db: ReturnType<typeof drizzle>;
 
+function ensureRuntimeSchemaCompatibility(database: Database): void {
+  const columns = database.query("PRAGMA table_info('oracle_documents')").all() as Array<{ name: string }>;
+  const existing = new Set(columns.map((col) => col.name));
+
+  const runtimeColumns: Array<[string, string]> = [
+    ["is_private", "ALTER TABLE oracle_documents ADD COLUMN is_private INTEGER DEFAULT 0"],
+    ["embedding_model", "ALTER TABLE oracle_documents ADD COLUMN embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2'"],
+    ["embedding_version", "ALTER TABLE oracle_documents ADD COLUMN embedding_version INTEGER DEFAULT 1"],
+    ["embedding_hash", "ALTER TABLE oracle_documents ADD COLUMN embedding_hash TEXT"],
+    ["chunk_index", "ALTER TABLE oracle_documents ADD COLUMN chunk_index INTEGER"],
+    ["total_chunks", "ALTER TABLE oracle_documents ADD COLUMN total_chunks INTEGER"],
+    ["parent_id", "ALTER TABLE oracle_documents ADD COLUMN parent_id TEXT"],
+    ["memory_layer", "ALTER TABLE oracle_documents ADD COLUMN memory_layer TEXT"],
+    ["confidence", "ALTER TABLE oracle_documents ADD COLUMN confidence INTEGER"],
+    ["access_count", "ALTER TABLE oracle_documents ADD COLUMN access_count INTEGER DEFAULT 0"],
+    ["last_accessed_at", "ALTER TABLE oracle_documents ADD COLUMN last_accessed_at INTEGER"],
+    ["decay_score", "ALTER TABLE oracle_documents ADD COLUMN decay_score INTEGER DEFAULT 100"],
+    ["expires_at", "ALTER TABLE oracle_documents ADD COLUMN expires_at INTEGER"],
+  ];
+
+  for (const [column, ddl] of runtimeColumns) {
+    if (!existing.has(column)) {
+      database.exec(ddl);
+    }
+  }
+
+  database.exec("CREATE INDEX IF NOT EXISTS idx_embedding_model ON oracle_documents(embedding_model)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_parent_id ON oracle_documents(parent_id)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_memory_layer ON oracle_documents(memory_layer)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_decay_score ON oracle_documents(decay_score)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_expires_at ON oracle_documents(expires_at)");
+
+  const searchLogColumns = database.query("PRAGMA table_info('search_log')").all() as Array<{ name: string }>;
+  if (!searchLogColumns.some((col) => col.name === "results")) {
+    database.exec("ALTER TABLE search_log ADD COLUMN results TEXT");
+  }
+}
+
+async function removeFileWithRetry(filePath: string, attempts = 10, delayMs = 50): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      if (existsSync(filePath)) {
+        rmSync(filePath);
+      }
+      return;
+    } catch (error) {
+      const isLastAttempt = attempt === attempts - 1;
+      if (isLastAttempt) throw error;
+      await Bun.sleep(delayMs);
+    }
+  }
+}
+
 describe("Database Integration (Drizzle ORM)", () => {
   beforeAll(async () => {
     // Ensure directory exists
@@ -73,14 +126,14 @@ describe("Database Integration (Drizzle ORM)", () => {
         tokenize='porter unicode61'
       );
     `);
+
+    ensureRuntimeSchemaCompatibility(sqlite);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     sqlite.close();
-    // Clean up test database
-    if (existsSync(TEST_DB_PATH)) {
-      rmSync(TEST_DB_PATH);
-    }
+    await Bun.sleep(50);
+    await removeFileWithRetry(TEST_DB_PATH);
   });
 
   // ===================

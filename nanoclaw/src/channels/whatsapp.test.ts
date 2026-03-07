@@ -116,7 +116,7 @@ function createTestOpts(overrides?: Partial<WhatsAppChannelOpts>): WhatsAppChann
       'registered@g.us': {
         name: 'Test Group',
         folder: 'test-group',
-        trigger: '@Andy',
+        trigger: '@Fon',
         added_at: '2024-01-01T00:00:00.000Z',
       },
     })),
@@ -319,7 +319,7 @@ describe('WhatsAppChannel', () => {
             participant: '5551234@s.whatsapp.net',
             fromMe: false,
           },
-          message: { conversation: 'Hello Andy' },
+          message: { conversation: 'Hello Fon' },
           pushName: 'Alice',
           messageTimestamp: Math.floor(Date.now() / 1000),
         },
@@ -333,7 +333,7 @@ describe('WhatsAppChannel', () => {
         'registered@g.us',
         expect.objectContaining({
           id: 'msg-1',
-          content: 'Hello Andy',
+          content: 'Hello Fon',
           sender_name: 'Alice',
           is_from_me: false,
         }),
@@ -559,7 +559,7 @@ describe('WhatsAppChannel', () => {
           '1234567890@s.whatsapp.net': {
             name: 'Self Chat',
             folder: 'self-chat',
-            trigger: '@Andy',
+            trigger: '@Fon',
             added_at: '2024-01-01T00:00:00.000Z',
           },
         })),

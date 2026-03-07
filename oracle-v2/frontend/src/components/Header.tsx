@@ -1,10 +1,11 @@
+import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { useState, useEffect } from 'react';
 import styles from './Header.module.css';
 
-// Main nav items
 const navItems = [
   { path: '/', label: 'Overview' },
+  { path: '/live', label: 'Live' },
+  { path: '/chat', label: 'Chat' },
   { path: '/feed', label: 'Feed' },
   { path: '/graph', label: 'Graph' },
   { divider: true },
@@ -14,8 +15,10 @@ const navItems = [
   { path: '/forum', label: 'Forum' },
 ] as const;
 
-// Dropdown items (Tools)
 const toolsItems = [
+  { path: '/scheduler', label: 'Scheduler' },
+  { path: '/health', label: 'Health' },
+  { path: '/heartbeat', label: 'Heartbeat' },
   { path: '/consult', label: 'Consult' },
   { path: '/decisions', label: 'Decisions' },
   { path: '/evolution', label: 'Evolution' },
@@ -35,43 +38,45 @@ export function Header() {
   const location = useLocation();
   const [sessionStats, setSessionStats] = useState<SessionStats | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sessionStartTime] = useState(() => {
-    // Get or initialize session start time from localStorage
-    const stored = localStorage.getItem('oracle_session_start');
-    if (stored) return parseInt(stored);
+    const stored = localStorage.getItem('jellycode_session_start')
+      || localStorage.getItem('oracle_session_start');
+    if (stored) return parseInt(stored, 10);
     const now = Date.now();
-    localStorage.setItem('oracle_session_start', String(now));
+    localStorage.setItem('jellycode_session_start', String(now));
     return now;
   });
 
   useEffect(() => {
-    loadSessionStats();
-    // Refresh stats every 30 seconds from backend
-    const interval = setInterval(loadSessionStats, 30000);
+    void loadSessionStats();
+    const interval = setInterval(() => void loadSessionStats(), 30000);
     return () => clearInterval(interval);
   }, [sessionStartTime]);
 
+  useEffect(() => {
+    setMobileMenuOpen(false);
+    setToolsOpen(false);
+  }, [location.pathname]);
+
   async function loadSessionStats() {
     try {
-      // Fetch real stats from backend (includes MCP usage)
       const response = await fetch(`/api/session/stats?since=${sessionStartTime}`);
-      if (response.ok) {
-        const data = await response.json();
-        setSessionStats({
-          searches: data.searches,
-          consultations: data.consultations,
-          learnings: data.learnings,
-          startTime: sessionStartTime
-        });
-      }
-    } catch (e) {
-      console.error('Failed to load session stats:', e);
-      // Fallback to zeros on error
+      if (!response.ok) return;
+      const data = await response.json();
+      setSessionStats({
+        searches: data.searches,
+        consultations: data.consultations,
+        learnings: data.learnings,
+        startTime: sessionStartTime,
+      });
+    } catch (error) {
+      console.error('Failed to load session stats:', error);
       setSessionStats({
         searches: 0,
         consultations: 0,
         learnings: 0,
-        startTime: sessionStartTime
+        startTime: sessionStartTime,
       });
     }
   }
@@ -90,12 +95,23 @@ export function Header() {
 
   return (
     <header className={styles.header}>
-      <Link to="/" className={styles.logo}>
-        🔮 Oracle
-        <span className={styles.version}>{__APP_VERSION__}</span>
-      </Link>
+      <div className={styles.brandRow}>
+        <Link to="/" className={styles.logo}>
+          Jellycode
+          <span className={styles.version}>v{__APP_VERSION__}</span>
+        </Link>
+        <button
+          type="button"
+          className={styles.menuButton}
+          onClick={() => setMobileMenuOpen((prev) => !prev)}
+          aria-expanded={mobileMenuOpen}
+          aria-label="Toggle navigation menu"
+        >
+          {mobileMenuOpen ? 'Close' : 'Menu'}
+        </button>
+      </div>
 
-      <nav className={styles.nav}>
+      <nav className={`${styles.nav} ${mobileMenuOpen ? styles.navOpen : ''}`}>
         {navItems.map((item, i) =>
           'divider' in item ? (
             <span key={i} className={styles.divider} />
@@ -104,31 +120,37 @@ export function Header() {
               key={item.path}
               to={item.path}
               className={`${styles.navLink} ${location.pathname === item.path.split('?')[0] ? styles.active : ''}`}
+              onClick={() => setMobileMenuOpen(false)}
             >
               {item.label}
             </Link>
-          )
+          ),
         )}
         <span className={styles.divider} />
         <div
-          className={styles.dropdown}
+          className={`${styles.dropdown} ${toolsOpen ? styles.dropdownOpen : ''}`}
           onMouseEnter={() => setToolsOpen(true)}
           onMouseLeave={() => setToolsOpen(false)}
         >
           <button
             type="button"
-            className={`${styles.navLink} ${styles.dropdownTrigger} ${toolsItems.some(t => location.pathname === t.path) ? styles.active : ''}`}
+            className={`${styles.navLink} ${styles.dropdownTrigger} ${toolsItems.some((t) => location.pathname === t.path) ? styles.active : ''}`}
+            onClick={() => setToolsOpen((prev) => !prev)}
+            aria-expanded={toolsOpen}
           >
-            Tools ▾
+            Tools
           </button>
           {toolsOpen && (
             <div className={styles.dropdownMenu}>
-              {toolsItems.map(item => (
+              {toolsItems.map((item) => (
                 <Link
                   key={item.path}
                   to={item.path}
                   className={`${styles.dropdownItem} ${location.pathname === item.path ? styles.active : ''}`}
-                  onClick={() => setToolsOpen(false)}
+                  onClick={() => {
+                    setToolsOpen(false);
+                    setMobileMenuOpen(false);
+                  }}
                 >
                   {item.label}
                 </Link>
@@ -139,15 +161,9 @@ export function Header() {
       </nav>
 
       <div className={styles.sessionStats}>
-        <span className={styles.statItem}>
-          Session: {duration}
-        </span>
-        <span className={styles.statItem}>
-          {sessionStats?.searches || 0} searches
-        </span>
-        <span className={styles.statItem}>
-          {sessionStats?.learnings || 0} learnings
-        </span>
+        <span className={styles.statItem}>Session: {duration}</span>
+        <span className={styles.statItem}>{sessionStats?.searches || 0} searches</span>
+        <span className={styles.statItem}>{sessionStats?.learnings || 0} learnings</span>
       </div>
     </header>
   );

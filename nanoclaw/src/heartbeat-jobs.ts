@@ -22,6 +22,7 @@ import {
   createHeartbeatJobLog,
   recoverStaleHeartbeatJobs,
 } from './db.js';
+import { eventBus } from './event-bus.js';
 import { logger } from './logger.js';
 import { getHeartbeatConfig } from './heartbeat-config.js';
 import type { HeartbeatJob } from './types.js';
@@ -76,6 +77,15 @@ async function executeHeartbeatJob(
 ): Promise<string> {
   const startTime = Date.now();
   logger.info({ jobId: job.id, label: job.label, category: job.category }, 'Executing heartbeat job');
+  eventBus.emit('live', {
+    type: 'heartbeat:job:start',
+    data: {
+      jobId: job.id,
+      label: job.label,
+      category: job.category,
+      startedAt: new Date().toISOString(),
+    },
+  });
 
   // Claim: update last_run to now so that if the process crashes mid-run the
   // job won't be considered "due again immediately" on the next startup.
@@ -106,6 +116,18 @@ async function executeHeartbeatJob(
     });
 
     logger.info({ jobId: job.id, label: job.label, durationMs }, 'Heartbeat job completed');
+    eventBus.emit('live', {
+      type: 'heartbeat:job:end',
+      data: {
+        jobId: job.id,
+        label: job.label,
+        category: job.category,
+        status: 'ok',
+        durationMs,
+        summary: result.slice(0, 500),
+        completedAt: new Date().toISOString(),
+      },
+    });
     return result;
   } catch (err) {
     const durationMs = Date.now() - startTime;
@@ -122,6 +144,18 @@ async function executeHeartbeatJob(
     });
 
     logger.error({ jobId: job.id, label: job.label, error: errorMsg, durationMs }, 'Heartbeat job failed');
+    eventBus.emit('live', {
+      type: 'heartbeat:job:end',
+      data: {
+        jobId: job.id,
+        label: job.label,
+        category: job.category,
+        status: 'error',
+        durationMs,
+        summary: errorMsg.slice(0, 500),
+        completedAt: new Date().toISOString(),
+      },
+    });
     throw err;
   }
 }

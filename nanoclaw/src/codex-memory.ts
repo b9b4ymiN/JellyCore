@@ -1,4 +1,5 @@
 import { logger } from './logger.js';
+import { attachRequestIdHeader, createRequestId } from './request-id.js';
 
 const MIN_RESULT_FOR_MEMORY = 40;
 const MIN_RESULT_FOR_SEMANTIC = 180;
@@ -133,6 +134,7 @@ async function postJson(
   baseUrl: string,
   endpoint: string,
   payload: Record<string, unknown>,
+  requestId: string,
   authToken?: string,
 ): Promise<void> {
   const controller = new AbortController();
@@ -140,10 +142,10 @@ async function postJson(
   try {
     const response = await fetchImpl(new URL(endpoint, baseUrl).toString(), {
       method: 'POST',
-      headers: {
+      headers: attachRequestIdHeader({
         'Content-Type': 'application/json',
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-      },
+      }, requestId),
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
@@ -166,6 +168,7 @@ export async function persistCodexMemory(
   const wrote: string[] = [];
   const skipped: string[] = [];
   const errors: string[] = [];
+  const requestId = createRequestId('codex');
 
   const run = async (
     name: 'episodic' | 'procedural' | 'semantic',
@@ -173,7 +176,7 @@ export async function persistCodexMemory(
     payload: Record<string, unknown>,
   ) => {
     try {
-      await postJson(fetchImpl, apiUrl, endpoint, payload, authToken);
+      await postJson(fetchImpl, apiUrl, endpoint, payload, requestId, authToken);
       wrote.push(name);
     } catch (err) {
       errors.push(`${name}:${err instanceof Error ? err.message : String(err)}`);
@@ -226,6 +229,7 @@ export async function persistCodexMemory(
       {
         group: input.groupFolder,
         userId: input.stableUserId,
+        requestId,
         wrote,
         errors,
       },

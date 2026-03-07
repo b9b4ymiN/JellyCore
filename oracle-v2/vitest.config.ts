@@ -9,7 +9,7 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
       include: ['src/**/*.ts'],
-      exclude: ['src/**/*.test.ts', 'src/ui.html'],
+      exclude: ['src/**/*.test.ts', 'src/legacy/*.html'],
     },
     testTimeout: 10000,
   },

@@ -20,6 +20,7 @@ import { ChromaHttpClient } from '../chroma-http.js';
 import { type ProceduralMemory, floatToInt, intToFloat } from '../types.js';
 import { searchCache } from '../cache.js';
 import crypto from 'crypto';
+import { logNonFatal } from '../non-fatal.js';
 
 /** Hash trigger to create deterministic doc ID */
 function hashTrigger(trigger: string): string {
@@ -75,8 +76,13 @@ export class ProceduralStore {
           if (proc) results.push(proc);
         }
       }
-    } catch {
-      // ChromaDB unavailable — fallback to FTS5
+    } catch (error) {
+      logNonFatal(
+        'memory.procedural.find.chroma_query',
+        error,
+        { taskContextLength: taskContext.length, limit },
+        'debug',
+      );
     }
 
     // Strategy 2: FTS5 fallback (if ChromaDB returned nothing)
@@ -101,8 +107,13 @@ export class ProceduralStore {
             if (proc) results.push(proc);
           }
         }
-      } catch {
-        // FTS5 query failed — return empty
+      } catch (error) {
+        logNonFatal(
+          'memory.procedural.find.fts_query',
+          error,
+          { taskContextLength: taskContext.length, limit },
+          'warn',
+        );
       }
     }
 
@@ -166,7 +177,14 @@ export class ProceduralStore {
             `${merged.trigger}\n${merged.procedure.join('\n')}`,
             conceptsArray.filter(c => !c.startsWith('{')).join(' '),
           );
-        } catch { /* FTS5 failure non-critical */ }
+        } catch (error) {
+          logNonFatal(
+            'memory.procedural.learn.update_fts',
+            error,
+            { docId },
+            'warn',
+          );
+        }
 
         // Update ChromaDB
         try {
@@ -181,7 +199,14 @@ export class ProceduralStore {
               success_count: String(merged.successCount),
             },
           }]);
-        } catch { /* ChromaDB failure non-critical */ }
+        } catch (error) {
+          logNonFatal(
+            'memory.procedural.learn.update_chroma',
+            error,
+            { docId },
+            'warn',
+          );
+        }
 
         searchCache.invalidate();
         return docId;
@@ -221,7 +246,14 @@ export class ProceduralStore {
         `${proc.trigger}\n${proc.procedure.join('\n')}`,
         conceptsArray.filter(c => !c.startsWith('{')).join(' '),
       );
-    } catch { /* FTS5 failure non-critical */ }
+    } catch (error) {
+      logNonFatal(
+        'memory.procedural.learn.insert_fts',
+        error,
+        { docId },
+        'warn',
+      );
+    }
 
     // Index into ChromaDB
     try {
@@ -236,7 +268,14 @@ export class ProceduralStore {
           success_count: '1',
         },
       }]);
-    } catch { /* ChromaDB failure non-critical */ }
+    } catch (error) {
+      logNonFatal(
+        'memory.procedural.learn.insert_chroma',
+        error,
+        { docId },
+        'warn',
+      );
+    }
 
     searchCache.invalidate();
     return docId;
@@ -316,7 +355,9 @@ export class ProceduralStore {
       if (procJson) {
         return JSON.parse(procJson) as ProceduralMemory;
       }
-    } catch { /* parse failure */ }
+    } catch (error) {
+      logNonFatal('memory.procedural.parse_row', error, undefined, 'debug');
+    }
 
     return null;
   }

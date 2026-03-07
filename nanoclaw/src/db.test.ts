@@ -10,6 +10,7 @@ import {
   getMessagesSince,
   getMessageAttachments,
   getNewMessages,
+  getRetryingMessages,
   getGroupAgentModeOverride,
   getGlobalAgentModeDefault,
   getRuntimeWorkingMemory,
@@ -202,7 +203,7 @@ describe('getMessagesSince', () => {
     const msgs = [
       { id: 'm1', content: 'first', ts: '2024-01-01T00:00:01.000Z', sender: 'Alice' },
       { id: 'm2', content: 'second', ts: '2024-01-01T00:00:02.000Z', sender: 'Bob' },
-      { id: 'm3', content: 'Andy: bot reply', ts: '2024-01-01T00:00:03.000Z', sender: 'Bot' },
+      { id: 'm3', content: 'Fon: bot reply', ts: '2024-01-01T00:00:03.000Z', sender: 'Bot' },
       { id: 'm4', content: 'third', ts: '2024-01-01T00:00:04.000Z', sender: 'Carol' },
     ];
     for (const m of msgs) {
@@ -218,22 +219,78 @@ describe('getMessagesSince', () => {
   });
 
   it('returns messages after the given timestamp', () => {
-    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:02.000Z', 'Andy');
+    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:02.000Z', 'Fon');
     // Should exclude m1, m2 (before/at timestamp), m3 (bot message)
     expect(msgs).toHaveLength(1);
     expect(msgs[0].content).toBe('third');
   });
 
   it('excludes messages from the assistant (content prefix)', () => {
-    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:00.000Z', 'Andy');
-    const botMsgs = msgs.filter((m) => m.content.startsWith('Andy:'));
+    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:00.000Z', 'Fon');
+    const botMsgs = msgs.filter((m) => m.content.startsWith('Fon:'));
     expect(botMsgs).toHaveLength(0);
   });
 
   it('returns all messages when sinceTimestamp is empty', () => {
-    const msgs = getMessagesSince('group@g.us', '', 'Andy');
+    const msgs = getMessagesSince('group@g.us', '', 'Fon');
     // 3 user messages (bot message excluded)
     expect(msgs).toHaveLength(3);
+  });
+
+  it('excludes Telegram self messages (is_from_me=1) to prevent feedback loops', () => {
+    const now = Date.now();
+    const since = new Date(now - 10_000).toISOString();
+    storeChatMetadata('tg:100', since, 'TG Chat');
+
+    store({
+      id: 'tg-user-1',
+      chat_jid: 'tg:100',
+      sender: 'tg:111',
+      sender_name: 'User',
+      content: 'hello from user',
+      timestamp: new Date(now - 3_000).toISOString(),
+      is_from_me: false,
+    });
+    store({
+      id: 'tg-bot-1',
+      chat_jid: 'tg:100',
+      sender: 'tg:bot',
+      sender_name: 'Bot',
+      content: 'bot says hi',
+      timestamp: new Date(now - 2_000).toISOString(),
+      is_from_me: true,
+    });
+
+    const msgs = getMessagesSince('tg:100', since, 'Fon');
+    expect(msgs.map((m) => m.id)).toEqual(['tg-user-1']);
+  });
+
+  it('excludes web-ui mirrored messages from queue sourcing', () => {
+    const now = Date.now();
+    const since = new Date(now - 10_000).toISOString();
+    storeChatMetadata('tg:101', since, 'TG Chat');
+
+    store({
+      id: 'tg-web-1',
+      chat_jid: 'tg:101',
+      sender: 'web-ui',
+      sender_name: 'Web',
+      content: 'from web mirror',
+      timestamp: new Date(now - 3_000).toISOString(),
+      is_from_me: false,
+    });
+    store({
+      id: 'tg-user-2',
+      chat_jid: 'tg:101',
+      sender: 'tg:222',
+      sender_name: 'User',
+      content: 'direct user message',
+      timestamp: new Date(now - 2_000).toISOString(),
+      is_from_me: false,
+    });
+
+    const msgs = getMessagesSince('tg:101', since, 'Fon');
+    expect(msgs.map((m) => m.id)).toEqual(['tg-user-2']);
   });
 });
 
@@ -247,7 +304,7 @@ describe('getNewMessages', () => {
     const msgs = [
       { id: 'a1', chat: 'group1@g.us', content: 'g1 msg1', ts: '2024-01-01T00:00:01.000Z' },
       { id: 'a2', chat: 'group2@g.us', content: 'g2 msg1', ts: '2024-01-01T00:00:02.000Z' },
-      { id: 'a3', chat: 'group1@g.us', content: 'Andy: reply', ts: '2024-01-01T00:00:03.000Z' },
+      { id: 'a3', chat: 'group1@g.us', content: 'Fon: reply', ts: '2024-01-01T00:00:03.000Z' },
       { id: 'a4', chat: 'group1@g.us', content: 'g1 msg2', ts: '2024-01-01T00:00:04.000Z' },
     ];
     for (const m of msgs) {
@@ -266,9 +323,9 @@ describe('getNewMessages', () => {
     const { messages, newTimestamp } = getNewMessages(
       ['group1@g.us', 'group2@g.us'],
       '2024-01-01T00:00:00.000Z',
-      'Andy',
+      'Fon',
     );
-    // Excludes 'Andy: reply', returns 3 messages
+    // Excludes 'Fon: reply', returns 3 messages
     expect(messages).toHaveLength(3);
     expect(newTimestamp).toBe('2024-01-01T00:00:04.000Z');
   });
@@ -277,7 +334,7 @@ describe('getNewMessages', () => {
     const { messages } = getNewMessages(
       ['group1@g.us', 'group2@g.us'],
       '2024-01-01T00:00:02.000Z',
-      'Andy',
+      'Fon',
     );
     // Only g1 msg2 (after ts, not bot)
     expect(messages).toHaveLength(1);
@@ -285,9 +342,65 @@ describe('getNewMessages', () => {
   });
 
   it('returns empty for no registered groups', () => {
-    const { messages, newTimestamp } = getNewMessages([], '', 'Andy');
+    const { messages, newTimestamp } = getNewMessages([], '', 'Fon');
     expect(messages).toHaveLength(0);
     expect(newTimestamp).toBe('');
+  });
+
+  it('excludes Telegram self messages from new-message polling', () => {
+    const now = Date.now();
+    const since = new Date(now - 10_000).toISOString();
+    storeChatMetadata('tg:200', since, 'TG Chat');
+
+    store({
+      id: 'tg-n1',
+      chat_jid: 'tg:200',
+      sender: 'tg:111',
+      sender_name: 'User',
+      content: 'user message',
+      timestamp: new Date(now - 3_000).toISOString(),
+      is_from_me: false,
+    });
+    store({
+      id: 'tg-n2',
+      chat_jid: 'tg:200',
+      sender: 'tg:bot',
+      sender_name: 'Bot',
+      content: 'bot echo',
+      timestamp: new Date(now - 2_000).toISOString(),
+      is_from_me: true,
+    });
+
+    const { messages } = getNewMessages(['tg:200'], since, 'Fon');
+    expect(messages.map((m) => m.id)).toEqual(['tg-n1']);
+  });
+
+  it('excludes web-ui mirrored messages from new-message polling', () => {
+    const now = Date.now();
+    const since = new Date(now - 10_000).toISOString();
+    storeChatMetadata('tg:201', since, 'TG Chat');
+
+    store({
+      id: 'tg-w1',
+      chat_jid: 'tg:201',
+      sender: 'web-ui',
+      sender_name: 'Web',
+      content: 'mirrored web message',
+      timestamp: new Date(now - 4_000).toISOString(),
+      is_from_me: false,
+    });
+    store({
+      id: 'tg-w2',
+      chat_jid: 'tg:201',
+      sender: 'tg:333',
+      sender_name: 'User',
+      content: 'real inbound',
+      timestamp: new Date(now - 3_000).toISOString(),
+      is_from_me: false,
+    });
+
+    const { messages } = getNewMessages(['tg:201'], since, 'Fon');
+    expect(messages.map((m) => m.id)).toEqual(['tg-w2']);
   });
 
   it('lists only recoverable receipts (RECEIVED/QUEUED/RUNNING)', () => {
@@ -339,6 +452,72 @@ describe('getNewMessages', () => {
       'r2',
       'r3',
     ]);
+  });
+
+  it('filters Telegram self messages from retry queue', () => {
+    const now = Date.now();
+    const chatJid = 'tg:300';
+    storeChatMetadata(chatJid, new Date(now - 10_000).toISOString(), 'TG Chat');
+
+    store({
+      id: 'rt-user',
+      chat_jid: chatJid,
+      sender: 'tg:111',
+      sender_name: 'User',
+      content: 'please retry me',
+      timestamp: new Date(now - 5_000).toISOString(),
+      is_from_me: false,
+    });
+    store({
+      id: 'rt-bot',
+      chat_jid: chatJid,
+      sender: 'tg:bot',
+      sender_name: 'Bot',
+      content: 'bot output',
+      timestamp: new Date(now - 4_000).toISOString(),
+      is_from_me: true,
+    });
+
+    const userReceipt = ensureMessageReceipt(chatJid, 'rt-user');
+    const botReceipt = ensureMessageReceipt(chatJid, 'rt-bot');
+    transitionMessageStatus(userReceipt.trace_id, 'RETRYING');
+    transitionMessageStatus(botReceipt.trace_id, 'RETRYING');
+
+    const retrying = getRetryingMessages(chatJid, 'Fon');
+    expect(retrying.map((m) => m.id)).toEqual(['rt-user']);
+  });
+
+  it('filters web-ui mirrored messages from retry queue', () => {
+    const now = Date.now();
+    const chatJid = 'tg:301';
+    storeChatMetadata(chatJid, new Date(now - 10_000).toISOString(), 'TG Chat');
+
+    store({
+      id: 'rt-web',
+      chat_jid: chatJid,
+      sender: 'web-ui',
+      sender_name: 'Web',
+      content: 'web mirror',
+      timestamp: new Date(now - 5_000).toISOString(),
+      is_from_me: false,
+    });
+    store({
+      id: 'rt-user-2',
+      chat_jid: chatJid,
+      sender: 'tg:111',
+      sender_name: 'User',
+      content: 'retry inbound',
+      timestamp: new Date(now - 4_000).toISOString(),
+      is_from_me: false,
+    });
+
+    const webReceipt = ensureMessageReceipt(chatJid, 'rt-web');
+    const userReceipt = ensureMessageReceipt(chatJid, 'rt-user-2');
+    transitionMessageStatus(webReceipt.trace_id, 'RETRYING');
+    transitionMessageStatus(userReceipt.trace_id, 'RETRYING');
+
+    const retrying = getRetryingMessages(chatJid, 'Fon');
+    expect(retrying.map((m) => m.id)).toEqual(['rt-user-2']);
   });
 });
 

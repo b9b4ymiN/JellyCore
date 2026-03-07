@@ -1,0 +1,102 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 7, 16, 0.72);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  padding: 16px;
+}
+
+.modal {
+  width: min(680px, 100%);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #121427;
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.modal h2 {
+  margin: 0;
+}
+
+.form {
+  display: grid;
+  gap: 12px;
+}
+
+.form label {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.form input,
+.form select,
+.form textarea {
+  width: 100%;
+  border: 1px solid #32364d;
+  border-radius: 8px;
+  background: #0f1120;
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.form textarea {
+  resize: vertical;
+}
+
+.quickRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quickRow button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #171a2d;
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.toggle {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 8px;
+}
+
+.toggle input {
+  width: auto;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.actions button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #181b30;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.error {
+  border: 1px solid #7f1d1d;
+  color: #fca5a5;
+  background: #450a0a;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
