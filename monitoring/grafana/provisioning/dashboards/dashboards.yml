@@ -1,0 +1,11 @@
+﻿apiVersion: 1
+
+providers:
+  - name: JellyCore
+    orgId: 1
+    folder: JellyCore
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

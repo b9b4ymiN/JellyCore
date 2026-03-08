@@ -32,6 +32,39 @@
   font-weight: 500;
 }
 
+.typeBadge {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.principle {
+  color: #93c5fd;
+  border-color: rgba(147, 197, 253, 0.35);
+  background: rgba(147, 197, 253, 0.12);
+}
+
+.pattern {
+  color: #d8b4fe;
+  border-color: rgba(216, 180, 254, 0.35);
+  background: rgba(216, 180, 254, 0.12);
+}
+
+.learning {
+  color: #fde68a;
+  border-color: rgba(253, 230, 138, 0.35);
+  background: rgba(253, 230, 138, 0.12);
+}
+
+.retro {
+  color: #86efac;
+  border-color: rgba(134, 239, 172, 0.35);
+  background: rgba(134, 239, 172, 0.12);
+}
+
 .how {
   color: var(--text-secondary);
 }

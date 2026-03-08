@@ -1,0 +1,41 @@
+﻿groups:
+  - name: jellycore-alerts
+    rules:
+      - alert: JellycoreDiskFull
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint='/',fstype!~'tmpfs|overlay'}
+            /
+            node_filesystem_size_bytes{mountpoint='/',fstype!~'tmpfs|overlay'}
+          ) < 0.10
+        for: 5m
+        labels:
+          severity: warning
+          service: jellycore
+        annotations:
+          summary: Disk space below 10%
+          description: Root filesystem free space is below 10% for 5 minutes.
+
+      - alert: JellycoreChromaDBDown
+        expr: up{job='chromadb'} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: chromadb
+        annotations:
+          summary: ChromaDB is down
+          description: Prometheus cannot scrape ChromaDB health endpoint.
+
+      - alert: JellycoreErrorRateHigh
+        expr: |
+          sum(rate(oracle_http_requests_by_route_total{status=~'5..'}[5m]))
+            /
+          clamp_min(sum(rate(oracle_http_requests_by_route_total[5m])), 0.001)
+            > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: oracle
+        annotations:
+          summary: Oracle error rate is high
+          description: 5xx error ratio exceeded 5% over the last 5 minutes.

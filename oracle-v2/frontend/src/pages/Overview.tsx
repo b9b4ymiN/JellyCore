@@ -3,7 +3,18 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getStats, reflect } from '../api/oracle';
 import type { Document, Stats } from '../api/oracle';
+import { Card, EmptyState, Skeleton } from '../components/ui';
 import styles from './Overview.module.css';
+
+const TYPE_PRIORITY = ['principle', 'pattern', 'learning', 'retro'];
+
+function typeToLabel(type: string): string {
+  return type
+    .split(/[_-]/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
 
 export function Overview() {
   const [stats, setStats] = useState<Stats | null>(null);
@@ -48,8 +59,25 @@ export function Overview() {
     }
   }
 
+  const typeEntries = Object.entries(stats?.by_type ?? {}).sort(([a], [b]) => {
+    const ai = TYPE_PRIORITY.indexOf(a);
+    const bi = TYPE_PRIORITY.indexOf(b);
+    if (ai >= 0 && bi >= 0) return ai - bi;
+    if (ai >= 0) return -1;
+    if (bi >= 0) return 1;
+    return a.localeCompare(b);
+  });
+
   if (loading) {
-    return <div className={styles.loading}>Loading...</div>;
+    return (
+      <div className={styles.container}>
+        <Card title="Loading dashboard" subtitle="Fetching Oracle stats and latest wisdom.">
+          <Skeleton height={18} style={{ marginBottom: 10 }} />
+          <Skeleton height={18} style={{ marginBottom: 10 }} />
+          <Skeleton height={18} width="60%" />
+        </Card>
+      </div>
+    );
   }
 
   return (
@@ -79,21 +107,19 @@ export function Overview() {
           <div className={styles.statValue}>{stats?.total?.toLocaleString() || 0}</div>
           <div className={styles.statLabel}>Documents</div>
         </div>
-        <div className={styles.statCard}>
-          <div className={styles.statValue}>{stats?.by_type?.principle || 0}</div>
-          <div className={styles.statLabel}>Principles</div>
-        </div>
-        <div className={styles.statCard}>
-          <div className={styles.statValue}>{stats?.by_type?.learning || 0}</div>
-          <div className={styles.statLabel}>Learnings</div>
-        </div>
+        {typeEntries.map(([type, count]) => (
+          <div key={type} className={styles.statCard}>
+            <div className={styles.statValue}>{count}</div>
+            <div className={styles.statLabel}>{typeToLabel(type)}</div>
+          </div>
+        ))}
         <div className={`${styles.statCard} ${stats?.is_stale ? '' : styles.healthy}`}>
           <div className={styles.statValue}>{stats?.is_stale ? 'Stale' : 'Healthy'}</div>
           <div className={styles.statLabel}>Status</div>
         </div>
       </div>
 
-      {wisdom && (
+      {wisdom ? (
         <>
           <div className={styles.wisdomCard} onClick={() => setShowModal(true)}>
             <div className={styles.wisdomGlow}></div>
@@ -107,6 +133,7 @@ export function Overview() {
                   onClick={(e) => { e.stopPropagation(); refreshWisdom(); }}
                   className={styles.refreshBtn}
                   title="New wisdom"
+                  aria-label="Refresh wisdom"
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -146,7 +173,7 @@ export function Overview() {
                     <span className={styles.wisdomOrb}></span>
                     <span>Oracle Wisdom</span>
                   </div>
-                  <button onClick={() => setShowModal(false)} className={styles.closeBtn}>
+                  <button onClick={() => setShowModal(false)} className={styles.closeBtn} aria-label="Close wisdom dialog">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -177,6 +204,11 @@ export function Overview() {
             </div>
           )}
         </>
+      ) : (
+        <EmptyState
+          title="No wisdom available yet"
+          message="Generate or ingest more documents to surface daily Oracle insights."
+        />
       )}
 
       <div className={styles.quickActions}>

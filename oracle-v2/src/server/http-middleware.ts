@@ -16,6 +16,7 @@ interface SecurityMiddlewareOptions {
 interface RouteMetric {
   count: number;
   durationMsSum: number;
+  durationBuckets: Map<number, number>;
   statusCounts: Map<number, number>;
 }
 
@@ -34,6 +35,8 @@ const httpMetrics: HttpMetricsState = {
   rateLimitedTotal: 0,
   routes: new Map(),
 };
+
+const REQUEST_DURATION_BUCKETS_MS = [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
 
 function createRequestId(): string {
   if (typeof crypto.randomUUID === 'function') {
@@ -84,10 +87,16 @@ function trackRouteMetric(method: string, rawPath: string, status: number, durat
   const existing = httpMetrics.routes.get(key) || {
     count: 0,
     durationMsSum: 0,
+    durationBuckets: new Map(REQUEST_DURATION_BUCKETS_MS.map((bucket) => [bucket, 0])),
     statusCounts: new Map<number, number>(),
   };
   existing.count += 1;
   existing.durationMsSum += durationMs;
+  for (const bucket of REQUEST_DURATION_BUCKETS_MS) {
+    if (durationMs <= bucket) {
+      existing.durationBuckets.set(bucket, (existing.durationBuckets.get(bucket) || 0) + 1);
+    }
+  }
   existing.statusCounts.set(status, (existing.statusCounts.get(status) || 0) + 1);
   httpMetrics.routes.set(key, existing);
 }
@@ -170,10 +179,8 @@ export function renderHttpMetricsPrometheus(): string {
     `oracle_http_rate_limited_total ${httpMetrics.rateLimitedTotal}`,
     '# HELP oracle_http_requests_by_route_total Requests by normalized route and status code.',
     '# TYPE oracle_http_requests_by_route_total counter',
-    '# HELP oracle_http_request_duration_ms_sum Cumulative request duration in milliseconds by route.',
-    '# TYPE oracle_http_request_duration_ms_sum counter',
-    '# HELP oracle_http_request_duration_ms_count Request duration sample count by route.',
-    '# TYPE oracle_http_request_duration_ms_count counter',
+    '# HELP oracle_http_request_duration_ms HTTP request duration in milliseconds by route.',
+    '# TYPE oracle_http_request_duration_ms histogram',
   ];
 
   for (const [key, metric] of httpMetrics.routes.entries()) {
@@ -181,6 +188,14 @@ export function renderHttpMetricsPrometheus(): string {
     const method = key.slice(0, sep);
     const path = key.slice(sep + 1);
     const labels = `method="${escapeMetricLabel(method)}",path="${escapeMetricLabel(path)}"`;
+    for (const bucket of REQUEST_DURATION_BUCKETS_MS) {
+      lines.push(
+        `oracle_http_request_duration_ms_bucket{${labels},le="${bucket}"} ${metric.durationBuckets.get(bucket) || 0}`,
+      );
+    }
+    lines.push(
+      `oracle_http_request_duration_ms_bucket{${labels},le="+Inf"} ${metric.count}`,
+    );
     lines.push(`oracle_http_request_duration_ms_sum{${labels}} ${metric.durationMsSum.toFixed(3)}`);
     lines.push(`oracle_http_request_duration_ms_count{${labels}} ${metric.count}`);
     for (const [status, count] of metric.statusCounts.entries()) {

@@ -4,6 +4,7 @@ import { list } from '../api/oracle';
 import type { Document } from '../api/oracle';
 import { LogCard } from '../components/LogCard';
 import { SidebarLayout } from '../components/SidebarLayout';
+import { EmptyState, Skeleton } from '../components/ui';
 import styles from './Feed.module.css';
 
 export function Feed() {
@@ -13,7 +14,6 @@ export function Feed() {
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
 
-  // Get type from URL or default to 'all'
   const type = searchParams.get('type') || 'all';
 
   function setType(newType: string) {
@@ -37,8 +37,8 @@ export function Feed() {
         setDocs(data.results);
         setOffset(20);
       } else {
-        setDocs(prev => [...prev, ...data.results]);
-        setOffset(prev => prev + 20);
+        setDocs((prev) => [...prev, ...data.results]);
+        setOffset((prev) => prev + 20);
       }
       setHasMore(data.results.length >= 20);
     } finally {
@@ -50,16 +50,34 @@ export function Feed() {
     <SidebarLayout activeType={type} onTypeChange={setType}>
       <h1 className={styles.title}>Knowledge Feed</h1>
       <p className={styles.subtitle}>
-        Browse Oracle's indexed knowledge — principles, learnings, and retrospectives
+        Browse Oracle's indexed knowledge: principles, patterns, learnings, and retrospectives
       </p>
 
-      <div className={styles.feed}>
-        {docs.map(doc => (
-          <LogCard key={doc.id} doc={doc} />
-        ))}
-      </div>
+      {loading && docs.length === 0 ? (
+        <div className={styles.feed}>
+          {Array.from({ length: 4 }).map((_, idx) => (
+            <div key={idx} className={styles.loading}>
+              <Skeleton height={18} style={{ marginBottom: 8 }} />
+              <Skeleton height={14} style={{ marginBottom: 8 }} />
+              <Skeleton height={14} width="70%" />
+            </div>
+          ))}
+        </div>
+      ) : docs.length > 0 ? (
+        <div className={styles.feed}>
+          {docs.map((doc) => (
+            <LogCard key={doc.id} doc={doc} />
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          title={type === 'all' ? 'No documents yet' : `No ${type} documents yet`}
+          message="Try another type filter or upload new knowledge."
+          action={<a href="/search">Go to Search</a>}
+        />
+      )}
 
-      {loading && <div className={styles.loading}>Loading...</div>}
+      {loading && docs.length > 0 && <div className={styles.loading}>Loading...</div>}
 
       {!loading && hasMore && (
         <button type="button" onClick={() => loadDocs(false)} className={styles.loadMore}>

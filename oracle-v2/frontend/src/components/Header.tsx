@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useTheme } from '../hooks/useTheme';
 import styles from './Header.module.css';
 
 const navItems = [
@@ -25,6 +26,9 @@ const toolsItems = [
   { path: '/traces', label: 'Traces' },
   { path: '/superseded', label: 'Superseded' },
   { path: '/handoff', label: 'Handoff' },
+  { path: '/admin', label: 'Admin' },
+  { path: '/admin/memory', label: 'Memory' },
+  { path: '/admin/logs', label: 'Logs' },
 ] as const;
 
 interface SessionStats {
@@ -36,6 +40,7 @@ interface SessionStats {
 
 export function Header() {
   const location = useLocation();
+  const { theme, toggleTheme } = useTheme();
   const [sessionStats, setSessionStats] = useState<SessionStats | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -58,6 +63,15 @@ export function Header() {
     setMobileMenuOpen(false);
     setToolsOpen(false);
   }, [location.pathname]);
+
+  function isPathActive(path: string): boolean {
+    return location.pathname === path.split('?')[0];
+  }
+
+  function closeMenus() {
+    setMobileMenuOpen(false);
+    setToolsOpen(false);
+  }
 
   async function loadSessionStats() {
     try {
@@ -100,41 +114,84 @@ export function Header() {
           Jellycode
           <span className={styles.version}>v{__APP_VERSION__}</span>
         </Link>
-        <button
-          type="button"
-          className={styles.menuButton}
-          onClick={() => setMobileMenuOpen((prev) => !prev)}
-          aria-expanded={mobileMenuOpen}
-          aria-label="Toggle navigation menu"
-        >
-          {mobileMenuOpen ? 'Close' : 'Menu'}
-        </button>
+        <div className={styles.brandActions}>
+          <button
+            type="button"
+            className={styles.themeButton}
+            onClick={toggleTheme}
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            {theme === 'dark' ? 'Light' : 'Dark'}
+          </button>
+          <button
+            type="button"
+            className={styles.menuButton}
+            onClick={() => setMobileMenuOpen((prev) => !prev)}
+            aria-expanded={mobileMenuOpen}
+            aria-label="Toggle navigation menu"
+          >
+            {mobileMenuOpen ? 'Close' : 'Menu'}
+          </button>
+        </div>
       </div>
 
-      <nav className={`${styles.nav} ${mobileMenuOpen ? styles.navOpen : ''}`}>
-        {navItems.map((item, i) =>
-          'divider' in item ? (
-            <span key={i} className={styles.divider} />
-          ) : (
-            <Link
-              key={item.path}
-              to={item.path}
-              className={`${styles.navLink} ${location.pathname === item.path.split('?')[0] ? styles.active : ''}`}
-              onClick={() => setMobileMenuOpen(false)}
-            >
-              {item.label}
-            </Link>
-          ),
-        )}
-        <span className={styles.divider} />
+      {mobileMenuOpen && (
+        <button
+          type="button"
+          className={styles.navOverlay}
+          onClick={closeMenus}
+          aria-label="Close navigation menu"
+        />
+      )}
+
+      <nav className={`${styles.nav} ${mobileMenuOpen ? styles.navOpen : ''}`} aria-label="Primary">
+        <div className={styles.navSection}>
+          {navItems.map((item, i) => (
+            'divider' in item ? (
+              <span key={i} className={styles.divider} />
+            ) : (
+              <Link
+                key={item.path}
+                to={item.path}
+                className={`${styles.navLink} ${isPathActive(item.path) ? styles.active : ''}`}
+                onClick={closeMenus}
+              >
+                {item.label}
+              </Link>
+            )
+          ))}
+        </div>
+
+        <div className={styles.mobileTools}>
+          <p className={styles.sectionTitle}>Tools</p>
+          <div className={styles.navSection}>
+            {toolsItems.map((item) => (
+              <Link
+                key={item.path}
+                to={item.path}
+                className={`${styles.navLink} ${isPathActive(item.path) ? styles.active : ''}`}
+                onClick={closeMenus}
+              >
+                {item.label}
+              </Link>
+            ))}
+          </div>
+        </div>
+        <div className={styles.mobileStats}>
+          <span className={styles.statItem}>Session: {duration}</span>
+          <span className={styles.statItem}>{sessionStats?.searches || 0} searches</span>
+          <span className={styles.statItem}>{sessionStats?.learnings || 0} learnings</span>
+        </div>
+
         <div
-          className={`${styles.dropdown} ${toolsOpen ? styles.dropdownOpen : ''}`}
+          className={`${styles.dropdown} ${styles.desktopTools} ${toolsOpen ? styles.dropdownOpen : ''}`}
           onMouseEnter={() => setToolsOpen(true)}
           onMouseLeave={() => setToolsOpen(false)}
         >
           <button
             type="button"
-            className={`${styles.navLink} ${styles.dropdownTrigger} ${toolsItems.some((t) => location.pathname === t.path) ? styles.active : ''}`}
+            className={`${styles.navLink} ${styles.dropdownTrigger} ${toolsItems.some((t) => isPathActive(t.path)) ? styles.active : ''}`}
             onClick={() => setToolsOpen((prev) => !prev)}
             aria-expanded={toolsOpen}
           >
@@ -146,11 +203,8 @@ export function Header() {
                 <Link
                   key={item.path}
                   to={item.path}
-                  className={`${styles.dropdownItem} ${location.pathname === item.path ? styles.active : ''}`}
-                  onClick={() => {
-                    setToolsOpen(false);
-                    setMobileMenuOpen(false);
-                  }}
+                  className={`${styles.dropdownItem} ${isPathActive(item.path) ? styles.active : ''}`}
+                  onClick={closeMenus}
                 >
                   {item.label}
                 </Link>

@@ -1,0 +1,65 @@
+﻿{
+  "id": null,
+  "uid": "jellycore-observability",
+  "title": "JellyCore Observability",
+  "tags": ["jellycore", "oracle", "nanoclaw"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "NanoClaw Queue Depth",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "nanoclaw_queue_depth",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "NanoClaw p95 Message Latency (ms)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(nanoclaw_message_latency_ms_bucket[5m])) by (le))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Oracle p95 HTTP Latency (ms)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(oracle_http_request_duration_ms_bucket[5m])) by (le))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Oracle 5xx Error Rate",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(oracle_http_requests_by_route_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(oracle_http_requests_by_route_total[5m])), 0.001)",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}
+

@@ -1,0 +1,25 @@
+﻿global:
+  resolve_timeout: 5m
+
+route:
+  receiver: telegram
+  group_by: ['alertname', 'service']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 1h
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - api_url: https://api.telegram.org
+        bot_token: ${ALERT_TELEGRAM_BOT_TOKEN}
+        chat_id: ${ALERT_TELEGRAM_CHAT_ID}
+        parse_mode: HTML
+        send_resolved: true
+        message: |
+          <b>{{ .CommonLabels.alertname }}</b>
+          {{ range .Alerts }}
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          severity={{ .Labels.severity }} service={{ .Labels.service }}
+          {{ end }}

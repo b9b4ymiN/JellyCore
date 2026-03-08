@@ -1,0 +1,34 @@
+﻿.wrap {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  display: grid;
+  gap: var(--space-3);
+  place-items: center;
+}
+
+.icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  display: grid;
+  place-items: center;
+  font-size: 1.5rem;
+}
+
+.title {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.text {
+  color: var(--text-secondary);
+  max-width: 540px;
+}
+
+.action {
+  margin-top: var(--space-2);
+}

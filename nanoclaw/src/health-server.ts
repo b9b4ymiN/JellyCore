@@ -50,6 +50,40 @@ const startTime = Date.now();
 const MAX_ERRORS = 50;
 export const recentErrors: Array<{ timestamp: string; message: string; group?: string }> = [];
 let lastHealthSignature = '';
+const LATENCY_BUCKETS_MS = [100, 250, 500, 1000, 2500, 5000, 10000];
+
+interface MessageLatencyMetric {
+  count: number;
+  sumMs: number;
+  buckets: Map<number, number>;
+}
+
+const messageLatencyByChannel = new Map<string, MessageLatencyMetric>();
+
+function getMessageLatencyMetric(channel: string): MessageLatencyMetric {
+  const existing = messageLatencyByChannel.get(channel);
+  if (existing) return existing;
+
+  const metric: MessageLatencyMetric = {
+    count: 0,
+    sumMs: 0,
+    buckets: new Map(LATENCY_BUCKETS_MS.map((bucket) => [bucket, 0])),
+  };
+  messageLatencyByChannel.set(channel, metric);
+  return metric;
+}
+
+export function observeMessageLatency(latencyMs: number, channel: string = 'unknown'): void {
+  if (!Number.isFinite(latencyMs) || latencyMs < 0) return;
+  const metric = getMessageLatencyMetric(channel);
+  metric.count += 1;
+  metric.sumMs += latencyMs;
+  for (const bucket of LATENCY_BUCKETS_MS) {
+    if (latencyMs <= bucket) {
+      metric.buckets.set(bucket, (metric.buckets.get(bucket) || 0) + 1);
+    }
+  }
+}
 
 /** Record an error for status reporting */
 export function recordError(message: string, group?: string): void {
@@ -325,6 +359,22 @@ function renderMetrics(): string {
     lines.push(
       `nanoclaw_non_fatal_errors_by_category_total{category="${escapeMetricLabel(category)}"} ${count}`,
     );
+  }
+
+  lines.push(
+    '# HELP nanoclaw_message_latency_ms Message processing latency in milliseconds.',
+    '# TYPE nanoclaw_message_latency_ms histogram',
+  );
+  for (const [channel, metric] of messageLatencyByChannel.entries()) {
+    const labels = `channel="${escapeMetricLabel(channel)}"`;
+    for (const bucket of LATENCY_BUCKETS_MS) {
+      lines.push(
+        `nanoclaw_message_latency_ms_bucket{${labels},le="${bucket}"} ${metric.buckets.get(bucket) || 0}`,
+      );
+    }
+    lines.push(`nanoclaw_message_latency_ms_bucket{${labels},le="+Inf"} ${metric.count}`);
+    lines.push(`nanoclaw_message_latency_ms_sum{${labels}} ${metric.sumMs.toFixed(3)}`);
+    lines.push(`nanoclaw_message_latency_ms_count{${labels}} ${metric.count}`);
   }
 
   return `${lines.join('\n')}\n`;
@@ -657,6 +707,7 @@ async function handleChatSend(
     }
 
     const result = await chatProvider.processChat(message, groupFolder, requestId);
+    observeMessageLatency(result.latencyMs, 'web');
     json(res, 200, result);
   } catch (err) {
     logger.error({ err }, 'Chat handler error');

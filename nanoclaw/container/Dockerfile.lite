@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 # NanoClaw Agent Container (Lite Variant)
 # Text/code-focused runtime without Chromium/Playwright stack.
 
@@ -5,7 +6,7 @@ FROM node:22-slim AS builder
 
 WORKDIR /app
 COPY agent-runner/package*.json ./
-RUN npm install
+RUN --mount=type=cache,target=/root/.npm npm install
 COPY agent-runner/ ./
 RUN npm run build
 
@@ -17,7 +18,9 @@ LABEL org.opencontainers.image.title="nanoclaw-agent-lite" \
       org.opencontainers.image.revision=$VCS_REF
 
 # Keep runtime dependencies minimal in lite image.
-RUN apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-recommends \
     curl \
     docker.io \
     git \
@@ -26,16 +29,47 @@ RUN apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-reco
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-cache-dir --break-system-packages \
     requests \
     beautifulsoup4 \
     lxml
 
 # No browser tooling in lite image.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV AGENT_LAZY_CHROMIUM=0
+
+# Optional lazy browser installer for rare browsing tasks on lite runtime.
+RUN cat > /usr/local/bin/lazy-install-chromium <<'EOF' \
+ && chmod +x /usr/local/bin/lazy-install-chromium
+#!/bin/bash
+set -e
+if command -v chromium >/dev/null 2>&1; then
+  exit 0
+fi
+apt-get update -o Acquire::Retries=3
+apt-get install -y --no-install-recommends \
+  chromium \
+  fonts-liberation \
+  fonts-noto-color-emoji \
+  libgbm1 \
+  libnss3 \
+  libatk-bridge2.0-0 \
+  libgtk-3-0 \
+  libx11-xcb1 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxrandr2 \
+  libasound2 \
+  libpangocairo-1.0-0 \
+  libcups2 \
+  libdrm2 \
+  libxshmfence1
+rm -rf /var/lib/apt/lists/*
+EOF
 
 # Install core agent CLIs.
-RUN npm install -g @anthropic-ai/claude-code @openai/codex pm2
+RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-code @openai/codex pm2
 
 # External MCP servers - same behavior as full image.
 RUN git clone --depth=1 https://github.com/elizabethtrykin/oura-mcp /opt/oura-mcp \
@@ -51,9 +85,9 @@ RUN git clone --depth=1 https://github.com/Alex2Yang97/yahoo-finance-mcp /opt/ya
       "pandas>=2.0.0" \
     && rm -rf /opt/yahoo-finance-mcp/.git
 
-RUN npm install -g notebooklm-mcp@latest
+RUN --mount=type=cache,target=/root/.npm npm install -g notebooklm-mcp@latest
 
-RUN npm install -g @a-bonus/google-docs-mcp@latest \
+RUN --mount=type=cache,target=/root/.npm npm install -g @a-bonus/google-docs-mcp@latest \
     && mkdir -p /opt/google-docs-mcp \
     && cat > /opt/google-docs-mcp/start.sh <<'EOF' \
     && chmod +x /opt/google-docs-mcp/start.sh
@@ -97,6 +131,12 @@ if [ -S /var/run/docker.sock ]; then
     fi
     usermod -aG "$SOCK_GROUP" node 2>/dev/null || true
   fi
+fi
+
+if [ "${AGENT_LAZY_CHROMIUM:-0}" = "1" ]; then
+  /usr/local/bin/lazy-install-chromium
+  export AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+  export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 fi
 
 cat > /tmp/input.json

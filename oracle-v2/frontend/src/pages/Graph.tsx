@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import * as THREE from 'three';
 import { getGraph, getFile } from '../api/oracle';
 import { useHandTracking } from '../hooks/useHandTracking';
@@ -26,20 +26,46 @@ interface Link {
 
 const TYPE_COLORS_HEX: Record<string, string> = {
   principle: '#60a5fa',  // blue
+  pattern: '#a78bfa',    // violet
   learning: '#fbbf24',   // yellow
   retro: '#4ade80',      // green
 };
-
-const TYPE_COLORS_NUM: Record<string, number> = {
-  principle: 0x60a5fa,   // blue
-  learning: 0xfbbf24,    // yellow
-  retro: 0x4ade80,       // green
-};
+const TYPE_PRIORITY = ['principle', 'pattern', 'learning', 'retro'];
+const FALLBACK_TYPE_COLORS = ['#22d3ee', '#f97316', '#f43f5e', '#34d399', '#facc15', '#38bdf8'];
 
 const STORAGE_KEY_VIEW = 'oracle-graph-view-mode';
 const STORAGE_KEY_FULL = 'oracle-graph-show-full';
 const STORAGE_KEY_HUD = 'oracle-graph-show-hud';
 const DEFAULT_NODE_LIMIT = 200;
+
+function typeToLabel(type: string): string {
+  return type
+    .split(/[_-]/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function typeHash(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function resolveTypeColorHex(type: string): string {
+  if (TYPE_COLORS_HEX[type]) {
+    return TYPE_COLORS_HEX[type];
+  }
+  const idx = typeHash(type) % FALLBACK_TYPE_COLORS.length;
+  return FALLBACK_TYPE_COLORS[idx];
+}
+
+function resolveTypeColorNum(type: string): number {
+  const hex = resolveTypeColorHex(type).replace('#', '');
+  return Number.parseInt(hex, 16);
+}
 
 // KlakMath helpers for 3D
 function xxhash(seed: number, data: number): number {
@@ -122,14 +148,37 @@ export function Graph() {
   const [allNodes, setAllNodes] = useState<Node[]>([]);
   const [allLinks, setAllLinks] = useState<Link[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia('(max-width: 768px)').matches);
+  const [threeDError, setThreeDError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'2d' | '3d'>(() => {
     const saved = localStorage.getItem(STORAGE_KEY_VIEW);
     return saved === '3d' ? '3d' : '2d';
   });
+  const effectiveView = viewMode === '3d' && threeDError ? '2d' : viewMode;
+  const availableTypes = useMemo(() => {
+    const unique = new Set(allNodes.map((node) => node.type).filter(Boolean));
+    return [...unique].sort((a, b) => {
+      const ai = TYPE_PRIORITY.indexOf(a);
+      const bi = TYPE_PRIORITY.indexOf(b);
+      if (ai >= 0 && bi >= 0) return ai - bi;
+      if (ai >= 0) return -1;
+      if (bi >= 0) return 1;
+      return a.localeCompare(b);
+    });
+  }, [allNodes]);
 
   // Load graph data once
   useEffect(() => {
     loadGraph();
+  }, []);
+
+  useEffect(() => {
+    function handleResize() {
+      setIsMobile(window.matchMedia('(max-width: 768px)').matches);
+    }
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
   }, []);
 
   async function loadGraph() {
@@ -158,6 +207,9 @@ export function Graph() {
   }
 
   function toggleView() {
+    if (threeDError) {
+      setThreeDError(null);
+    }
     const newView = viewMode === '2d' ? '3d' : '2d';
     setViewMode(newView);
     localStorage.setItem(STORAGE_KEY_VIEW, newView);
@@ -191,23 +243,65 @@ export function Graph() {
         </div>
       </div>
 
-      {viewMode === '2d' ? (
-        <Canvas2D nodes={allNodes} links={allLinks} />
+      {threeDError && (
+        <div className={styles.warning}>3D fallback activated: {threeDError}</div>
+      )}
+      {isMobile && (
+        <div className={styles.hintRow}>
+          Mobile mode active: use touch to pan/zoom the 2D graph. Hand tracking is disabled in 3D.
+        </div>
+      )}
+      {effectiveView === '2d' ? (
+        <Canvas2D nodes={allNodes} links={allLinks} availableTypes={availableTypes} />
       ) : (
-        <Canvas3D nodes={allNodes} links={allLinks} />
+        <Canvas3D
+          nodes={allNodes}
+          links={allLinks}
+          availableTypes={availableTypes}
+          isMobile={isMobile}
+          onFatalError={(message) => {
+            setThreeDError(message);
+            setViewMode('2d');
+            localStorage.setItem(STORAGE_KEY_VIEW, '2d');
+          }}
+        />
       )}
     </div>
   );
 }
 
 // 2D Canvas Component
-function Canvas2D({ nodes: allNodes, links: allLinks }: { nodes: Node[]; links: Link[] }) {
+function Canvas2D({
+  nodes: allNodes,
+  links: allLinks,
+  availableTypes,
+}: {
+  nodes: Node[];
+  links: Link[];
+  availableTypes: string[];
+}) {
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [showFull, setShowFull] = useState(() => localStorage.getItem(STORAGE_KEY_FULL) === 'true');
+  const [viewport, setViewport] = useState({ width: 800, height: 600 });
   const animationRef = useRef<number>(0);
+  const viewRef = useRef({ scale: 1, offsetX: 0, offsetY: 0 });
+  const touchStateRef = useRef<{
+    mode: 'none' | 'pan' | 'pinch';
+    startDistance: number;
+    startScale: number;
+    lastX: number;
+    lastY: number;
+  }>({
+    mode: 'none',
+    startDistance: 0,
+    startScale: 1,
+    lastX: 0,
+    lastY: 0,
+  });
 
   useEffect(() => {
     applyNodeLimit(allNodes, allLinks, showFull);
@@ -244,14 +338,43 @@ function Canvas2D({ nodes: allNodes, links: allLinks }: { nodes: Node[]; links: 
     localStorage.setItem(STORAGE_KEY_FULL, String(newFull));
   }
 
+  function clampScale(scale: number): number {
+    return Math.max(0.5, Math.min(2.8, scale));
+  }
+
+  function distance(a: { clientX: number; clientY: number }, b: { clientX: number; clientY: number }): number {
+    const dx = a.clientX - b.clientX;
+    const dy = a.clientY - b.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  useEffect(() => {
+    function updateViewport() {
+      const node = wrapperRef.current;
+      if (!node) return;
+      const width = Math.max(320, Math.floor(node.clientWidth));
+      const height = Math.max(320, Math.min(680, Math.floor(width * 0.72)));
+      setViewport({ width, height });
+    }
+
+    if (!wrapperRef.current) return;
+    updateViewport();
+    const observer = new ResizeObserver(updateViewport);
+    observer.observe(wrapperRef.current);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     if (nodes.length === 0) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = canvas.width, height = canvas.height;
+    const width = canvas.width;
+    const height = canvas.height;
     let localNodes = [...nodes];
     let time = 0;
     let revealProgress = 0;
@@ -331,6 +454,11 @@ function Canvas2D({ nodes: allNodes, links: allLinks }: { nodes: Node[]; links: 
       if (!ctx) return;
       ctx.fillStyle = '#0a0a0f';
       ctx.fillRect(0, 0, width, height);
+      const { scale, offsetX, offsetY } = viewRef.current;
+      const toScreen = (x: number, y: number) => ({
+        x: x * scale + offsetX,
+        y: y * scale + offsetY,
+      });
 
       const visibleLinks = Math.floor(links.length * revealProgress);
       ctx.lineWidth = 0.5;
@@ -338,11 +466,13 @@ function Canvas2D({ nodes: allNodes, links: allLinks }: { nodes: Node[]; links: 
         const source = localNodes.find(n => n.id === link.source);
         const target = localNodes.find(n => n.id === link.target);
         if (!source || !target) return;
+        const sourcePoint = toScreen(source.x!, source.y!);
+        const targetPoint = toScreen(target.x!, target.y!);
         const fadeIn = Math.min(1, (revealProgress - i / links.length) * 10);
         ctx.strokeStyle = `rgba(255,255,255,${0.08 * fadeIn})`;
         ctx.beginPath();
-        ctx.moveTo(source.x!, source.y!);
-        ctx.lineTo(target.x!, target.y!);
+        ctx.moveTo(sourcePoint.x, sourcePoint.y);
+        ctx.lineTo(targetPoint.x, targetPoint.y);
         ctx.stroke();
 
         const speed = 0.3 + (i % 5) * 0.1;
@@ -350,54 +480,171 @@ function Canvas2D({ nodes: allNodes, links: allLinks }: { nodes: Node[]; links: 
         const t = ((time * speed + offset) % 1);
         ctx.fillStyle = `rgba(167, 139, 250, ${0.6 * fadeIn})`;
         ctx.beginPath();
-        ctx.arc(source.x! + (target.x! - source.x!) * t, source.y! + (target.y! - source.y!) * t, 1.5, 0, Math.PI * 2);
+        ctx.arc(
+          sourcePoint.x + (targetPoint.x - sourcePoint.x) * t,
+          sourcePoint.y + (targetPoint.y - sourcePoint.y) * t,
+          Math.max(0.8, 1.5 * scale),
+          0,
+          Math.PI * 2,
+        );
         ctx.fill();
       });
 
       const nodeAlpha = Math.min(1, revealProgress * 3);
       localNodes.forEach(node => {
-        const color = TYPE_COLORS_HEX[node.type] || '#888';
+        const point = toScreen(node.x!, node.y!);
+        const color = resolveTypeColorHex(node.type);
         const r = parseInt(color.slice(1, 3), 16);
         const g = parseInt(color.slice(3, 5), 16);
         const b = parseInt(color.slice(5, 7), 16);
         ctx.fillStyle = `rgba(${r},${g},${b},${nodeAlpha})`;
         ctx.beginPath();
-        ctx.arc(node.x!, node.y!, 4, 0, Math.PI * 2);
+        ctx.arc(point.x, point.y, Math.max(2, Math.min(6, 4 * scale)), 0, Math.PI * 2);
         ctx.fill();
       });
     }
 
     simulate();
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
-  }, [nodes, links]);
+  }, [nodes, links, viewport.width, viewport.height]);
+
+  function screenToWorld(screenX: number, screenY: number) {
+    const { scale, offsetX, offsetY } = viewRef.current;
+    return {
+      x: (screenX - offsetX) / scale,
+      y: (screenY - offsetY) / scale,
+    };
+  }
 
   function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
-    const clicked = nodes.find(n => Math.sqrt((n.x! - x) ** 2 + (n.y! - y) ** 2) < 10);
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+    const world = screenToWorld(screenX, screenY);
+    const hitRadius = 10 / Math.max(viewRef.current.scale, 0.8);
+    const clicked = nodes.find((n) => Math.sqrt((n.x! - world.x) ** 2 + (n.y! - world.y) ** 2) < hitRadius);
     setSelectedNode(clicked || null);
   }
+
+  function handleWheel(e: React.WheelEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+    const beforeZoom = screenToWorld(screenX, screenY);
+
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    const nextScale = clampScale(viewRef.current.scale * factor);
+    viewRef.current.scale = nextScale;
+    viewRef.current.offsetX = screenX - beforeZoom.x * nextScale;
+    viewRef.current.offsetY = screenY - beforeZoom.y * nextScale;
+  }
+
+  function handleTouchStart(e: React.TouchEvent<HTMLCanvasElement>) {
+    if (e.touches.length === 1) {
+      const touch = e.touches[0];
+      touchStateRef.current = {
+        mode: 'pan',
+        startDistance: 0,
+        startScale: viewRef.current.scale,
+        lastX: touch.clientX,
+        lastY: touch.clientY,
+      };
+      return;
+    }
+
+    if (e.touches.length === 2) {
+      touchStateRef.current = {
+        mode: 'pinch',
+        startDistance: distance(e.touches[0], e.touches[1]),
+        startScale: viewRef.current.scale,
+        lastX: 0,
+        lastY: 0,
+      };
+    }
+  }
+
+  function handleTouchMove(e: React.TouchEvent<HTMLCanvasElement>) {
+    if (e.touches.length === 0) return;
+    e.preventDefault();
+
+    if (touchStateRef.current.mode === 'pan' && e.touches.length === 1) {
+      const touch = e.touches[0];
+      const dx = touch.clientX - touchStateRef.current.lastX;
+      const dy = touch.clientY - touchStateRef.current.lastY;
+      viewRef.current.offsetX += dx;
+      viewRef.current.offsetY += dy;
+      touchStateRef.current.lastX = touch.clientX;
+      touchStateRef.current.lastY = touch.clientY;
+      return;
+    }
+
+    if (touchStateRef.current.mode === 'pinch' && e.touches.length === 2) {
+      const currentDistance = distance(e.touches[0], e.touches[1]);
+      const ratio = currentDistance / Math.max(1, touchStateRef.current.startDistance);
+      viewRef.current.scale = clampScale(touchStateRef.current.startScale * ratio);
+    }
+  }
+
+  function handleTouchEnd(e: React.TouchEvent<HTMLCanvasElement>) {
+    if (e.touches.length === 1) {
+      const touch = e.touches[0];
+      touchStateRef.current = {
+        mode: 'pan',
+        startDistance: 0,
+        startScale: viewRef.current.scale,
+        lastX: touch.clientX,
+        lastY: touch.clientY,
+      };
+      return;
+    }
+    touchStateRef.current.mode = 'none';
+  }
+
+  function resetViewTransform() {
+    viewRef.current = { scale: 1, offsetX: 0, offsetY: 0 };
+  }
+
+  const typeCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    allNodes.forEach((node) => {
+      counts[node.type] = (counts[node.type] || 0) + 1;
+    });
+    return counts;
+  }, [allNodes]);
 
   return (
     <>
       <div className={styles.legend}>
-        <span className={styles.legendItem}><span className={styles.dot} style={{ background: TYPE_COLORS_HEX.principle }}></span>Principle</span>
-        <span className={styles.legendItem}><span className={styles.dot} style={{ background: TYPE_COLORS_HEX.learning }}></span>Learning</span>
-        <span className={styles.legendItem}><span className={styles.dot} style={{ background: TYPE_COLORS_HEX.retro }}></span>Retro</span>
+        {availableTypes.map((type) => (
+          <span key={type} className={styles.legendItem}>
+            <span className={styles.dot} style={{ background: resolveTypeColorHex(type) }}></span>
+            {typeToLabel(type)} ({typeCounts[type] || 0})
+          </span>
+        ))}
+        <button type="button" onClick={resetViewTransform} className={styles.smallAction}>
+          Reset View
+        </button>
         {allNodes.length > DEFAULT_NODE_LIMIT && (
-          <button onClick={toggleFullGraph} style={{
-            marginLeft: 'auto', background: showFull ? 'rgba(239, 68, 68, 0.2)' : 'rgba(74, 222, 128, 0.2)',
-            border: `1px solid ${showFull ? '#ef4444' : '#4ade80'}`, borderRadius: '4px',
-            color: showFull ? '#ef4444' : '#4ade80', padding: '2px 8px', fontSize: '11px', cursor: 'pointer',
-          }}>
-            {showFull ? '⚡ Trim' : `📊 All ${allNodes.length}`}
-          </button>
+          <button type="button" onClick={toggleFullGraph} className={styles.smallAction}>{showFull ? 'Trim' : `All ${allNodes.length}`}</button>
         )}
       </div>
-      <div className={styles.canvasWrapper}>
-        <canvas ref={canvasRef} width={800} height={600} onClick={handleCanvasClick} className={styles.canvas} />
+      <div className={styles.canvasWrapper} ref={wrapperRef}>
+        <canvas
+          ref={canvasRef}
+          width={viewport.width}
+          height={viewport.height}
+          onClick={handleCanvasClick}
+          onWheel={handleWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          className={styles.canvas}
+        />
       </div>
       {selectedNode && (
         <div className={styles.nodeInfo}>
@@ -448,7 +695,19 @@ function createLightningPath(start: THREE.Vector3, end: THREE.Vector3, segments 
 }
 
 // 3D Canvas Component
-function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
+function Canvas3D({
+  nodes,
+  links,
+  availableTypes,
+  isMobile,
+  onFatalError,
+}: {
+  nodes: Node[];
+  links: Link[];
+  availableTypes: string[];
+  isMobile: boolean;
+  onFatalError?: (message: string) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredNode, setHoveredNode] = useState<Node | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -462,7 +721,7 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [showFilePanel, setShowFilePanel] = useState(false);
-  const [typeFilter, setTypeFilter] = useState<Record<string, boolean>>({ principle: true, learning: true, retro: true });
+  const [typeFilter, setTypeFilter] = useState<Record<string, boolean>>({});
 
   const [camDistance, setCamDistance] = useState(15);
   const [nodeSize, setNodeSize] = useState(0.08);
@@ -595,15 +854,27 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
   }, [handMode, gesture]);
 
   const toggleHandMode = useCallback(() => {
-    if (handMode) { stopTracking(); setHandMode(false); } else { setHandMode(true); }
-  }, [handMode, stopTracking]);
+    if (isMobile) return;
+    if (handMode) {
+      stopTracking();
+      setHandMode(false);
+    } else {
+      setHandMode(true);
+    }
+  }, [handMode, isMobile, stopTracking]);
 
   useEffect(() => {
+    if (isMobile) return;
     if (handMode && handReady && !handTracking) startTracking();
-  }, [handMode, handReady, handTracking, startTracking]);
+  }, [handMode, handReady, handTracking, isMobile, startTracking]);
+
+  useEffect(() => {
+    if (!handMode || !handError) return;
+    onFatalError?.('MediaPipe hand tracking failed to initialize');
+  }, [handError, handMode, onFatalError]);
 
   const hudRef = useRef({ camDistance: 15, nodeSize: 0.08, rotationSpeed: 0.02, linkOpacity: 0.15, breathingIntensity: 0.05, showAllLinks: false, sphereMode: false });
-  const typeFilterRef = useRef<Record<string, boolean>>({ principle: true, learning: true, retro: true });
+  const typeFilterRef = useRef<Record<string, boolean>>({});
   const activeNodeRef = useRef<string | null>(null);
   const adjacencyRef = useRef<Map<string, Set<string>>>(new Map());
   const camXRef = useRef({ x: 0, v: 0 });
@@ -635,6 +906,16 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
     } catch { setFileContent('Error loading file'); }
     finally { setFileLoading(false); }
   };
+
+  useEffect(() => {
+    setTypeFilter((prev) => {
+      const next: Record<string, boolean> = {};
+      availableTypes.forEach((type) => {
+        next[type] = prev[type] ?? true;
+      });
+      return next;
+    });
+  }, [availableTypes]);
 
   useEffect(() => { hudRef.current = { camDistance, nodeSize, rotationSpeed, linkOpacity, breathingIntensity, showAllLinks, sphereMode }; }, [camDistance, nodeSize, rotationSpeed, linkOpacity, breathingIntensity, showAllLinks, sphereMode]);
   useEffect(() => { lightningEnabledRef.current = lightningEnabled; }, [lightningEnabled]);
@@ -673,7 +954,13 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
     const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
     cameraRef.current = camera;
     camera.position.z = 15;
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+    } catch (error) {
+      onFatalError?.('WebGL is unavailable in this browser/device');
+      return;
+    }
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     container.appendChild(renderer.domElement);
@@ -709,7 +996,7 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
     nodes.forEach((node, i) => {
       nodeMap.set(node.id, i);
       // Color by type to match legend - bright and vibrant
-      const color = TYPE_COLORS_NUM[node.type] || 0x888888;
+      const color = resolveTypeColorNum(node.type);
       const material = new THREE.MeshStandardMaterial({ color, metalness: 0.2, roughness: 0.3, emissive: color, emissiveIntensity: 0.5 });
       const mesh = new THREE.Mesh(geometry, material);
       const cluster = node.cluster || 0;
@@ -757,7 +1044,7 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
       const lightningGeom = new THREE.BufferGeometry().setFromPoints(points);
       // Color based on connected node type
       const sourceNode = meshes[linkData.sourceIdx]?.userData?.node as Node | undefined;
-      const lightningColor = sourceNode ? TYPE_COLORS_NUM[sourceNode.type] || 0x88ccff : 0x88ccff;
+      const lightningColor = sourceNode ? resolveTypeColorNum(sourceNode.type) : 0x88ccff;
       const lightningMat = new THREE.LineBasicMaterial({
         color: lightningColor,
         opacity: 0.5,
@@ -1104,12 +1391,16 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
   return (
     <>
       <div className={styles.legend}>
-        {[{ key: 'principle', label: 'Principle', color: '#60a5fa' }, { key: 'learning', label: 'Learning', color: '#fbbf24' }, { key: 'retro', label: 'Retro', color: '#4ade80' }].map(({ key, label, color }) => {
+        {availableTypes.map((key) => {
           const count = counts[key] || 0;
           return (
-            <button key={key} onClick={() => setTypeFilter(prev => ({ ...prev, [key]: !prev[key] }))} style={{ opacity: count === 0 ? 0.3 : (typeFilter[key] ? 1 : 0.4), cursor: count > 0 ? 'pointer' : 'default', background: 'transparent', border: 'none', padding: '4px 8px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '6px', color: '#e0e0e0', fontSize: '13px' }}>
-              <span className={styles.dot} style={{ background: color }}></span>
-              {label} ({count})
+            <button
+              key={key}
+              onClick={() => setTypeFilter((prev) => ({ ...prev, [key]: !prev[key] }))}
+              style={{ opacity: count === 0 ? 0.3 : (typeFilter[key] ? 1 : 0.4), cursor: count > 0 ? 'pointer' : 'default', background: 'transparent', border: 'none', padding: '4px 8px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '6px', color: '#e0e0e0', fontSize: '13px' }}
+            >
+              <span className={styles.dot} style={{ background: resolveTypeColorHex(key) }}></span>
+              {typeToLabel(key)} ({count})
             </button>
           );
         })}
@@ -1118,7 +1409,15 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
       <div className={styles.controls}>
         <span className={styles.hint}>Drag to rotate • Scroll to zoom • Click to select</span>
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={toggleHandMode} className={styles.hudToggle} style={{ background: handTracking ? '#4ade80' : undefined, color: handTracking ? '#000' : undefined }}>{handTracking ? '✋ ON' : '✋'}</button>
+          <button
+            onClick={toggleHandMode}
+            className={styles.hudToggle}
+            style={{ background: handTracking ? '#4ade80' : undefined, color: handTracking ? '#000' : undefined }}
+            disabled={isMobile}
+            title={isMobile ? 'Hand tracking is disabled on mobile devices' : 'Toggle hand tracking'}
+          >
+            {handTracking ? 'Hand ON' : 'Hand'}
+          </button>
           <button onClick={resetCamera} className={styles.hudToggle}>Reset</button>
           <button onClick={toggleHud} className={styles.hudToggle}>{showHud ? 'Hide' : 'Show'}</button>
         </div>
@@ -1175,7 +1474,7 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
               }}
             >
               <span style={{
-                background: TYPE_COLORS_HEX[hoveredNode?.type || ''] || '#888',
+                background: resolveTypeColorHex(hoveredNode?.type || ''),
                 color: '#fff',
                 padding: '2px 8px',
                 borderRadius: '4px',
@@ -1210,7 +1509,7 @@ function Canvas3D({ nodes, links }: { nodes: Node[]; links: Link[] }) {
           }}
         >
           <span style={{
-            background: TYPE_COLORS_HEX[(selectedNode || hoveredNode)?.type || ''] || '#888',
+            background: resolveTypeColorHex((selectedNode || hoveredNode)?.type || ''),
             color: '#fff',
             padding: '2px 8px',
             borderRadius: '4px',

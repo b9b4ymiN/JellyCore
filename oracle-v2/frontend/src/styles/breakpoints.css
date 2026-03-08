@@ -1,0 +1,23 @@
+﻿:root {
+  --bp-mobile: 480px;
+  --bp-tablet: 768px;
+  --bp-desktop: 1024px;
+}
+
+.hide-mobile {
+  display: initial;
+}
+
+.hide-desktop {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .hide-mobile {
+    display: none !important;
+  }
+
+  .hide-desktop {
+    display: initial !important;
+  }
+}

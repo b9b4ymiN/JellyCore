@@ -22,10 +22,32 @@
   font-size: 14px;
 }
 
+.warning {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(244, 114, 182, 0.35);
+  background: rgba(244, 114, 182, 0.12);
+  color: #fbcfe8;
+  font-size: 13px;
+}
+
+.hintRow {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .legend {
   display: flex;
   gap: 24px;
   margin-bottom: 24px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .legendItem {
@@ -52,7 +74,19 @@
 .canvas {
   display: block;
   width: 100%;
+  height: auto;
   cursor: crosshair;
+  touch-action: none;
+}
+
+.smallAction {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 4px 8px;
 }
 
 .nodeInfo {
@@ -211,4 +245,65 @@
   text-align: center;
   z-index: 100;
   backdrop-filter: blur(10px);
+}
+
+@media (max-width: 768px) {
+  .container {
+    padding: 12px;
+  }
+
+  .header {
+    align-items: flex-start;
+    gap: 10px;
+    flex-direction: column;
+  }
+
+  .controls {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .canvas3d {
+    min-height: 380px;
+    height: 65vh;
+  }
+
+  .hud {
+    min-width: 170px;
+    max-width: 80vw;
+    right: 8px;
+    top: 8px;
+  }
+}
+
+@media (max-width: 430px) {
+  .container {
+    padding: 10px;
+  }
+
+  .title {
+    font-size: 22px;
+  }
+
+  .stats {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .legend {
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  .legendItem {
+    font-size: 12px;
+  }
+
+  .canvas3d {
+    min-height: 340px;
+    height: 58dvh;
+  }
 }

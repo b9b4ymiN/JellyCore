@@ -935,60 +935,71 @@ export function handleStats(dbPath: string) {
 
 /**
  * Get knowledge graph data
- * Limited to principles + sample learnings to avoid O(n²) explosion
+ * Balanced sampling across all document types to avoid O(n²) explosion
  */
 export function handleGraph() {
-  // Only get principles (always) + sample learnings (limited)
-  // This keeps graph manageable: ~163 principles + ~100 learnings = ~263 nodes max
-
-  // Get all principles using Drizzle
-  const principles = db.select({
-    id: oracleDocuments.id,
+  const maxNodes = Number.parseInt(process.env.GRAPH_MAX_NODES || '320', 10);
+  const countsByType = db.select({
     type: oracleDocuments.type,
-    sourceFile: oracleDocuments.sourceFile,
-    concepts: oracleDocuments.concepts,
-    project: oracleDocuments.project
+    count: sql<number>`count(*)`
   })
     .from(oracleDocuments)
-    .where(eq(oracleDocuments.type, 'principle'))
+    .groupBy(oracleDocuments.type)
     .all();
 
-  // Get random learnings using Drizzle
-  const learnings = db.select({
-    id: oracleDocuments.id,
-    type: oracleDocuments.type,
-    sourceFile: oracleDocuments.sourceFile,
-    concepts: oracleDocuments.concepts,
-    project: oracleDocuments.project
-  })
-    .from(oracleDocuments)
-    .where(eq(oracleDocuments.type, 'learning'))
-    .orderBy(sql`RANDOM()`)
-    .limit(100)
-    .all();
+  const docTypes = countsByType
+    .map((row) => row.type)
+    .filter((type): type is string => typeof type === 'string' && type.length > 0);
 
-  const docs = [...principles, ...learnings];
+  if (docTypes.length === 0) {
+    return { nodes: [], links: [] };
+  }
+
+  const perTypeLimit = Math.max(20, Math.floor(maxNodes / docTypes.length));
+
+  const docs = docTypes.flatMap((docType) => (
+    db.select({
+      id: oracleDocuments.id,
+      type: oracleDocuments.type,
+      sourceFile: oracleDocuments.sourceFile,
+      concepts: oracleDocuments.concepts,
+      project: oracleDocuments.project
+    })
+      .from(oracleDocuments)
+      .where(eq(oracleDocuments.type, docType))
+      .orderBy(sql`RANDOM()`)
+      .limit(perTypeLimit)
+      .all()
+  ));
 
   // Build nodes
-  const nodes = docs.map(doc => ({
-    id: doc.id,
-    type: doc.type,
-    source_file: doc.sourceFile,
-    project: doc.project,  // ghq-style path for cross-repo file access
-    concepts: JSON.parse(doc.concepts || '[]')
-  }));
+  const nodes = docs.map((doc) => {
+    let concepts: string[] = [];
+    try {
+      const parsed = JSON.parse(doc.concepts || '[]');
+      if (Array.isArray(parsed)) {
+        concepts = parsed.filter((item): item is string => typeof item === 'string');
+      }
+    } catch {
+      concepts = [];
+    }
+
+    return {
+      id: doc.id,
+      type: doc.type,
+      source_file: doc.sourceFile,
+      project: doc.project,  // ghq-style path for cross-repo file access
+      concepts
+    };
+  });
 
   // Build links based on shared concepts
   const links: { source: string; target: string; weight: number }[] = [];
-  const processed = new Set<string>();
 
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const nodeA = nodes[i];
       const nodeB = nodes[j];
-      const key = `${nodeA.id}-${nodeB.id}`;
-
-      if (processed.has(key)) continue;
 
       // Count shared concepts
       const conceptsA = new Set(nodeA.concepts);
@@ -1000,7 +1011,6 @@ export function handleGraph() {
           target: nodeB.id,
           weight: sharedCount
         });
-        processed.add(key);
       }
     }
   }
@@ -1312,4 +1322,3 @@ function computeTextSimilarity(a: string, b: string): number {
   const union = wordsA.size + wordsB.size - intersection;
   return union > 0 ? intersection / union : 0;
 }
-

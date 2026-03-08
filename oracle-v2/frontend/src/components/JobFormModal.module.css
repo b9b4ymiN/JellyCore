@@ -100,3 +100,26 @@
   padding: 8px 10px;
   font-size: 13px;
 }
+
+@media (max-width: 480px) {
+  .overlay {
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .modal {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    padding: 16px 12px;
+    overflow-y: auto;
+  }
+
+  .actions {
+    position: sticky;
+    bottom: 0;
+    background: #121427;
+    padding-top: 10px;
+  }
+}

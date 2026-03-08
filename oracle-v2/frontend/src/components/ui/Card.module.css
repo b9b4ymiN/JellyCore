@@ -1,0 +1,42 @@
+﻿.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.compact {
+  padding: var(--space-3);
+  gap: var(--space-2);
+}
+
+.hoverable {
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.hoverable:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-md);
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.title {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.subtitle {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation + Python
 # Multi-stage build: TypeScript compiled at build time for fast cold start
@@ -11,7 +12,7 @@ WORKDIR /app
 COPY agent-runner/package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN --mount=type=cache,target=/root/.npm npm install
 
 # Copy source code
 COPY agent-runner/ ./
@@ -28,7 +29,9 @@ LABEL org.opencontainers.image.title="nanoclaw-agent" \
       org.opencontainers.image.revision=$VCS_REF
 
 # Install system dependencies for Chromium + Python
-RUN apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
     fonts-noto-color-emoji \
@@ -53,13 +56,43 @@ RUN apt-get update -o Acquire::Retries=3 && apt-get install -y --no-install-reco
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Optional runtime helper for environments that want browser install on-demand.
+RUN cat > /usr/local/bin/lazy-install-chromium <<'EOF' \
+    && chmod +x /usr/local/bin/lazy-install-chromium
+#!/bin/bash
+set -e
+if command -v chromium >/dev/null 2>&1; then
+  exit 0
+fi
+apt-get update -o Acquire::Retries=3
+apt-get install -y --no-install-recommends \
+  chromium \
+  fonts-liberation \
+  fonts-noto-color-emoji \
+  libgbm1 \
+  libnss3 \
+  libatk-bridge2.0-0 \
+  libgtk-3-0 \
+  libx11-xcb1 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxrandr2 \
+  libasound2 \
+  libpangocairo-1.0-0 \
+  libcups2 \
+  libdrm2 \
+  libxshmfence1
+rm -rf /var/lib/apt/lists/*
+EOF
+
 # Set Chromium path for agent-browser + Playwright
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Install common Python packages system-wide (web scraping & HTTP)
 # Playwright reuses the system Chromium — no extra browser download
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-cache-dir --break-system-packages \
     requests \
     beautifulsoup4 \
     lxml \
@@ -71,7 +104,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=0
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # Install agent-browser, claude-code, codex CLI, and PM2 globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code @openai/codex pm2
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g agent-browser @anthropic-ai/claude-code @openai/codex pm2
 
 # External MCP servers — installed from config/mcps.json
 # node_modules are intentionally kept: oura-mcp uses standard tsc output (not bundled)
@@ -110,19 +144,20 @@ src = "\n".join(lines) + "\n"
 p.write_text(src, encoding='utf-8')
 PY
 
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-cache-dir --break-system-packages \
     "mcp[cli]>=1.6.0" \
     "yfinance>=0.2.62" \
     "pandas>=2.0.0" \
     && rm -rf /opt/yahoo-finance-mcp/.git
 
 # NotebookLM MCP (Node)
-RUN npm install -g notebooklm-mcp@latest
+RUN --mount=type=cache,target=/root/.npm npm install -g notebooklm-mcp@latest
 
 # Google Docs/Sheets/Drive MCP (Node)
 # Keep token persistent per group by pinning XDG_CONFIG_HOME into /home/node/.claude/config
 # (/home/node/.claude is a per-group persistent mount managed by nanoclaw)
-RUN npm install -g @a-bonus/google-docs-mcp@latest \
+RUN --mount=type=cache,target=/root/.npm npm install -g @a-bonus/google-docs-mcp@latest \
     && mkdir -p /opt/google-docs-mcp \
     && cat > /opt/google-docs-mcp/start.sh <<'EOF' \
     && chmod +x /opt/google-docs-mcp/start.sh

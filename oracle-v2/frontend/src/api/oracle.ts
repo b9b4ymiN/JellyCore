@@ -4,11 +4,12 @@ const API_BASE = '/api';
 
 export interface Document {
   id: string;
-  type: 'principle' | 'learning' | 'retro';
+  type: 'principle' | 'pattern' | 'learning' | 'retro';
   content: string;
   source_file: string;
   concepts: string[];
   project?: string;                       // ghq-style path (github.com/owner/repo)
+  layer?: 'semantic' | 'procedural' | 'episodic' | 'user_model';
   source?: 'fts' | 'vector' | 'hybrid';  // search source type
   score?: number;                         // relevance score 0-1
   created_at?: string;
@@ -29,18 +30,35 @@ export interface ConsultResult {
 
 export interface Stats {
   total: number;
-  by_type?: {
-    learning: number;
-    principle: number;
-    retro: number;
-  };
+  by_type?: Record<string, number>;
   last_indexed?: string;
   is_stale?: boolean;
 }
 
+export interface SearchOptions {
+  type?: string;
+  limit?: number;
+  offset?: number;
+  mode?: 'hybrid' | 'fts' | 'vector';
+  project?: string;
+  layer?: Array<'semantic' | 'procedural' | 'episodic' | 'user_model'>;
+  cwd?: string;
+}
+
 // Search the knowledge base
-export async function search(query: string, type: string = 'all', limit: number = 20): Promise<SearchResult> {
-  const params = new URLSearchParams({ q: query, type, limit: String(limit) });
+export async function search(query: string, options: SearchOptions = {}): Promise<SearchResult> {
+  const params = new URLSearchParams({
+    q: query,
+    type: options.type || 'all',
+    limit: String(options.limit ?? 20),
+    offset: String(options.offset ?? 0),
+    mode: options.mode || 'hybrid',
+  });
+  if (options.project) params.set('project', options.project);
+  if (options.cwd) params.set('cwd', options.cwd);
+  if (options.layer && options.layer.length > 0) {
+    params.set('layer', options.layer.join(','));
+  }
   const res = await fetch(`${API_BASE}/search?${params}`);
   return res.json();
 }
