@@ -253,8 +253,9 @@ export function registerSecurityMiddleware(
     if (c.req.method === 'OPTIONS') {
       if (!allowed) return c.body(null, 403);
       c.header('Access-Control-Allow-Origin', origin!);
-      c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-Id');
+      c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-Id, mcp-session-id');
       c.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+      c.header('Access-Control-Expose-Headers', 'mcp-session-id');
       c.header('Access-Control-Max-Age', '600');
       c.header('Vary', 'Origin');
       return c.body(null, 204);
@@ -263,6 +264,7 @@ export function registerSecurityMiddleware(
     await next();
     if (allowed) {
       c.header('Access-Control-Allow-Origin', origin!);
+      c.header('Access-Control-Expose-Headers', 'mcp-session-id');
       c.header('Vary', 'Origin');
     }
   });

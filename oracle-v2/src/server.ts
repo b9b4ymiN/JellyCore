@@ -39,6 +39,7 @@ import { registerChatProxyRoutes } from './server/routes/chat-proxy.js';
 import { registerMemoryRoutes } from './server/routes/memory-routes.js';
 import { registerSearchRoutes } from './server/routes/search.js';
 import { registerAdminRoutes } from './server/routes/admin.js';
+import { registerMcpSseRoutes } from './server/routes/mcp-sse.js';
 
 const FRONTEND_DIST = path.join(import.meta.dirname || __dirname, '..', 'frontend', 'dist');
 
@@ -166,6 +167,19 @@ registerHeartbeatProxyRoutes(app, {
 registerChatProxyRoutes(app, {
   adminAuth,
   nanoclawInternalUrl: NANOCLAW_INTERNAL_URL,
+});
+
+// Register MCP SSE routes (for remote MCP access)
+registerMcpSseRoutes(app, {
+  authMiddleware: adminAuth,
+  path: process.env.ORACLE_MCP_PATH || '/mcp',
+  enabled: process.env.ORACLE_MCP_ENABLED !== 'false',
+});
+
+// Handle .well-known requests (OAuth discovery, etc.) - return 404 for unknown paths
+// This prevents static file server from returning HTML for these requests
+app.all('/.well-known/*', (c) => {
+  return c.json({ error: 'Not found' }, 404);
 });
 
 app.use('/*', serveStatic({ root: FRONTEND_DIST }));
