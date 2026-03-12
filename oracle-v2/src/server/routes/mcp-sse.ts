@@ -253,11 +253,8 @@ export function registerMcpSseRoutes(
       // Return session ID in response header
       c.header('mcp-session-id', sessionId);
 
-      return c.json({
-        jsonrpc: '2.0',
-        result: { status: 'accepted' },
-        id: (message as any).id || null,
-      }, 202);
+      // Official MCP SDK returns plain text "Accepted" with 202 status
+      return c.text("Accepted", 202);
 
     } catch (error) {
       console.error('[MCP SSE] POST error:', error);

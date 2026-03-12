@@ -93,7 +93,8 @@ export class HonoSSETransport implements Transport {
 
     // Send endpoint event to client with URL path for POST requests
     // MCP SDK expects: data = relative URL path (e.g., "/mcp?sessionId=xxx")
-    const postEndpoint = `${basePath}?sessionId=${this._sessionId}`;
+    // Use encodeURI to match official MCP SDK behavior
+    const postEndpoint = encodeURI(`${basePath}?sessionId=${this._sessionId}`);
     stream.writeSSE({
       event: 'endpoint',
       data: postEndpoint,

@@ -39,8 +39,10 @@ services:
     container_name: jellycore-oracle
     restart: unless-stopped
     mem_limit: 1g  # Need 1g+ for ONNX embedding model (all-MiniLM-L6-v2)
+    # Oracle port exposed on all interfaces for MCP SSE access
+    # Use ORACLE_MCP_BIND_IP=127.0.0.1 to restrict to localhost only
     ports:
-      - "127.0.0.1:${ORACLE_HOST_PORT:-47778}:47778"
+      - "${ORACLE_MCP_BIND_IP:-0.0.0.0}:${ORACLE_HOST_PORT:-47778}:47778"
     volumes:
       - oracle-data:/data/oracle
       # Mount full ψ/memory so indexer + handleLearn can access ψ/memory/learnings, resonance, retrospectives
@@ -59,6 +61,8 @@ services:
       - ORACLE_RATE_LIMIT_WINDOW_MS=${ORACLE_RATE_LIMIT_WINDOW_MS:-60000}
       - ORACLE_RATE_LIMIT_READ_LIMIT=${ORACLE_RATE_LIMIT_READ_LIMIT:-60}
       - ORACLE_RATE_LIMIT_WRITE_LIMIT=${ORACLE_RATE_LIMIT_WRITE_LIMIT:-30}
+      - ORACLE_MCP_ENABLED=${ORACLE_MCP_ENABLED:-true}
+      - ORACLE_MCP_PATH=${ORACLE_MCP_PATH:-/mcp}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
       - NODE_ENV=production
     networks:
