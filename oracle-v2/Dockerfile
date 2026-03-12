@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 
 WORKDIR /app
 
-# Copy package files
-COPY package.json bun.lock ./
+# Copy package files (bun.lock* matches bun.lock text format or bun.lockb binary format)
+COPY package.json bun.lock* ./
 
 # Install dependencies (including native compilation)
 RUN bun install --frozen-lockfile
