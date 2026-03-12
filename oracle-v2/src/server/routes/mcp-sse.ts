@@ -1,62 +1,50 @@
 /**
- * Oracle MCP SSE Routes for Hono.js
+ * Oracle MCP Routes - Streamable HTTP Transport
  *
- * Provides HTTP endpoints for MCP over SSE:
- * - GET /mcp: SSE stream for server-to-client notifications
- * - POST /mcp: Client-to-server messages (JSON-RPC)
- * - DELETE /mcp: Session termination
+ * Implements MCP Streamable HTTP transport (2025-03-26 spec) using
+ * @modelcontextprotocol/sdk v1.x WebStandardStreamableHTTPServerTransport.
+ *
+ * Compatible with: Claude Code, Claude Desktop, VS Code MCP, Cursor.
+ *
+ * Endpoints:
+ *   POST   /mcp       - Initialize new session or send messages to existing session
+ *   GET    /mcp       - Server-initiated notification stream (optional)
+ *   DELETE /mcp       - Session close
+ *   OPTIONS /mcp      - CORS preflight
+ *   POST   /mcp/sync  - Stateless sync (curl / simple HTTP clients, no SSE)
  */
 
-import type { Hono, Context } from 'hono';
-import { streamSSE } from 'hono/streaming';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { JSONRPCMessageSchema } from '@modelcontextprotocol/sdk/types.js';
-import type { SSEStreamingApi } from 'hono/streaming';
+import type { Context, Hono } from 'hono';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { randomUUID } from 'crypto';
 
 import {
-  HonoSSETransport,
-  McpSession,
+  type McpSession,
   mcpSessions,
-  createSession,
-  deleteSession,
-  getOrCreateSession,
+  getMcpSession,
+  deleteMcpSession,
   cleanupInactiveSessions,
-  getSessionCount,
   MCP_SSE_CONFIG,
 } from '../../mcp-sse.js';
-import { createMcpServerWithHandlers } from './mcp-server-factory.js';
+import { createMcpServerWithHandlers, getToolHandlers, getToolDefinitions } from './mcp-server-factory.js';
 
-type MiddlewareHandler = (c: Context, next: () => Promise<void>) => Promise<Response | void>;
+type MiddlewareHandler = (c: Context, next: () => Promise<void>) => Promise<unknown>;
 
 interface McpSseRoutesOptions {
-  /**
-   * Authentication middleware (e.g., adminAuth from http-middleware)
-   */
   authMiddleware?: MiddlewareHandler;
-
-  /**
-   * MCP endpoint path (default: /mcp)
-   */
   path?: string;
-
-  /**
-   * Enable MCP SSE (default: true from env)
-   */
   enabled?: boolean;
-
-  /**
-   * Session timeout in milliseconds
-   */
   sessionTimeoutMs?: number;
 }
 
-/**
- * Register MCP SSE routes on Hono app
- */
-export function registerMcpSseRoutes(
-  app: Hono,
-  options: McpSseRoutesOptions = {}
-): void {
+async function checkAuth(c: Context, authMiddleware: MiddlewareHandler | undefined): Promise<boolean> {
+  if (!authMiddleware) return true;
+  let passed = false;
+  await authMiddleware(c, async () => { passed = true; });
+  return passed;
+}
+
+export function registerMcpSseRoutes(app: Hono, options: McpSseRoutesOptions = {}): void {
   const {
     authMiddleware,
     path = MCP_SSE_CONFIG.path,
@@ -64,276 +52,159 @@ export function registerMcpSseRoutes(
     sessionTimeoutMs = MCP_SSE_CONFIG.sessionTimeoutMs,
   } = options;
 
-  // Skip if disabled
   if (!enabled) {
-    console.log('[MCP SSE] Disabled via configuration');
+    console.log('[MCP] Disabled via configuration');
     return;
   }
 
-  console.log(`[MCP SSE] Registering routes at ${path}`);
+  console.log(`[MCP] Streamable HTTP registered at ${path}`);
 
-  // Session cleanup interval (every 30 minutes)
+  // Periodic cleanup of inactive sessions
   const cleanupInterval = setInterval(() => {
-    const cleaned = cleanupInactiveSessions(sessionTimeoutMs);
-    if (cleaned > 0) {
-      console.log(`[MCP SSE] Cleaned up ${cleaned} inactive sessions`);
-    }
+    const n = cleanupInactiveSessions(sessionTimeoutMs);
+    if (n > 0) console.log(`[MCP] Cleaned ${n} inactive sessions`);
   }, 30 * 60 * 1000);
-
-  // Graceful shutdown
-  process.on('SIGTERM', () => {
-    clearInterval(cleanupInterval);
-  });
-
-  /**
-   * GET /mcp - SSE stream for server-to-client notifications
-   */
-  app.get(path, async (c) => {
-    // Apply auth if middleware provided
-    if (authMiddleware) {
-      let authPassed = false;
-      await authMiddleware(c, async () => {
-        authPassed = true;
-      });
-      if (!authPassed) {
-        return c.json({ error: 'Unauthorized' }, 401);
-      }
-    }
-
-    const sessionId = c.req.query('sessionId');
-
-    return streamSSE(c, async (stream) => {
-      try {
-        // Check for existing session
-        let session: McpSession | undefined;
-        if (sessionId) {
-          session = getOrCreateSession(sessionId);
-        }
-
-        // Create new session if not exists
-        if (!session) {
-          const transport = new HonoSSETransport({
-            sessionTimeoutMs,
-            onsessioninitialized: (id) => {
-              console.log(`[MCP SSE] Session initialized: ${id}`);
-            },
-            onsessionclosed: (id) => {
-              console.log(`[MCP SSE] Session closed: ${id}`);
-            },
-          });
-
-          // Create MCP server instance for this session
-          const server = createMcpServerWithHandlers();
-
-          // Connect transport to server
-          await server.connect(transport);
-
-          // Create session
-          session = createSession(transport, server);
-        }
-
-        // Set SSE stream for transport with base path for POST endpoint
-        session.transport.setSSEStream(stream, path);
-
-        // Keep connection alive with periodic heartbeats
-        let heartbeatCount = 0;
-        const heartbeatInterval = setInterval(() => {
-          try {
-            stream.writeSSE({
-              event: 'heartbeat',
-              data: JSON.stringify({ count: heartbeatCount++ }),
-            });
-          } catch {
-            clearInterval(heartbeatInterval);
-          }
-        }, 30000); // 30 second heartbeat
-
-        // Wait indefinitely (connection will be closed by client or timeout)
-        await new Promise<void>((resolve) => {
-          // Resolve on a long timeout (session timeout)
-          const timeout = setTimeout(() => {
-            clearInterval(heartbeatInterval);
-            resolve();
-          }, sessionTimeoutMs);
-
-          // Also handle process termination
-          const onSigterm = () => {
-            clearTimeout(timeout);
-            clearInterval(heartbeatInterval);
-            resolve();
-          };
-          process.once('SIGTERM', onSigterm);
-        });
-
-      } catch (error) {
-        console.error('[MCP SSE] GET error:', error);
-        try {
-          await stream.writeSSE({
-            event: 'error',
-            data: JSON.stringify({
-              error: error instanceof Error ? error.message : 'Unknown error'
-            }),
-          });
-        } catch {
-          // Stream may already be closed
-        }
-      }
-    });
-  });
-
-  /**
-   * POST /mcp - Client-to-server messages
-   */
-  app.post(path, async (c) => {
-    // Apply auth if middleware provided
-    if (authMiddleware) {
-      let authPassed = false;
-      await authMiddleware(c, async () => {
-        authPassed = true;
-      });
-      if (!authPassed) {
-        return c.json({ error: 'Unauthorized' }, 401);
-      }
-    }
-
-    try {
-      // Get session ID from query or header
-      const sessionId = c.req.query('sessionId') ||
-        c.req.header('mcp-session-id');
-
-      if (!sessionId) {
-        return c.json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32600,
-            message: 'Missing sessionId. Include sessionId in query or mcp-session-id header.',
-          },
-          id: null,
-        }, 400);
-      }
-
-      // Get session
-      const session = getOrCreateSession(sessionId);
-      if (!session) {
-        return c.json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32001,
-            message: 'Session not found. Establish SSE connection first via GET /mcp',
-          },
-          id: null,
-        }, 404);
-      }
-
-      // Update last activity
-      session.lastActivityAt = new Date();
-
-      // Parse request body
-      const body = await c.req.json();
-
-      // Validate JSON-RPC message
-      const parseResult = JSONRPCMessageSchema.safeParse(body);
-      if (!parseResult.success) {
-        return c.json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32700,
-            message: 'Parse error',
-            data: parseResult.error.errors,
-          },
-          id: null,
-        }, 400);
-      }
-
-      const message = parseResult.data;
-
-      // Handle message via transport
-      await session.transport.handlePostMessage(message);
-
-      // Return session ID in response header
-      c.header('mcp-session-id', sessionId);
-
-      // Official MCP SDK returns plain text "Accepted" with 202 status
-      return c.text("Accepted", 202);
-
-    } catch (error) {
-      console.error('[MCP SSE] POST error:', error);
-      return c.json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: 'Internal error',
-          data: error instanceof Error ? error.message : 'Unknown error',
-        },
-        id: null,
-      }, 500);
-    }
-  });
-
-  /**
-   * DELETE /mcp - Session termination
-   */
-  app.delete(path, async (c) => {
-    // Apply auth if middleware provided
-    if (authMiddleware) {
-      let authPassed = false;
-      await authMiddleware(c, async () => {
-        authPassed = true;
-      });
-      if (!authPassed) {
-        return c.json({ error: 'Unauthorized' }, 401);
-      }
-    }
-
-    const sessionId = c.req.query('sessionId') ||
-      c.req.header('mcp-session-id');
-
-    if (!sessionId) {
-      return c.json({ error: 'Missing sessionId' }, 400);
-    }
-
-    const deleted = deleteSession(sessionId);
-
-    if (deleted) {
-      return c.json({ status: 'ok', message: 'Session terminated' });
-    } else {
-      return c.json({ error: 'Session not found' }, 404);
-    }
-  });
+  process.on('SIGTERM', () => clearInterval(cleanupInterval));
 
   /**
    * OPTIONS /mcp - CORS preflight
    */
   app.options(path, (c) => {
     c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id');
-    c.header('Access-Control-Expose-Headers', 'mcp-session-id');
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID');
+    c.header('Access-Control-Expose-Headers', 'Mcp-Session-Id');
     c.header('Access-Control-Max-Age', '600');
     return c.body(null, 204);
   });
 
   /**
-   * GET /mcp/status - Session status (for debugging/metrics)
+   * Primary MCP endpoint - Streamable HTTP transport
+   *
+   * POST without Mcp-Session-Id → create new session (must be initialize request)
+   * POST/GET/DELETE with Mcp-Session-Id → route to existing session transport
    */
-  app.get(`${path}/status`, async (c) => {
-    // Apply auth if middleware provided
-    if (authMiddleware) {
-      let authPassed = false;
-      await authMiddleware(c, async () => {
-        authPassed = true;
-      });
-      if (!authPassed) {
-        return c.json({ error: 'Unauthorized' }, 401);
-      }
+  app.on(['GET', 'POST', 'DELETE'], path, async (c) => {
+    if (!await checkAuth(c, authMiddleware)) {
+      return c.json({ error: 'Unauthorized' }, 401);
     }
 
-    return c.json({
-      enabled: true,
-      sessionCount: getSessionCount(),
-      config: {
-        path,
-        sessionTimeoutMs,
+    const sessionId = c.req.header('mcp-session-id');
+
+    // Route to existing session
+    if (sessionId) {
+      const session = getMcpSession(sessionId);
+      if (!session) {
+        // Session expired or not found — client must re-initialize
+        return c.json({ error: 'Session not found. Re-initialize via POST /mcp' }, 404);
+      }
+      return session.transport.handleRequest(c.req.raw);
+    }
+
+    // No session ID — only POST can create a new session
+    if (c.req.method !== 'POST') {
+      return c.json({ error: 'New MCP sessions must be initialized via POST' }, 405);
+    }
+
+    // Create new stateful transport + MCP server for this session
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: randomUUID,
+      onsessioninitialized: (sid) => {
+        mcpSessions.set(sid, {
+          sessionId: sid,
+          transport,
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+        } satisfies McpSession);
+        console.log(`[MCP] Session initialized: ${sid} (active: ${mcpSessions.size})`);
+      },
+      onsessionclosed: (sid) => {
+        deleteMcpSession(sid);
+        console.log(`[MCP] Session closed: ${sid} (active: ${mcpSessions.size})`);
       },
     });
+
+    const server = createMcpServerWithHandlers();
+    await server.connect(transport);
+
+    return transport.handleRequest(c.req.raw);
+  });
+
+  /**
+   * OPTIONS /mcp/sync - CORS preflight
+   */
+  app.options(`${path}/sync`, (c) => {
+    c.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    c.header('Access-Control-Max-Age', '600');
+    return c.body(null, 204);
+  });
+
+  /**
+   * POST /mcp/sync - Stateless synchronous endpoint
+   *
+   * For curl / simple HTTP clients that don't support SSE.
+   * Supports: tools/list, tools/call
+   * Returns JSON directly (no streaming).
+   */
+  app.post(`${path}/sync`, async (c) => {
+    if (!await checkAuth(c, authMiddleware)) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+
+    try {
+      const body = await c.req.json();
+      if (!body.jsonrpc || !body.method) {
+        return c.json({
+          jsonrpc: '2.0',
+          error: { code: -32600, message: 'Invalid Request: missing jsonrpc or method' },
+          id: body.id ?? null,
+        }, 400);
+      }
+
+      let result: unknown;
+
+      if (body.method === 'tools/list') {
+        result = { tools: getToolDefinitions() };
+      } else if (body.method === 'tools/call') {
+        const { name, arguments: args } = body.params || {};
+        if (!name) {
+          return c.json({
+            jsonrpc: '2.0',
+            error: { code: -32602, message: 'Invalid params: missing tool name' },
+            id: body.id ?? null,
+          }, 400);
+        }
+        const handlers = getToolHandlers();
+        const handler = handlers.get(name);
+        if (!handler) {
+          return c.json({
+            jsonrpc: '2.0',
+            error: { code: -32601, message: `Tool not found: ${name}` },
+            id: body.id ?? null,
+          }, 404);
+        }
+        result = await handler(args || {});
+      } else {
+        return c.json({
+          jsonrpc: '2.0',
+          error: { code: -32601, message: `Method not supported in /sync: ${body.method}` },
+          id: body.id ?? null,
+        }, 405);
+      }
+
+      return c.json({ jsonrpc: '2.0', result, id: body.id ?? null });
+    } catch (error) {
+      console.error('[MCP sync] Error:', error);
+      return c.json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32603,
+          message: 'Internal error',
+          data: error instanceof Error ? error.message : String(error),
+        },
+        id: null,
+      }, 500);
+    }
   });
 }
+

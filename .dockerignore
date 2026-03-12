@@ -1,0 +1,25 @@
+# Git history - largest contributor to context size
+.git
+
+# Documentation
+docs/
+CHANGELOG.md
+CONTRIBUTING.md
+README.md
+
+# Backups and local data (not part of build)
+backups/
+data/chromadb/
+data/sessions/
+data/oracle/
+data/ipc/
+
+# Dev tools / local configs
+.env
+.env.*
+!.env.example
+*.code-workspace
+.vscode/
+
+# psi directory (experimental)
+psi/

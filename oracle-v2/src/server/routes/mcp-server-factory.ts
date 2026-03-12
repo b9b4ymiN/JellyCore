@@ -416,6 +416,241 @@ Philosophy: "Nothing is Deleted" — All interactions logged.`,
 ];
 
 /**
+ * Tool handler function type
+ */
+export type ToolHandler = (args: Record<string, any>) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
+
+/**
+ * Get tool handlers map (for direct invocation without MCP Server)
+ */
+export function getToolHandlers(): Map<string, ToolHandler> {
+  const { sqlite, db, chromaClient } = getSharedResources();
+  const readOnly = process.env.ORACLE_READ_ONLY === 'true';
+  const repoRoot = process.env.ORACLE_REPO_ROOT || process.cwd();
+
+  const handlers = new Map<string, ToolHandler>();
+
+  // oracle_search
+  handlers.set('oracle_search', async (args) => {
+    const { query, type = 'all', limit = 5, offset = 0, mode = 'hybrid' } = args;
+    const startTime = Date.now();
+    const result = handleOracleSearch(sqlite, chromaClient, query, type, limit, offset, mode, chromaStatus);
+    logSearch(query, type, mode, result.results.length, Date.now() - startTime);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_consult
+  handlers.set('oracle_consult', async (args) => {
+    const { decision, context } = args;
+    const result = handleOracleConsult(sqlite, decision, context);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_reflect
+  handlers.set('oracle_reflect', async () => {
+    const result = handleOracleReflect(sqlite);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_learn
+  handlers.set('oracle_learn', async (args) => {
+    if (readOnly) {
+      return { content: [{ type: 'text', text: 'Tool "oracle_learn" is disabled in read-only mode.' }], isError: true };
+    }
+    const { pattern, source, concepts, project } = args;
+    const result = handleOracleLearn(db, repoRoot, pattern, source, concepts, project);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_list
+  handlers.set('oracle_list', async (args) => {
+    const { type = 'all', limit = 10, offset = 0 } = args;
+    const result = handleOracleList(sqlite, type, limit, offset);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_stats
+  handlers.set('oracle_stats', async () => {
+    const result = handleOracleStats(sqlite, chromaStatus);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_concepts
+  handlers.set('oracle_concepts', async (args) => {
+    const { limit = 50, type = 'all' } = args;
+    const result = handleOracleConcepts(sqlite, limit, type);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_thread
+  handlers.set('oracle_thread', async (args) => {
+    if (readOnly) {
+      return { content: [{ type: 'text', text: 'Tool "oracle_thread" is disabled in read-only mode.' }], isError: true };
+    }
+    const { message, threadId, title, role = 'human', model } = args;
+    const result = await handleThreadMessage({ message, threadId, title, role, model });
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_threads
+  handlers.set('oracle_threads', async (args) => {
+    const { status, limit = 20, offset = 0 } = args;
+    const result = listThreads({ status, limit, offset });
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_thread_read
+  handlers.set('oracle_thread_read', async (args) => {
+    const { threadId, limit } = args;
+    const threadData = getFullThread(threadId);
+    if (!threadData) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Thread not found' }) }], isError: true };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(threadData, null, 2) }] };
+  });
+
+  // oracle_thread_update
+  handlers.set('oracle_thread_update', async (args) => {
+    if (readOnly) {
+      return { content: [{ type: 'text', text: 'Tool "oracle_thread_update" is disabled in read-only mode.' }], isError: true };
+    }
+    const { threadId, status } = args;
+    updateThreadStatus(threadId, status);
+    return { content: [{ type: 'text', text: JSON.stringify({ success: true, threadId, status }) }] };
+  });
+
+  // oracle_decisions_list
+  handlers.set('oracle_decisions_list', async (args) => {
+    const { status, project, tags, limit = 20, offset = 0 } = args;
+    const result = listDecisions({ status: status as DecisionStatus, project, tags, limit, offset });
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_decisions_create
+  handlers.set('oracle_decisions_create', async (args) => {
+    if (readOnly) {
+      return { content: [{ type: 'text', text: 'Tool "oracle_decisions_create" is disabled in read-only mode.' }], isError: true };
+    }
+    const { title, context, options, tags, project } = args;
+    const result = createDecision({ title, context, options, tags, project });
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_decisions_get
+  handlers.set('oracle_decisions_get', async (args) => {
+    const { id } = args;
+    const result = getDecision(id);
+    if (!result) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Decision not found' }) }], isError: true };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_decisions_update
+  handlers.set('oracle_decisions_update', async (args) => {
+    if (readOnly) {
+      return { content: [{ type: 'text', text: 'Tool "oracle_decisions_update" is disabled in read-only mode.' }], isError: true };
+    }
+    const { id, ...updateData } = args;
+    const result = updateDecision({ id, ...updateData });
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_trace
+  handlers.set('oracle_trace', async (args) => {
+    if (readOnly) {
+      return { content: [{ type: 'text', text: 'Tool "oracle_trace" is disabled in read-only mode.' }], isError: true };
+    }
+    const result = createTrace({
+      query: args.query,
+      queryType: args.queryType,
+      project: args.project,
+      foundFiles: args.foundFiles,
+      foundCommits: args.foundCommits,
+      foundIssues: args.foundIssues,
+      foundRetrospectives: args.foundRetrospectives,
+      foundLearnings: args.foundLearnings,
+      parentTraceId: args.parentTraceId,
+      agentCount: args.agentCount,
+      durationMs: args.durationMs,
+    });
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_trace_list
+  handlers.set('oracle_trace_list', async (args) => {
+    const { query, project, status, depth, limit = 20, offset = 0 } = args;
+    const result = listTraces({ query, project, status, depth, limit, offset });
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_trace_get
+  handlers.set('oracle_trace_get', async (args) => {
+    const { traceId, includeChain } = args;
+    const result = getTrace(traceId);
+    if (!result) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Trace not found' }) }], isError: true };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_trace_link
+  handlers.set('oracle_trace_link', async (args) => {
+    const { prevTraceId, nextTraceId } = args;
+    const result = linkTraces(prevTraceId, nextTraceId);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_trace_chain
+  handlers.set('oracle_trace_chain', async (args) => {
+    const { traceId } = args;
+    const result = getTraceChain(traceId);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  });
+
+  // oracle_supersede
+  handlers.set('oracle_supersede', async (args) => {
+    if (readOnly) {
+      return { content: [{ type: 'text', text: 'Tool "oracle_supersede" is disabled in read-only mode.' }], isError: true };
+    }
+    const { oldId, newId, reason } = args;
+    const oldDoc = sqlite.prepare('SELECT source_file FROM oracle_documents WHERE id = ?').get(oldId) as any;
+    const newDoc = sqlite.prepare('SELECT source_file FROM oracle_documents WHERE id = ?').get(newId) as any;
+
+    if (!oldDoc || !newDoc) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Document not found' }) }], isError: true };
+    }
+
+    db.insert(supersedeLog).values({
+      oldPath: oldDoc.source_file,
+      oldId,
+      newPath: newDoc.source_file,
+      newId,
+      reason: reason || null,
+      supersededAt: Date.now(),
+      supersededBy: 'mcp-sync',
+    }).run();
+
+    sqlite.prepare('UPDATE oracle_documents SET superseded_by = ?, superseded_at = ?, superseded_reason = ? WHERE id = ?')
+      .run(newId, Date.now(), reason || null, oldId);
+
+    return { content: [{ type: 'text', text: JSON.stringify({ success: true, oldId, newId }) }] };
+  });
+
+  return handlers;
+}
+
+/**
+ * Get tool definitions (for listing tools)
+ */
+export function getToolDefinitions() {
+  const readOnly = process.env.ORACLE_READ_ONLY === 'true';
+  return readOnly
+    ? TOOL_DEFINITIONS.filter(t => !WRITE_TOOLS.includes(t.name))
+    : TOOL_DEFINITIONS;
+}
+
+/**
  * Create MCP server instance with handlers
  */
 export function createMcpServerWithHandlers(): Server {
