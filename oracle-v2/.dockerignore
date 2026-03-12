@@ -24,17 +24,3 @@ tsconfig*.json
 vitest.config.ts
 playwright.config.ts
 drizzle.config.ts
-
-# Documentation
-docs/
-README.md
-CLAUDE.md
-DEV_WORKFLOW.md
-TIMELINE.md
-*.md
-
-# Git
-.git
-
-# Bun lock (not needed inside image)
-bun.lock
