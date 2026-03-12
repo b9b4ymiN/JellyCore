@@ -458,7 +458,7 @@ export function getToolHandlers(): Map<string, ToolHandler> {
       return { content: [{ type: 'text', text: 'Tool "oracle_learn" is disabled in read-only mode.' }], isError: true };
     }
     const { pattern, source, concepts, project } = args;
-    const result = handleOracleLearn(db, repoRoot, pattern, source, concepts, project);
+    const result = handleOracleLearn(sqlite, db, repoRoot, pattern, source, concepts, project);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -721,7 +721,7 @@ export function createMcpServerWithHandlers(): Server {
 
         case 'oracle_learn': {
           const { pattern, source, concepts, project } = args as any;
-          const result = handleOracleLearn(db, repoRoot, pattern, source, concepts, project);
+          const result = handleOracleLearn(sqlite, db, repoRoot, pattern, source, concepts, project);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         }
 
@@ -903,41 +903,40 @@ function handleOracleSearch(
   mode: string,
   chromaStatus: string
 ) {
-  // FTS5 search
-  const typeFilter = type !== 'all' ? `AND type = '${type}'` : '';
+  // Sanitize FTS5 special chars
+  const safeQuery = query.replace(/[?*+\-()^~"':.\/ ]/g, ' ').replace(/\s+/g, ' ').trim() || query;
+
+  // FTS5 search — JOIN with oracle_documents to get type/source_file
+  const typeFilter = type !== 'all' ? `AND d.type = '${type}'` : '';
   const ftsQuery = sqlite.prepare(`
-    SELECT id, type, title, content, concepts, bm25(oracle_fts) as score
-    FROM oracle_fts
+    SELECT f.id, d.type, f.content, d.source_file, d.concepts, rank as score
+    FROM oracle_fts f
+    JOIN oracle_documents d ON f.id = d.id
     WHERE oracle_fts MATCH ? ${typeFilter}
-    ORDER BY score
+    ORDER BY rank
     LIMIT ? OFFSET ?
   `);
 
   let ftsResults: any[] = [];
   try {
-    ftsResults = ftsQuery.all(query, limit, offset);
+    ftsResults = ftsQuery.all(safeQuery, limit, offset);
   } catch {
     // FTS query error, return empty
   }
 
-  // Vector search (if available)
-  let vectorResults: any[] = [];
-  if ((mode === 'hybrid' || mode === 'vector') && chromaStatus === 'connected') {
-    try {
-      const vectorQuery = chromaClient.query(query, limit);
-      // Note: ChromaDB query is async, but for simplicity we'll skip it in sync context
-      // In production, this should be properly awaited
-    } catch {
-      // Vector search failed
-    }
-  }
-
-  // Merge results
-  const results = mode === 'vector' ? vectorResults : ftsResults;
+  const results = ftsResults.map((r: any) => ({
+    id: r.id,
+    type: r.type,
+    content: r.content?.substring(0, 500) ?? '',
+    source_file: r.source_file,
+    concepts: JSON.parse(r.concepts || '[]'),
+    score: r.score,
+    source: 'fts',
+  }));
 
   return {
     results,
-    mode: chromaStatus === 'connected' ? mode : 'fts',
+    mode: 'fts',
     chromaStatus,
     query,
   };
@@ -948,19 +947,23 @@ function handleOracleConsult(
   decision: string,
   context?: string
 ) {
-  // Search for relevant principles and patterns
+  const query = context ? `${decision} ${context}` : decision;
+  const safeQuery = query.replace(/[?*+\-()^~"':.\/ ]/g, ' ').replace(/\s+/g, ' ').trim() || query;
+
+  // JOIN oracle_fts with oracle_documents to filter by type
   const ftsQuery = sqlite.prepare(`
-    SELECT id, type, title, content, concepts
-    FROM oracle_fts
+    SELECT f.id, d.type, f.content, d.source_file
+    FROM oracle_fts f
+    JOIN oracle_documents d ON f.id = d.id
     WHERE oracle_fts MATCH ?
-    AND type IN ('principle', 'pattern')
-    ORDER BY bm25(oracle_fts)
+    AND d.type IN ('principle', 'pattern')
+    ORDER BY rank
     LIMIT 5
   `);
 
   let relevant: any[] = [];
   try {
-    relevant = ftsQuery.all(decision);
+    relevant = ftsQuery.all(safeQuery);
   } catch {
     // FTS error
   }
@@ -968,7 +971,12 @@ function handleOracleConsult(
   return {
     decision,
     context,
-    relevant_docs: relevant,
+    relevant_docs: relevant.map((r: any) => ({
+      id: r.id,
+      type: r.type,
+      content: r.content?.substring(0, 300) ?? '',
+      source: r.source_file,
+    })),
     guidance: relevant.length > 0
       ? `Based on ${relevant.length} relevant documents, consider the principles and patterns above.`
       : 'No specific guidance found. Consider adding relevant principles to the knowledge base.',
@@ -983,22 +991,34 @@ function handleOracleReflect(sqlite: Database) {
     return { message: 'No documents in knowledge base yet.' };
   }
 
+  // oracle_documents has no title/content — fetch meta then get content from oracle_fts
   const randomQuery = sqlite.prepare(`
-    SELECT id, type, title, content, concepts
+    SELECT id, type, source_file, concepts
     FROM oracle_documents
+    WHERE type IN ('principle', 'learning')
     ORDER BY RANDOM()
     LIMIT 1
   `);
 
   const doc = randomQuery.get() as any;
+  if (!doc) return { message: 'No documents in knowledge base yet.' };
+
+  const ftsRow = sqlite.prepare(`SELECT content FROM oracle_fts WHERE id = ?`).get(doc.id) as any;
 
   return {
-    reflection: doc,
+    reflection: {
+      id: doc.id,
+      type: doc.type,
+      source_file: doc.source_file,
+      concepts: JSON.parse(doc.concepts || '[]'),
+      content: ftsRow?.content ?? '',
+    },
     message: 'Here is a random piece of wisdom for reflection.',
   };
 }
 
 function handleOracleLearn(
+  sqlite: Database,
   db: BunSQLiteDatabase<typeof schema>,
   repoRoot: string,
   pattern: string,
@@ -1047,6 +1067,11 @@ ${pattern}
     indexedAt: Date.now(),
   }).run();
 
+  // Insert into FTS5 so search and oracle_list can find it
+  sqlite.prepare(
+    `INSERT OR REPLACE INTO oracle_fts (id, content, concepts) VALUES (?, ?, ?)`
+  ).run(id, content, conceptsStr);
+
   // Log learning with correct schema
   db.insert(learnLog).values({
     documentId: id,
@@ -1069,33 +1094,42 @@ function handleOracleList(
   limit: number,
   offset: number
 ) {
-  const typeFilter = type !== 'all' ? `WHERE type = '${type}'` : '';
+  const typeFilter = type !== 'all' ? `WHERE d.type = '${type}'` : '';
 
-  const countQuery = sqlite.prepare(`SELECT COUNT(*) as count FROM oracle_documents ${typeFilter}`);
+  const countQuery = sqlite.prepare(
+    type !== 'all'
+      ? `SELECT COUNT(*) as count FROM oracle_documents WHERE type = '${type}'`
+      : `SELECT COUNT(*) as count FROM oracle_documents`
+  );
   const { count } = countQuery.get() as any;
 
+  // JOIN with oracle_fts to get content (oracle_documents has no content/title columns)
+  const dTypeFilter = type !== 'all' ? `WHERE d.type = '${type}'` : '';
   const listQuery = sqlite.prepare(`
-    SELECT id, type, title, content, concepts, source_file, indexed_at
-    FROM oracle_documents
-    ${typeFilter}
-    ORDER BY indexed_at DESC
+    SELECT d.id, d.type, d.source_file, d.concepts, d.indexed_at, f.content
+    FROM oracle_documents d
+    JOIN oracle_fts f ON d.id = f.id
+    ${dTypeFilter}
+    ORDER BY d.indexed_at DESC
     LIMIT ? OFFSET ?
   `);
 
   const documents = listQuery.all(limit, offset) as any[];
 
   return {
-    documents: documents.map(d => ({
+    documents: documents.map((d: any) => ({
       id: d.id,
       type: d.type,
-      title: d.title,
-      concepts: d.concepts,
+      title: d.content ? d.content.split('\n')[0].substring(0, 80) : d.id,
+      content: d.content ? d.content.substring(0, 500) : '',
+      concepts: JSON.parse(d.concepts || '[]'),
       source_file: d.source_file,
-      created_at: d.indexed_at,
+      indexed_at: d.indexed_at,
     })),
     total: count,
     limit,
     offset,
+    type,
   };
 }
 
