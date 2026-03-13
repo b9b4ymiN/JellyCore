@@ -150,25 +150,23 @@ export class KnowledgeGraphService {
     const { limit = 20, minStrength = 1, types } = options;
 
     try {
-      let query = db
+      const conditions = [
+        eq(conceptRelationships.fromConcept, concept),
+        sql`${conceptRelationships.strength} >= ${minStrength}`
+      ];
+
+      if (types && types.length > 0) {
+        conditions.push(inArray(conceptRelationships.relationshipType, types));
+      }
+
+      const results = await db
         .select({
           concept: conceptRelationships.toConcept,
           relationship: conceptRelationships.relationshipType,
           strength: conceptRelationships.strength,
         })
         .from(conceptRelationships)
-        .where(
-          and(
-            eq(conceptRelationships.fromConcept, concept),
-            sql`${conceptRelationships.strength} >= ${minStrength}`
-          )
-        );
-
-      if (types && types.length > 0) {
-        query = query.where(inArray(conceptRelationships.relationshipType, types));
-      }
-
-      const results = await query
+        .where(and(...conditions))
         .orderBy(desc(conceptRelationships.strength))
         .limit(limit)
         .all();

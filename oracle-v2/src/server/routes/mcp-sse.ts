@@ -106,9 +106,23 @@ export function registerMcpSseRoutes(app: Hono, options: McpSseRoutesOptions = {
       return c.json({ error: 'New MCP sessions must be initialized via POST' }, 405);
     }
 
-    // Check if this is a stateless request (tools/list or tools/call without session)
+    // Check if this is a stateless request (initialize, tools/list or tools/call without session)
     try {
       const body = await c.req.json();
+
+      // Handle initialize as stateless - return server info without creating session
+      if (body.method === 'initialize') {
+        return c.json({
+          jsonrpc: '2.0',
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'oracle-nightly-sse', version: '0.7.0' }
+          },
+          id: body.id ?? null,
+        });
+      }
+
       if (body.method === 'tools/list' || body.method === 'tools/call') {
         // Handle as stateless request (same logic as /mcp/sync)
         let result: unknown;
@@ -135,6 +149,11 @@ export function registerMcpSseRoutes(app: Hono, options: McpSseRoutesOptions = {
           result = await handler(args || {});
         }
         return c.json({ jsonrpc: '2.0', result, id: body.id ?? null });
+      }
+
+      // Handle notifications/initialized - just acknowledge without error
+      if (body.method === 'notifications/initialized') {
+        return c.json({ jsonrpc: '2.0', result: {}, id: body.id ?? null });
       }
     } catch {
       // Not JSON or parse error — fall through to normal session handling

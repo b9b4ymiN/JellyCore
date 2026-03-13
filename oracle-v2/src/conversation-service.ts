@@ -196,21 +196,17 @@ export class ConversationService {
     const { limit = 20, offset = 0, groupId, includeArchived = false } = options;
 
     try {
-      let query = db.select().from(conversations).where(eq(conversations.userId, userId));
+      const conditions = [eq(conversations.userId, userId)];
 
       if (groupId) {
-        query = query.where(and(
-          eq(conversations.userId, userId),
-          eq(conversations.groupId, groupId)
-        ));
+        conditions.push(eq(conversations.groupId, groupId));
       }
 
       if (!includeArchived) {
-        query = query.where(and(
-          eq(conversations.userId, userId),
-          eq(conversations.isArchived, 0)
-        ));
+        conditions.push(eq(conversations.isArchived, 0));
       }
+
+      let query = db.select().from(conversations).where(and(...conditions));
 
       const results = await query
         .orderBy(desc(conversations.lastMessageAt))
@@ -346,27 +342,25 @@ export class ConversationService {
     archivedConversations: number;
   }> {
     try {
-      let convQuery = db.select({
-        count: sql<number>`count(*)`,
-        active: sql<number>`sum(case when ${conversations.isArchived} = 0 then 1 else 0 end)`,
-        archived: sql<number>`sum(case when ${conversations.isArchived} = 1 then 1 else 0 end)`,
-      }).from(conversations);
+      const convStats = await (userId
+        ? db.select({
+            count: sql<number>`count(*)`,
+            active: sql<number>`sum(case when ${conversations.isArchived} = 0 then 1 else 0 end)`,
+            archived: sql<number>`sum(case when ${conversations.isArchived} = 1 then 1 else 0 end)`,
+          }).from(conversations).where(eq(conversations.userId, userId))
+        : db.select({
+            count: sql<number>`count(*)`,
+            active: sql<number>`sum(case when ${conversations.isArchived} = 0 then 1 else 0 end)`,
+            archived: sql<number>`sum(case when ${conversations.isArchived} = 1 then 1 else 0 end)`,
+          }).from(conversations));
 
-      if (userId) {
-        convQuery = convQuery.where(eq(conversations.userId, userId));
-      }
-
-      const convStats = await convQuery;
-
-      let msgQuery = db.select({
-        count: sql<number>`count(*)`,
-      }).from(conversationMessages);
-
-      if (userId) {
-        msgQuery = msgQuery.where(eq(conversationMessages.userId, userId));
-      }
-
-      const msgStats = await msgQuery;
+      const msgStats = await (userId
+        ? db.select({
+            count: sql<number>`count(*)`,
+          }).from(conversationMessages).where(eq(conversationMessages.userId, userId))
+        : db.select({
+            count: sql<number>`count(*)`,
+          }).from(conversationMessages));
 
       return {
         totalConversations: convStats[0]?.count || 0,
