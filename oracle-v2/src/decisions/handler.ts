@@ -73,10 +73,10 @@ export function createDecision(input: CreateDecisionInput): Decision {
     tags: input.tags ? JSON.stringify(input.tags) : null,
     createdAt: now,
     updatedAt: now,
-  }).run();
+  }).returning({ id: decisions.id }).get();
 
   return {
-    id: Number(result.lastInsertRowid),
+    id: result.id,
     title: input.title,
     status: 'pending',
     context: input.context || null,

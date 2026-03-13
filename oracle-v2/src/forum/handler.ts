@@ -51,10 +51,10 @@ export function createThread(
     project: project || null,
     createdAt: now,
     updatedAt: now,
-  }).run();
+  }).returning({ id: forumThreads.id }).get();
 
   return {
-    id: Number(result.lastInsertRowid),
+    id: result.id,
     title,
     createdBy,
     status: 'active',
@@ -78,14 +78,14 @@ export function getThread(threadId: number): ForumThread | null {
   return {
     id: row.id,
     title: row.title,
-    createdBy: row.createdBy || undefined,
-    status: row.status || undefined,
-    issueUrl: row.issueUrl || undefined,
-    issueNumber: row.issueNumber || undefined,
-    project: row.project || undefined,
+    createdBy: row.createdBy ?? 'unknown',
+    status: (row.status as ForumThread['status']) ?? 'active',
+    issueUrl: row.issueUrl ?? undefined,
+    issueNumber: row.issueNumber ?? undefined,
+    project: row.project ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    syncedAt: row.syncedAt || undefined,
+    syncedAt: row.syncedAt ?? undefined,
   };
 }
 
@@ -141,11 +141,11 @@ export function listThreads(options: {
     threads: rows.map(row => ({
       id: row.id,
       title: row.title,
-      createdBy: row.createdBy || undefined,
-      status: row.status || undefined,
-      issueUrl: row.issueUrl || undefined,
-      issueNumber: row.issueNumber || undefined,
-      project: row.project || undefined,
+      createdBy: row.createdBy ?? 'unknown',
+      status: (row.status as ForumThread['status']) ?? 'active',
+      issueUrl: row.issueUrl ?? undefined,
+      issueNumber: row.issueNumber ?? undefined,
+      project: row.project ?? undefined,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       syncedAt: row.syncedAt || undefined,
@@ -183,7 +183,7 @@ export function addMessage(
     patternsFound: options.patternsFound || null,
     searchQuery: options.searchQuery || null,
     createdAt: now,
-  }).run();
+  }).returning({ id: forumMessages.id }).get();
 
   // Update thread timestamp
   db.update(forumThreads)
@@ -192,7 +192,7 @@ export function addMessage(
     .run();
 
   return {
-    id: Number(result.lastInsertRowid),
+    id: result.id,
     threadId,
     role,
     content,

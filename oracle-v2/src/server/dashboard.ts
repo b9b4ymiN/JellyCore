@@ -169,9 +169,9 @@ export function handleDashboardActivity(days: number = 7): DashboardActivity {
 
     searches = rows.map(row => ({
       query: row.query.substring(0, 100),
-      type: row.type,
-      results_count: row.resultsCount,
-      search_time_ms: row.searchTimeMs,
+      type: row.type ?? 'unknown',
+      results_count: row.resultsCount ?? 0,
+      search_time_ms: row.searchTimeMs ?? 0,
       created_at: new Date(row.createdAt).toISOString()
     }));
   } catch (error) {
@@ -196,8 +196,8 @@ export function handleDashboardActivity(days: number = 7): DashboardActivity {
 
     learnings = rows.map(row => ({
       document_id: row.documentId,
-      pattern_preview: row.patternPreview,
-      source: row.source,
+      pattern_preview: row.patternPreview ?? '',
+      source: row.source ?? 'unknown',
       concepts: JSON.parse(row.concepts || '[]'),
       created_at: new Date(row.createdAt).toISOString()
     }));

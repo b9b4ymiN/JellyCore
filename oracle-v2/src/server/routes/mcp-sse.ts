@@ -81,6 +81,7 @@ export function registerMcpSseRoutes(app: Hono, options: McpSseRoutesOptions = {
    * Primary MCP endpoint - Streamable HTTP transport
    *
    * POST without Mcp-Session-Id → create new session (must be initialize request)
+   *   OR handle stateless requests (tools/list, tools/call) without session
    * POST/GET/DELETE with Mcp-Session-Id → route to existing session transport
    */
   app.on(['GET', 'POST', 'DELETE'], path, async (c) => {
@@ -100,9 +101,43 @@ export function registerMcpSseRoutes(app: Hono, options: McpSseRoutesOptions = {
       return session.transport.handleRequest(c.req.raw);
     }
 
-    // No session ID — only POST can create a new session
+    // No session ID — only POST can create a new session or handle stateless
     if (c.req.method !== 'POST') {
       return c.json({ error: 'New MCP sessions must be initialized via POST' }, 405);
+    }
+
+    // Check if this is a stateless request (tools/list or tools/call without session)
+    try {
+      const body = await c.req.json();
+      if (body.method === 'tools/list' || body.method === 'tools/call') {
+        // Handle as stateless request (same logic as /mcp/sync)
+        let result: unknown;
+        if (body.method === 'tools/list') {
+          result = { tools: getToolDefinitions() };
+        } else {
+          const { name, arguments: args } = body.params || {};
+          if (!name) {
+            return c.json({
+              jsonrpc: '2.0',
+              error: { code: -32602, message: 'Invalid params: missing tool name' },
+              id: body.id ?? null,
+            }, 400);
+          }
+          const handlers = getToolHandlers();
+          const handler = handlers.get(name);
+          if (!handler) {
+            return c.json({
+              jsonrpc: '2.0',
+              error: { code: -32601, message: `Tool not found: ${name}` },
+              id: body.id ?? null,
+            }, 404);
+          }
+          result = await handler(args || {});
+        }
+        return c.json({ jsonrpc: '2.0', result, id: body.id ?? null });
+      }
+    } catch {
+      // Not JSON or parse error — fall through to normal session handling
     }
 
     // Create new stateful transport + MCP server for this session

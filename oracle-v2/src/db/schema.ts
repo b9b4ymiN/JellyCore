@@ -96,6 +96,59 @@ export const consultLog = sqliteTable('consult_log', {
   index('idx_consult_created').on(table.createdAt),
 ]);
 
+// ============================================================================
+// P1: Conversation History Management
+// ============================================================================
+
+/**
+ * Conversations - Container for message threads
+ * Stores metadata about conversation sessions
+ */
+export const conversations = sqliteTable('conversations', {
+  id: text('id').primaryKey(),  // conv_{groupId}_{timestamp}
+  userId: text('user_id').notNull(),
+  groupId: text('group_id').notNull(),
+  title: text('title'),  // Auto-generated from first message
+  summary: text('summary'),  // LLM-generated summary
+  startedAt: integer('started_at').notNull(),
+  lastMessageAt: integer('last_message_at').notNull(),
+  messageCount: integer('message_count').default(0),
+  isArchived: integer('is_archived').default(0),  // 0=active, 1=archived
+  tags: text('tags'),  // JSON array of tags
+  metadata: text('metadata'),  // JSON: { channel, context, etc. }
+}, (table) => [
+  index('idx_conv_user').on(table.userId),
+  index('idx_conv_group').on(table.groupId),
+  index('idx_conv_started').on(table.startedAt),
+  index('idx_conv_last_message').on(table.lastMessageAt),
+  index('idx_conv_archived').on(table.isArchived),
+]);
+
+/**
+ * Conversation Messages - Full message history
+ * Stores raw messages with metadata for full conversation recall
+ */
+export const conversationMessages = sqliteTable('conversation_messages', {
+  id: text('id').primaryKey(),  // msg_{timestamp}_{random}
+  conversationId: text('conversation_id').notNull(),
+  userId: text('user_id').notNull(),
+  groupId: text('group_id').notNull(),
+  role: text('role').notNull(),  // 'user' | 'assistant' | 'system'
+  content: text('content').notNull(),
+  metadata: text('metadata'),  // JSON: { thinking, tools_used, model, etc. }
+  createdAt: integer('created_at').notNull(),
+  indexed: integer('indexed').default(0),  // 0=not indexed in FTS, 1=indexed
+  tokens: integer('tokens'),  // Approximate token count
+  parentMessageId: text('parent_message_id'),  // For threading
+}, (table) => [
+  index('idx_msg_conv').on(table.conversationId),
+  index('idx_msg_user').on(table.userId),
+  index('idx_msg_group').on(table.groupId),
+  index('idx_msg_created').on(table.createdAt),
+  index('idx_msg_indexed').on(table.indexed),
+  index('idx_msg_role').on(table.role),
+]);
+
 // Learning/pattern logging
 export const learnLog = sqliteTable('learn_log', {
   id: integer('id').primaryKey({ autoIncrement: true }),

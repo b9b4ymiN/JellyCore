@@ -168,16 +168,14 @@ export class MultilingualE5Embedder implements Embedder {
   private async ensurePipeline(): Promise<void> {
     if (this.pipeline) return;
     try {
-      const mod = await import('@xenova/transformers');
+      const mod = await import('@huggingface/transformers');
       const onnxModel = `${MODEL_NAMESPACE}/${this.modelName}`;
       console.log(`[Embedder] Loading ${onnxModel} (ONNX, ${this.dimensions}-dim)...`);
-      this.pipeline = await mod.pipeline('feature-extraction', onnxModel, {
-        quantized: true,
-      });
+      this.pipeline = await mod.pipeline('feature-extraction', onnxModel);
       console.log(`[Embedder] ${onnxModel} ready`);
     } catch (err: any) {
       throw new Error(
-        `Failed to load ${this.modelName}. Install: bun add @xenova/transformers\n` +
+        `Failed to load ${this.modelName}. Install: bun add @huggingface/transformers\n` +
           `Error: ${err?.message || err}`,
       );
     }

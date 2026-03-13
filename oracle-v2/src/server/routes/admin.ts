@@ -400,12 +400,12 @@ export function registerAdminRoutes(app: Hono): void {
         supersededAt: Date.now(),
         supersededBy: data.superseded_by || 'user',
         project: data.project || null,
-      }).run();
+      }).returning({ id: supersedeLog.id }).get();
 
       searchCache.invalidate();
 
       return c.json({
-        id: result.lastInsertRowid,
+        id: result.id,
         message: 'Supersession logged',
       }, 201);
     } catch (error) {
