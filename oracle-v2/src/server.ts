@@ -40,6 +40,8 @@ import { registerMemoryRoutes } from './server/routes/memory-routes.js';
 import { registerSearchRoutes } from './server/routes/search.js';
 import { registerAdminRoutes } from './server/routes/admin.js';
 import { registerMcpSseRoutes } from './server/routes/mcp-sse.js';
+import { OracleIndexer } from './indexer.js';
+import { FileWatcher } from './file-watcher.js';
 
 const FRONTEND_DIST = path.join(import.meta.dirname || __dirname, '..', 'frontend', 'dist');
 
@@ -73,9 +75,8 @@ writePidFile({
 registerSignalHandlers(async () => {
   console.log('\n🔮 Shutting down gracefully...');
   await performGracefulShutdown({
-    closeables: [
+    resources: [
       {
-        name: 'database',
         close: () => {
           closeDb();
           return Promise.resolve();
@@ -215,6 +216,61 @@ setInterval(async () => {
     console.warn('[Memory] Background job error:', err);
   }
 }, 6 * 60 * 60 * 1000);
+
+// P0: Initialize File Watcher for Real-time Indexing
+const FILE_WATCHER_ENABLED = process.env.ORACLE_FILE_WATCHER_ENABLED !== 'false';
+let fileWatcher: FileWatcher | null = null;
+
+if (FILE_WATCHER_ENABLED) {
+  try {
+    // Create indexer instance
+    const indexer = new OracleIndexer({
+      repoRoot: REPO_ROOT,
+      dbPath: DB_PATH,
+      sourcePaths: {
+        resonance: 'ψ/memory/resonance',
+        learnings: 'ψ/memory/learnings',
+        retrospectives: 'ψ/memory/retrospectives',
+      },
+    });
+
+    // Create and start file watcher
+    const memoryRoot = path.join(REPO_ROOT, 'ψ/memory');
+    fileWatcher = new FileWatcher(indexer, {
+      memoryRoot,
+      debounceMs: 2000,
+      enabled: true,
+    });
+
+    fileWatcher.start();
+    console.log('👀 File Watcher: Enabled (real-time indexing active)');
+  } catch (error) {
+    console.error('⚠️  File Watcher: Failed to start:', error);
+  }
+}
+
+// Stop file watcher on shutdown
+registerSignalHandlers(async () => {
+  console.log('\n🔮 Shutting down gracefully...');
+  
+  // Stop file watcher first
+  if (fileWatcher) {
+    fileWatcher.stop();
+  }
+  
+  await performGracefulShutdown({
+    resources: [
+      {
+        close: () => {
+          closeDb();
+          return Promise.resolve();
+        },
+      },
+    ],
+  });
+  removePidFile();
+  console.log('👋 Oracle Nightly HTTP Server stopped.');
+});
 
 console.log(`
 🔮 Oracle Nightly HTTP Server running! (Hono.js)

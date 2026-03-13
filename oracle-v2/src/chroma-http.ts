@@ -183,6 +183,22 @@ export class ChromaHttpClient {
   }
 
   /**
+   * Delete documents by IDs (for incremental indexing)
+   */
+  async delete(options: { ids: string[] }): Promise<void> {
+    if (!options.ids || options.ids.length === 0) return;
+
+    await this.ensureCollection();
+    if (!this.collectionId) throw new Error('Collection not initialized');
+
+    await this.request('POST', `/api/v1/collections/${this.collectionId}/delete`, {
+      ids: options.ids,
+    });
+
+    console.log(`Deleted ${options.ids.length} documents from collection`);
+  }
+
+  /**
    * Close (no-op for HTTP client, kept for interface compatibility)
    */
   async close(): Promise<void> {

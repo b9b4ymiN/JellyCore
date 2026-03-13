@@ -146,7 +146,7 @@ export interface HybridSearchOptions {
 export interface IndexerConfig {
   repoRoot: string;
   dbPath: string;
-  chromaPath: string;
+  chromaPath?: string;  // Optional for incremental indexing
   sourcePaths: {
     resonance: string;
     learnings: string;

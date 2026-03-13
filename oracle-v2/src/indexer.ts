@@ -217,6 +217,109 @@ export class OracleIndexer {
   }
 
   /**
+   * Index a single file (incremental update) - P0: Real-time Indexing
+   * 
+   * This method enables real-time indexing by processing individual files
+   * without requiring a full reindex. Called by FileWatcher on file changes.
+   */
+  async indexSingleFile(filePath: string): Promise<void> {
+    try {
+      // Determine file type from path (normalize path separators for cross-platform)
+      const relativePath = path.relative(this.config.repoRoot, filePath).replace(/\\/g, '/');
+      const content = fs.readFileSync(filePath, 'utf-8');
+      let docs: OracleDocument[] = [];
+
+      if (relativePath.includes('resonance/')) {
+        const filename = path.basename(filePath);
+        docs = this.parseResonanceFile(filename, content);
+      } else if (relativePath.includes('learnings/')) {
+        const filename = path.basename(filePath);
+        docs = this.parseLearningFile(filename, content);
+      } else if (relativePath.includes('retrospectives/')) {
+        docs = this.parseRetroFile(relativePath.replace(/\\/g, '/'), content);
+      } else {
+        console.warn(`[Indexer] Unknown file type: ${relativePath}`);
+        return;
+      }
+
+      if (docs.length === 0) {
+        console.warn(`[Indexer] No documents parsed from ${relativePath}`);
+        return;
+      }
+
+      // Apply smart chunking
+      const chunkedDocs = await this.applySmartChunking(docs);
+
+      // Remove old entries for this file from all stores
+      await this.removeDocumentsBySourceFile(relativePath);
+
+      // Store new documents
+      await this.storeDocuments(chunkedDocs);
+
+      // Invalidate search cache
+      this.invalidateCache();
+
+      console.log(`[Indexer] ✅ Indexed ${chunkedDocs.length} doc(s) from ${relativePath}`);
+    } catch (error) {
+      logNonFatal('indexer.index_single_file', error, { filePath });
+      throw error;
+    }
+  }
+
+  /**
+   * Remove all documents associated with a source file
+   * Used by incremental indexing to replace old content
+   */
+  private async removeDocumentsBySourceFile(sourceFile: string): Promise<void> {
+    // Get all document IDs for this source file
+    const docs = this.db
+      .select({ id: oracleDocuments.id })
+      .from(oracleDocuments)
+      .where(eq(oracleDocuments.sourceFile, `ψ/memory/${sourceFile}`))
+      .all();
+
+    const idsToDelete = docs.map(d => d.id);
+    
+    if (idsToDelete.length === 0) return;
+
+    // Delete from SQLite
+    this.db
+      .delete(oracleDocuments)
+      .where(inArray(oracleDocuments.id, idsToDelete))
+      .run();
+
+    // Delete from FTS5
+    const placeholders = idsToDelete.map(() => '?').join(',');
+    this.sqlite.prepare(`DELETE FROM oracle_fts WHERE id IN (${placeholders})`).run(...idsToDelete);
+
+    // Delete from ChromaDB
+    if (this.chromaClient) {
+      try {
+        await this.chromaClient.delete({ ids: idsToDelete });
+      } catch (error) {
+        logNonFatal('indexer.chroma_delete', error, { idsToDelete: idsToDelete.length });
+      }
+    }
+
+    console.log(`[Indexer] 🗑️  Removed ${idsToDelete.length} old doc(s) from ${sourceFile}`);
+  }
+
+  /**
+   * Invalidate search cache
+   * Called after incremental indexing to ensure fresh results
+   */
+  private invalidateCache(): void {
+    try {
+      // Import cache dynamically to avoid circular dependency
+      const { searchCache } = require('./cache.js');
+      searchCache.invalidate();
+      console.log('[Indexer] 🔄 Invalidated search cache');
+    } catch (error) {
+      logNonFatal('indexer.invalidate_cache', error);
+    }
+  }
+
+  /**
    * Main indexing workflow
    */
   async index(): Promise<void> {
