@@ -149,6 +149,30 @@ export const conversationMessages = sqliteTable('conversation_messages', {
   index('idx_msg_role').on(table.role),
 ]);
 
+// ============================================================================
+// P4: Knowledge Graph - Concept Relationships
+// ============================================================================
+
+/**
+ * Concept Relationships - Track connections between concepts
+ * Enables graph queries and relationship-based search
+ */
+export const conceptRelationships = sqliteTable('concept_relationships', {
+  id: text('id').primaryKey(),  // rel_{concept1}_{concept2}_{hash}
+  fromConcept: text('from_concept').notNull(),
+  toConcept: text('to_concept').notNull(),
+  relationshipType: text('relationship_type').notNull(),  // 'co-occurs' | 'related_to' | 'part_of' | 'prerequisite'
+  strength: integer('strength').default(1),  // How many times they co-occur
+  lastSeen: integer('last_seen').notNull(),  // Unix timestamp ms
+  createdAt: integer('created_at').notNull(),
+  metadata: text('metadata'),  // JSON: { documents: [ids], contexts: [...] }
+}, (table) => [
+  index('idx_rel_from').on(table.fromConcept),
+  index('idx_rel_to').on(table.toConcept),
+  index('idx_rel_type').on(table.relationshipType),
+  index('idx_rel_strength').on(table.strength),
+]);
+
 // Learning/pattern logging
 export const learnLog = sqliteTable('learn_log', {
   id: integer('id').primaryKey({ autoIncrement: true }),

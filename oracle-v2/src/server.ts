@@ -41,6 +41,7 @@ import { registerSearchRoutes } from './server/routes/search.js';
 import { registerAdminRoutes } from './server/routes/admin.js';
 import { registerMcpSseRoutes } from './server/routes/mcp-sse.js';
 import { registerConversationRoutes } from './server/routes/conversation-routes.js';
+import { registerGraphRoutes } from './server/routes/graph-routes.js';
 import { OracleIndexer } from './indexer.js';
 import { FileWatcher } from './file-watcher.js';
 
@@ -139,6 +140,7 @@ registerSearchRoutes(app, {
 registerAdminRoutes(app);
 registerMemoryRoutes(app);
 registerConversationRoutes(app);  // P1: Conversation History
+registerGraphRoutes(app);  // P4: Knowledge Graph
 
 registerLegacyUiRoutes(app, {
   arthurPath: ARTHUR_UI_PATH,
