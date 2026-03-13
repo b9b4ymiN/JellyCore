@@ -217,7 +217,14 @@ export function registerMcpSseRoutes(app: Hono, options: McpSseRoutesOptions = {
 
       let result: unknown;
 
-      if (body.method === 'tools/list') {
+      if (body.method === 'initialize') {
+        // Handle initialize statelessly
+        result = {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'oracle-nightly-sse', version: '0.7.0' }
+        };
+      } else if (body.method === 'tools/list') {
         result = { tools: getToolDefinitions() };
       } else if (body.method === 'tools/call') {
         const { name, arguments: args } = body.params || {};
