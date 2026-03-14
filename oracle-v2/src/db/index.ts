@@ -7,7 +7,7 @@ import { Database } from 'bun:sqlite';
 import path from 'path';
 import * as schema from './schema.js';
 import { applySqlitePragmaPolicy } from './sqlite-policy.js';
-import { logNonFatal } from '../non-fatal.js';
+import { ensureRuntimeSchema } from './runtime-schema.js';
 
 // Configuration - central location: ~/.oracle-v2/
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '/tmp';
@@ -47,59 +47,7 @@ export function initFts5() {
  * Adds any missing columns that were added to schema.ts after initial creation.
  */
 export function ensureSchema() {
-  const columns = sqlite.prepare("PRAGMA table_info('oracle_documents')").all() as { name: string }[];
-  const existing = new Set(columns.map(c => c.name));
-
-  const migrations: [string, string][] = [
-    ['is_private', 'ALTER TABLE oracle_documents ADD COLUMN is_private INTEGER DEFAULT 0'],
-    // Embedding versioning (v0.5.0)
-    ['embedding_model', "ALTER TABLE oracle_documents ADD COLUMN embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2'"],
-    ['embedding_version', 'ALTER TABLE oracle_documents ADD COLUMN embedding_version INTEGER DEFAULT 1'],
-    ['embedding_hash', 'ALTER TABLE oracle_documents ADD COLUMN embedding_hash TEXT'],
-    // v0.6.0: Chunking metadata
-    ['chunk_index', 'ALTER TABLE oracle_documents ADD COLUMN chunk_index INTEGER'],
-    ['total_chunks', 'ALTER TABLE oracle_documents ADD COLUMN total_chunks INTEGER'],
-    ['parent_id', 'ALTER TABLE oracle_documents ADD COLUMN parent_id TEXT'],
-    // v0.7.0: Memory layer system (Phase 4)
-    ['memory_layer', 'ALTER TABLE oracle_documents ADD COLUMN memory_layer TEXT'],
-    ['confidence', 'ALTER TABLE oracle_documents ADD COLUMN confidence INTEGER'],
-    ['access_count', 'ALTER TABLE oracle_documents ADD COLUMN access_count INTEGER DEFAULT 0'],
-    ['last_accessed_at', 'ALTER TABLE oracle_documents ADD COLUMN last_accessed_at INTEGER'],
-    ['decay_score', 'ALTER TABLE oracle_documents ADD COLUMN decay_score INTEGER DEFAULT 100'],
-    ['expires_at', 'ALTER TABLE oracle_documents ADD COLUMN expires_at INTEGER'],
-  ];
-
-  for (const [col, ddl] of migrations) {
-    if (!existing.has(col)) {
-      sqlite.exec(ddl);
-      console.log(`[Schema] Added missing column: ${col}`);
-    }
-  }
-
-  // Ensure indexes for embedding versioning
-  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_embedding_model ON oracle_documents(embedding_model)');
-  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_parent_id ON oracle_documents(parent_id)');
-  // v0.7.0: Memory layer indexes
-  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_memory_layer ON oracle_documents(memory_layer)');
-  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_decay_score ON oracle_documents(decay_score)');
-  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_expires_at ON oracle_documents(expires_at)');
-
-  // Ensure search_log has results column
-  const searchLogCols = sqlite.prepare("PRAGMA table_info('search_log')").all() as { name: string }[];
-  const searchLogExisting = new Set(searchLogCols.map(c => c.name));
-  if (!searchLogExisting.has('results')) {
-    try {
-      sqlite.exec('ALTER TABLE search_log ADD COLUMN results TEXT');
-      console.log('[Schema] Added missing column: search_log.results');
-    } catch (err) {
-      logNonFatal(
-        'db.ensure_schema_add_results_column',
-        err,
-        { table: 'search_log' },
-        'debug',
-      );
-    }
-  }
+  ensureRuntimeSchema(sqlite);
 }
 
 /**

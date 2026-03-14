@@ -8,6 +8,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { applySqlitePragmaPolicy } from '../db/sqlite-policy.js';
 import { logNonFatal } from '../non-fatal.js';
+import { ensureRuntimeSchema } from '../db/runtime-schema.js';
 
 // ES Module compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -154,6 +155,8 @@ export function bootstrapCoreTables() {
 
     console.error('[Bootstrap] Core tables created');
   }
+
+  ensureRuntimeSchema(db);
 }
 
 // Auto-bootstrap on import

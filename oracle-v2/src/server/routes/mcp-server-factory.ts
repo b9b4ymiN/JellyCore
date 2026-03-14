@@ -44,6 +44,7 @@ import {
   getTraceChain,
   linkTraces,
 } from '../../trace/handler.js';
+import { parseStoredConcepts, serializeStoredConcepts } from '../concepts-codec.js';
 
 import { logSearch } from '../logging.js';
 import { detectProject } from '../project-detect.js';
@@ -929,7 +930,7 @@ function handleOracleSearch(
     type: r.type,
     content: r.content?.substring(0, 500) ?? '',
     source_file: r.source_file,
-    concepts: JSON.parse(r.concepts || '[]'),
+    concepts: parseStoredConcepts(r.concepts),
     score: r.score,
     source: 'fts',
   }));
@@ -1010,7 +1011,7 @@ function handleOracleReflect(sqlite: Database) {
       id: doc.id,
       type: doc.type,
       source_file: doc.source_file,
-      concepts: JSON.parse(doc.concepts || '[]'),
+      concepts: parseStoredConcepts(doc.concepts),
       content: ftsRow?.content ?? '',
     },
     message: 'Here is a random piece of wisdom for reflection.',
@@ -1027,10 +1028,13 @@ function handleOracleLearn(
   project?: string
 ) {
   const normalizedProject = detectProject(project || repoRoot);
+  const conceptsList = parseStoredConcepts(concepts);
+  const conceptsFrontmatter = conceptsList.join(', ');
+  const storedConcepts = serializeStoredConcepts(conceptsList);
+  const ftsConcepts = conceptsList.join(' ');
 
   // Generate ID and filename
   const id = `learning-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const conceptsStr = concepts?.join(', ') || '';
 
   // Create markdown file
   const learningsDir = path.join(repoRoot, 'ψ', 'memory', 'learnings');
@@ -1043,7 +1047,7 @@ function handleOracleLearn(
   const content = `---
 id: ${id}
 type: learning
-concepts: [${conceptsStr}]
+concepts: [${conceptsFrontmatter}]
 source: ${source || 'Oracle Learn'}
 project: ${normalizedProject}
 created: ${new Date().toISOString()}
@@ -1061,7 +1065,7 @@ ${pattern}
     id,
     type: 'learning',
     sourceFile: filepath,
-    concepts: conceptsStr,
+    concepts: storedConcepts,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     indexedAt: Date.now(),
@@ -1070,14 +1074,14 @@ ${pattern}
   // Insert into FTS5 so search and oracle_list can find it
   sqlite.prepare(
     `INSERT OR REPLACE INTO oracle_fts (id, content, concepts) VALUES (?, ?, ?)`
-  ).run(id, content, conceptsStr);
+  ).run(id, content, ftsConcepts);
 
   // Log learning with correct schema
   db.insert(learnLog).values({
     documentId: id,
     patternPreview: pattern.slice(0, 200),
     source: source || 'Oracle Learn',
-    concepts: conceptsStr,
+    concepts: storedConcepts,
     createdAt: Date.now(),
   }).run();
 
@@ -1122,7 +1126,7 @@ function handleOracleList(
       type: d.type,
       title: d.content ? d.content.split('\n')[0].substring(0, 80) : d.id,
       content: d.content ? d.content.substring(0, 500) : '',
-      concepts: JSON.parse(d.concepts || '[]'),
+      concepts: parseStoredConcepts(d.concepts),
       source_file: d.source_file,
       indexed_at: d.indexed_at,
     })),
@@ -1170,11 +1174,9 @@ function handleOracleConcepts(
 
   const conceptCounts: Record<string, number> = {};
   for (const row of rows) {
-    if (row.concepts) {
-      const concepts = row.concepts.split(',').map((c: string) => c.trim()).filter(Boolean);
-      for (const concept of concepts) {
-        conceptCounts[concept] = (conceptCounts[concept] || 0) + 1;
-      }
+    const concepts = parseStoredConcepts(row.concepts);
+    for (const concept of concepts) {
+      conceptCounts[concept] = (conceptCounts[concept] || 0) + 1;
     }
   }
 
