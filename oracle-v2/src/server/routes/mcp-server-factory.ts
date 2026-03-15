@@ -711,7 +711,7 @@ export function createMcpServerWithHandlers(): Server {
 
         case 'oracle_consult': {
           const { decision, context } = args as any;
-          const result = handleOracleConsult(sqlite, decision, context);
+          const result = await handleOracleConsult(sqlite, decision, context);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         }
 
