@@ -992,7 +992,7 @@ export class OracleIndexer {
 /**
  * CLI for running indexer
  */
-const isMain = import.meta.url.endsWith('indexer.ts') || import.meta.url.endsWith('indexer.js');
+const isMain = import.meta.main;
 if (isMain) {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
   const repoRoot = process.env.ORACLE_REPO_ROOT || process.cwd();

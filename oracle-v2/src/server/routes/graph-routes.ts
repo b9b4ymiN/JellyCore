@@ -5,7 +5,7 @@
  */
 
 import { Hono } from 'hono';
-import { getKnowledgeGraphService } from '../../knowledge-graph-service.js';
+import { GraphDiscoveryError, getKnowledgeGraphService } from '../../knowledge-graph-service.js';
 
 const app = new Hono();
 const graphService = getKnowledgeGraphService();
@@ -23,7 +23,23 @@ app.post('/discover', async (c) => {
     });
   } catch (error) {
     console.error('[API] Graph discovery error:', error);
-    return c.json({ error: 'Failed to discover relationships' }, 500);
+    if (error instanceof GraphDiscoveryError) {
+      return c.json({
+        error: 'Relationship discovery failed',
+        ...error.result,
+      }, 500);
+    }
+
+    return c.json({
+      error: 'Relationship discovery failed',
+      mode: 'rebuild',
+      processed: 0,
+      attemptedPairs: 0,
+      relationships: 0,
+      skippedInvalidDocuments: 0,
+      skippedInsufficientConcepts: 0,
+      durationMs: 0,
+    }, 500);
   }
 });
 

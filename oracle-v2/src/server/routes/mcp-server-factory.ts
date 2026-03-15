@@ -943,45 +943,23 @@ function handleOracleSearch(
   };
 }
 
-function handleOracleConsult(
+/**
+ * @deprecated Use consult() from consult-service.ts instead
+ * Kept for backward compatibility with SSE MCP
+ */
+async function handleOracleConsult(
   sqlite: Database,
   decision: string,
   context?: string
 ) {
-  const query = context ? `${decision} ${context}` : decision;
-  const safeQuery = query.replace(/[?*+\-()^~"':.\/ ]/g, ' ').replace(/\s+/g, ' ').trim() || query;
-
-  // JOIN oracle_fts with oracle_documents to filter by type
-  const ftsQuery = sqlite.prepare(`
-    SELECT f.id, d.type, f.content, d.source_file
-    FROM oracle_fts f
-    JOIN oracle_documents d ON f.id = d.id
-    WHERE oracle_fts MATCH ?
-    AND d.type IN ('principle', 'pattern')
-    ORDER BY rank
-    LIMIT 5
-  `);
-
-  let relevant: any[] = [];
-  try {
-    relevant = ftsQuery.all(safeQuery);
-  } catch {
-    // FTS error
-  }
-
-  return {
-    decision,
-    context,
-    relevant_docs: relevant.map((r: any) => ({
-      id: r.id,
-      type: r.type,
-      content: r.content?.substring(0, 300) ?? '',
-      source: r.source_file,
-    })),
-    guidance: relevant.length > 0
-      ? `Based on ${relevant.length} relevant documents, consider the principles and patterns above.`
-      : 'No specific guidance found. Consider adding relevant principles to the knowledge base.',
-  };
+  // Delegate to canonical ConsultService (async for hybrid search)
+  const { consult, toMcpResponse } = await import('../consult-service.js');
+  const result = await consult(decision, context || '', {
+    useVectorSearch: true,
+    useThaiNlp: true,
+    limit: 3
+  });
+  return toMcpResponse(result);
 }
 
 function handleOracleReflect(sqlite: Database) {

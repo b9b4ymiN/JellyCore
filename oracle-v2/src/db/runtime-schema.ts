@@ -203,6 +203,19 @@ export function ensureRuntimeSchema(database: Database): void {
   `);
 
   database.exec(`
+    CREATE TABLE IF NOT EXISTS concept_relationships (
+      id TEXT PRIMARY KEY,
+      from_concept TEXT NOT NULL,
+      to_concept TEXT NOT NULL,
+      relationship_type TEXT NOT NULL,
+      strength INTEGER DEFAULT 1,
+      last_seen INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      metadata TEXT
+    )
+  `);
+
+  database.exec(`
     CREATE TABLE IF NOT EXISTS supersede_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       old_path TEXT NOT NULL,
@@ -339,6 +352,11 @@ export function ensureRuntimeSchema(database: Database): void {
   database.exec('CREATE INDEX IF NOT EXISTS idx_trace_prev ON trace_log(prev_trace_id)');
   database.exec('CREATE INDEX IF NOT EXISTS idx_trace_next ON trace_log(next_trace_id)');
   database.exec('CREATE INDEX IF NOT EXISTS idx_trace_created ON trace_log(created_at)');
+
+  database.exec('CREATE INDEX IF NOT EXISTS idx_rel_from ON concept_relationships(from_concept)');
+  database.exec('CREATE INDEX IF NOT EXISTS idx_rel_to ON concept_relationships(to_concept)');
+  database.exec('CREATE INDEX IF NOT EXISTS idx_rel_type ON concept_relationships(relationship_type)');
+  database.exec('CREATE INDEX IF NOT EXISTS idx_rel_strength ON concept_relationships(strength)');
 
   database.exec('CREATE INDEX IF NOT EXISTS idx_supersede_old_path ON supersede_log(old_path)');
   database.exec('CREATE INDEX IF NOT EXISTS idx_supersede_new_path ON supersede_log(new_path)');

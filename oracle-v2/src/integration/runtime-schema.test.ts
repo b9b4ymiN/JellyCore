@@ -15,6 +15,11 @@ function columnNames(database: Database, table: string): string[] {
     .map((row) => row.name);
 }
 
+function indexNames(database: Database, table: string): string[] {
+  return (database.query(`PRAGMA index_list('${table}')`).all() as Array<{ name: string }>)
+    .map((row) => row.name);
+}
+
 async function removeFileWithRetry(filePath: string, attempts = 10, delayMs = 50): Promise<void> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -127,16 +132,33 @@ describe('Runtime schema compatibility', () => {
     expect(columnNames(sqlite, 'trace_log')).toContain('child_trace_ids');
   });
 
-  test('creates supersede_log and logging columns for legacy databases', () => {
+  test('creates supersede_log, graph tables, and logging columns for legacy databases', () => {
     const supersedeExists = sqlite.query(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='supersede_log'"
     ).get();
+    const graphExists = sqlite.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='concept_relationships'"
+    ).get();
 
     expect(supersedeExists).toBeTruthy();
+    expect(graphExists).toBeTruthy();
     expect(columnNames(sqlite, 'search_log')).toContain('project');
     expect(columnNames(sqlite, 'search_log')).toContain('results');
     expect(columnNames(sqlite, 'oracle_documents')).toContain('memory_layer');
     expect(columnNames(sqlite, 'oracle_documents')).toContain('embedding_model');
+    expect(columnNames(sqlite, 'concept_relationships')).toEqual([
+      'id',
+      'from_concept',
+      'to_concept',
+      'relationship_type',
+      'strength',
+      'last_seen',
+      'created_at',
+      'metadata',
+    ]);
+    expect(indexNames(sqlite, 'concept_relationships')).toEqual(
+      expect.arrayContaining(['idx_rel_from', 'idx_rel_to', 'idx_rel_type', 'idx_rel_strength']),
+    );
   });
 
   test('upgraded schema accepts new MCP writes', () => {

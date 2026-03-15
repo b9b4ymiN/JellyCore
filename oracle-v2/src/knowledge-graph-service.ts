@@ -11,12 +11,16 @@
  * - Find paths between concepts
  */
 
-import { eq, desc, and, or, sql, inArray } from 'drizzle-orm';
-import { db } from './db/index.js';
+import { eq, desc, and, or, sql, inArray, ne } from 'drizzle-orm';
+import { db, sqlite } from './db/index.js';
 import { conceptRelationships, oracleDocuments } from './db/schema.js';
 import { logNonFatal } from './non-fatal.js';
 
 export type RelationshipType = 'co-occurs' | 'related_to' | 'part_of' | 'prerequisite';
+export type GraphHealthStatus = 'ready' | 'empty' | 'missing_table' | 'query_error';
+
+const CO_OCCURS_RELATIONSHIP: RelationshipType = 'co-occurs';
+const DISCOVERY_INSERT_BATCH_SIZE = 100;
 
 export interface ConceptRelationship {
   id?: string;
@@ -29,56 +33,134 @@ export interface ConceptRelationship {
   metadata?: Record<string, any>;
 }
 
+export interface GraphDiscoveryResult {
+  mode: 'rebuild';
+  processed: number;
+  attemptedPairs: number;
+  relationships: number;
+  skippedInvalidDocuments: number;
+  skippedInsufficientConcepts: number;
+  durationMs: number;
+}
+
+interface AggregatedRelationship {
+  id: string;
+  fromConcept: string;
+  toConcept: string;
+  relationshipType: RelationshipType;
+  strength: number;
+  lastSeen: number;
+  createdAt: number;
+  metadata: string | null;
+}
+
+export class GraphDiscoveryError extends Error {
+  readonly result: GraphDiscoveryResult;
+  readonly cause?: unknown;
+
+  constructor(message: string, result: GraphDiscoveryResult, cause?: unknown) {
+    super(message);
+    this.name = 'GraphDiscoveryError';
+    this.result = result;
+    this.cause = cause;
+  }
+}
+
+function makeCanonicalPair(a: string, b: string): [string, string] {
+  return a < b ? [a, b] : [b, a];
+}
+
+function makeRelationshipKey(fromConcept: string, toConcept: string, relationshipType: RelationshipType): string {
+  return `${fromConcept}|${toConcept}|${relationshipType}`;
+}
+
+function makeRelationshipId(fromConcept: string, toConcept: string, relationshipType: RelationshipType): string {
+  return `rel_${fromConcept}_${toConcept}_${relationshipType}`;
+}
+
+function normalizeConcepts(rawConcepts: string): string[] | null {
+  try {
+    const parsed = JSON.parse(rawConcepts || '[]');
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+
+    const concepts = parsed
+      .filter((concept): concept is string => typeof concept === 'string')
+      .map((concept) => concept.trim())
+      .filter(Boolean);
+
+    return [...new Set(concepts)];
+  } catch {
+    return null;
+  }
+}
+
+function chunkArray<T>(items: T[], batchSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += batchSize) {
+    chunks.push(items.slice(index, index + batchSize));
+  }
+  return chunks;
+}
+
 export class KnowledgeGraphService {
   /**
    * Record a relationship between two concepts
    */
   async recordRelationship(rel: ConceptRelationship): Promise<void> {
     const now = Date.now();
-    const id = rel.id || `rel_${rel.fromConcept}_${rel.toConcept}_${rel.relationshipType}`;
+    const [fromConcept, toConcept] =
+      rel.relationshipType === CO_OCCURS_RELATIONSHIP
+        ? makeCanonicalPair(rel.fromConcept, rel.toConcept)
+        : [rel.fromConcept, rel.toConcept];
+    const id = rel.id || makeRelationshipId(fromConcept, toConcept, rel.relationshipType);
 
     try {
       // Check if relationship exists
-      const existing = await db
+      const existing = db
         .select()
         .from(conceptRelationships)
         .where(
           and(
-            eq(conceptRelationships.fromConcept, rel.fromConcept),
-            eq(conceptRelationships.toConcept, rel.toConcept),
+            eq(conceptRelationships.fromConcept, fromConcept),
+            eq(conceptRelationships.toConcept, toConcept),
             eq(conceptRelationships.relationshipType, rel.relationshipType)
           )
         )
-        .limit(1);
+        .limit(1)
+        .all();
 
       if (existing.length > 0) {
         // Update existing: increment strength
-        await db
+        db
           .update(conceptRelationships)
           .set({
             strength: sql`${conceptRelationships.strength} + 1`,
             lastSeen: now,
           })
-          .where(eq(conceptRelationships.id, existing[0].id));
+          .where(eq(conceptRelationships.id, existing[0].id))
+          .run();
 
-        console.log(`[Graph] Updated relationship: ${rel.fromConcept} -> ${rel.toConcept}`);
+        console.log(`[Graph] Updated relationship: ${fromConcept} -> ${toConcept}`);
       } else {
         // Insert new
-        await db.insert(conceptRelationships).values({
+        db.insert(conceptRelationships).values({
           id,
-          fromConcept: rel.fromConcept,
-          toConcept: rel.toConcept,
+          fromConcept,
+          toConcept,
           relationshipType: rel.relationshipType,
           strength: rel.strength || 1,
           lastSeen: now,
           createdAt: now,
           metadata: rel.metadata ? JSON.stringify(rel.metadata) : null,
-        });
+        }).run();
 
-        console.log(`[Graph] Created relationship: ${rel.fromConcept} -> ${rel.toConcept}`);
+        console.log(`[Graph] Created relationship: ${fromConcept} -> ${toConcept}`);
       }
     } catch (error) {
       logNonFatal('graph.record_relationship', error, { rel });
+      throw error;
     }
   }
 
@@ -86,13 +168,13 @@ export class KnowledgeGraphService {
    * Discover relationships from all documents
    * Analyzes concept co-occurrence patterns
    */
-  async discoverRelationships(): Promise<{ processed: number; relationships: number }> {
+  async discoverRelationships(): Promise<GraphDiscoveryResult> {
     console.log('[Graph] 🔍 Discovering relationships...');
     const startTime = Date.now();
 
     try {
       // Get all documents with concepts
-      const docs = await db
+      const docs = db
         .select({
           id: oracleDocuments.id,
           concepts: oracleDocuments.concepts,
@@ -100,39 +182,140 @@ export class KnowledgeGraphService {
         .from(oracleDocuments)
         .all();
 
-      let relationshipCount = 0;
+      const existingRelationships = db
+        .select({
+          fromConcept: conceptRelationships.fromConcept,
+          toConcept: conceptRelationships.toConcept,
+          relationshipType: conceptRelationships.relationshipType,
+          createdAt: conceptRelationships.createdAt,
+        })
+        .from(conceptRelationships)
+        .all();
 
-      for (const doc of docs) {
-        let concepts: string[] = [];
-        try {
-          const parsed = JSON.parse(doc.concepts || '[]');
-          if (Array.isArray(parsed)) {
-            concepts = parsed.filter((c): c is string => typeof c === 'string');
-          }
-        } catch {
+      const existingCreatedAt = new Map<string, number>();
+      for (const relationship of existingRelationships) {
+        if (!relationship.fromConcept || !relationship.toConcept || !relationship.relationshipType) {
           continue;
         }
 
-        // Record co-occurrence relationships
+        const key =
+          relationship.relationshipType === CO_OCCURS_RELATIONSHIP
+            ? makeRelationshipKey(
+                ...makeCanonicalPair(relationship.fromConcept, relationship.toConcept),
+                CO_OCCURS_RELATIONSHIP,
+              )
+            : makeRelationshipKey(
+                relationship.fromConcept,
+                relationship.toConcept,
+                relationship.relationshipType as RelationshipType,
+              );
+
+        existingCreatedAt.set(key, relationship.createdAt || startTime);
+      }
+
+      let attemptedPairs = 0;
+      let skippedInvalidDocuments = 0;
+      let skippedInsufficientConcepts = 0;
+      const now = Date.now();
+      const edgeMap = new Map<string, AggregatedRelationship>();
+
+      for (const doc of docs) {
+        const concepts = normalizeConcepts(doc.concepts || '[]');
+        if (!concepts) {
+          skippedInvalidDocuments += 1;
+          continue;
+        }
+
+        if (concepts.length < 2) {
+          skippedInsufficientConcepts += 1;
+          continue;
+        }
+
         for (let i = 0; i < concepts.length; i++) {
           for (let j = i + 1; j < concepts.length; j++) {
-            await this.recordRelationship({
-              fromConcept: concepts[i],
-              toConcept: concepts[j],
-              relationshipType: 'co-occurs',
+            const [fromConcept, toConcept] = makeCanonicalPair(concepts[i], concepts[j]);
+            if (fromConcept === toConcept) {
+              continue;
+            }
+
+            attemptedPairs += 1;
+            const key = makeRelationshipKey(fromConcept, toConcept, CO_OCCURS_RELATIONSHIP);
+            const existing = edgeMap.get(key);
+
+            if (existing) {
+              existing.strength += 1;
+              continue;
+            }
+
+            edgeMap.set(key, {
+              id: makeRelationshipId(fromConcept, toConcept, CO_OCCURS_RELATIONSHIP),
+              fromConcept,
+              toConcept,
+              relationshipType: CO_OCCURS_RELATIONSHIP,
+              strength: 1,
+              lastSeen: now,
+              createdAt: existingCreatedAt.get(key) ?? now,
+              metadata: null,
             });
-            relationshipCount++;
           }
         }
       }
 
-      const duration = Date.now() - startTime;
-      console.log(`[Graph] ✅ Discovered ${relationshipCount} relationships from ${docs.length} documents (${duration}ms)`);
+      const relationships = [...edgeMap.values()];
+      const result: GraphDiscoveryResult = {
+        mode: 'rebuild',
+        processed: docs.length,
+        attemptedPairs,
+        relationships: relationships.length,
+        skippedInvalidDocuments,
+        skippedInsufficientConcepts,
+        durationMs: 0,
+      };
 
-      return { processed: docs.length, relationships: relationshipCount };
+      try {
+        db.transaction((tx) => {
+          tx.delete(conceptRelationships).run();
+
+          for (const batch of chunkArray(relationships, DISCOVERY_INSERT_BATCH_SIZE)) {
+            tx.insert(conceptRelationships).values(batch).run();
+          }
+        });
+      } catch (error) {
+        result.durationMs = Date.now() - startTime;
+        logNonFatal('graph.discover_relationships', error, {
+          processed: result.processed,
+          attemptedPairs: result.attemptedPairs,
+          relationships: result.relationships,
+        });
+        throw new GraphDiscoveryError('Relationship discovery failed', result, error);
+      }
+
+      const duration = Date.now() - startTime;
+      result.durationMs = duration;
+
+      console.log(
+        `[Graph] ✅ Rebuilt ${relationships.length} relationships from ${docs.length} documents (${duration}ms)`,
+      );
+
+      return result;
     } catch (error) {
+      if (error instanceof GraphDiscoveryError) {
+        throw error;
+      }
+
+      const duration = Date.now() - startTime;
+      const result: GraphDiscoveryResult = {
+        mode: 'rebuild',
+        processed: 0,
+        attemptedPairs: 0,
+        relationships: 0,
+        skippedInvalidDocuments: 0,
+        skippedInsufficientConcepts: 0,
+        durationMs: duration,
+      };
+
       logNonFatal('graph.discover_relationships', error);
-      return { processed: 0, relationships: 0 };
+      throw new GraphDiscoveryError('Relationship discovery failed', result, error);
     }
   }
 
@@ -150,23 +333,49 @@ export class KnowledgeGraphService {
     const { limit = 20, minStrength = 1, types } = options;
 
     try {
+      const baseCondition = or(
+        and(
+          eq(conceptRelationships.relationshipType, CO_OCCURS_RELATIONSHIP),
+          or(
+            eq(conceptRelationships.fromConcept, concept),
+            eq(conceptRelationships.toConcept, concept),
+          ),
+        ),
+        and(
+          ne(conceptRelationships.relationshipType, CO_OCCURS_RELATIONSHIP),
+          eq(conceptRelationships.fromConcept, concept),
+        ),
+      );
+
       const conditions = [
-        eq(conceptRelationships.fromConcept, concept),
-        sql`${conceptRelationships.strength} >= ${minStrength}`
+        baseCondition,
+        sql`${conceptRelationships.strength} >= ${minStrength}`,
       ];
 
       if (types && types.length > 0) {
         conditions.push(inArray(conceptRelationships.relationshipType, types));
       }
 
-      const results = await db
+      const counterpartConcept = sql<string>`
+        CASE
+          WHEN ${conceptRelationships.relationshipType} = ${CO_OCCURS_RELATIONSHIP}
+           AND ${conceptRelationships.fromConcept} = ${concept}
+            THEN ${conceptRelationships.toConcept}
+          WHEN ${conceptRelationships.relationshipType} = ${CO_OCCURS_RELATIONSHIP}
+           AND ${conceptRelationships.toConcept} = ${concept}
+            THEN ${conceptRelationships.fromConcept}
+          ELSE ${conceptRelationships.toConcept}
+        END
+      `;
+
+      const results = db
         .select({
-          concept: conceptRelationships.toConcept,
+          concept: counterpartConcept,
           relationship: conceptRelationships.relationshipType,
           strength: conceptRelationships.strength,
         })
         .from(conceptRelationships)
-        .where(and(...conditions))
+        .where(and(...conditions.filter(Boolean)))
         .orderBy(desc(conceptRelationships.strength))
         .limit(limit)
         .all();
@@ -193,7 +402,7 @@ export class KnowledgeGraphService {
   ): Promise<string[] | null> {
     try {
       // Get all relationships for BFS
-      const allRels = await db
+      const allRels = db
         .select({
           from: conceptRelationships.fromConcept,
           to: conceptRelationships.toConcept,
@@ -251,16 +460,22 @@ export class KnowledgeGraphService {
    */
   async getTopConcepts(limit: number = 20): Promise<Array<{ concept: string; connections: number }>> {
     try {
-      const results = await db
-        .select({
-          concept: conceptRelationships.fromConcept,
-          connections: sql<number>`count(*)`,
-        })
-        .from(conceptRelationships)
-        .groupBy(conceptRelationships.fromConcept)
-        .orderBy(desc(sql`count(*)`))
-        .limit(limit)
-        .all();
+      const statement = sqlite.prepare(`
+        SELECT concept, COUNT(*) as connections
+        FROM (
+          SELECT from_concept AS concept FROM concept_relationships
+          UNION ALL
+          SELECT to_concept AS concept FROM concept_relationships
+        )
+        GROUP BY concept
+        ORDER BY connections DESC, concept ASC
+        LIMIT ?
+      `);
+
+      const results = statement.all(limit) as Array<{
+        concept: string | null;
+        connections: number | null;
+      }>;
 
       return results.map(r => ({
         concept: r.concept || '',
@@ -282,19 +497,23 @@ export class KnowledgeGraphService {
     avgStrength: number;
   }> {
     try {
-      const totalRels = await db
+      const totalRels = db
         .select({ count: sql<number>`count(*)` })
         .from(conceptRelationships)
         .get();
 
-      const uniqueConcepts = await db
-        .select({
-          count: sql<number>`count(distinct ${conceptRelationships.fromConcept})`,
-        })
-        .from(conceptRelationships)
-        .get();
+      const uniqueConcepts = sqlite
+        .prepare(`
+          SELECT COUNT(*) as count
+          FROM (
+            SELECT from_concept AS concept FROM concept_relationships
+            UNION
+            SELECT to_concept AS concept FROM concept_relationships
+          )
+        `)
+        .get() as { count: number | null };
 
-      const byType = await db
+      const byType = db
         .select({
           type: conceptRelationships.relationshipType,
           count: sql<number>`count(*)`,
@@ -303,7 +522,7 @@ export class KnowledgeGraphService {
         .groupBy(conceptRelationships.relationshipType)
         .all();
 
-      const avgStrength = await db
+      const avgStrength = db
         .select({
           avg: sql<number>`avg(${conceptRelationships.strength})`,
         })

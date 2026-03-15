@@ -1216,46 +1216,23 @@ Philosophy: "Nothing is Deleted" — All interactions logged.`,
    */
   private async handleConsult(input: OracleConsultInput) {
     const { decision, context = '' } = input;
-    const query = context ? `${decision} ${context}` : decision;
-    const safeQuery = this.sanitizeFtsQuery(query);
 
-    // Search for relevant principles
-    const principleStmt = this.sqlite.prepare(`
-      SELECT f.id, f.content, d.source_file
-      FROM oracle_fts f
-      JOIN oracle_documents d ON f.id = d.id
-      WHERE oracle_fts MATCH ? AND d.type = 'principle'
-      ORDER BY rank
-      LIMIT 3
-    `);
-    const principles = principleStmt.all(safeQuery);
-
-    // Search for relevant learnings
-    const learningStmt = this.sqlite.prepare(`
-      SELECT f.id, f.content, d.source_file
-      FROM oracle_fts f
-      JOIN oracle_documents d ON f.id = d.id
-      WHERE oracle_fts MATCH ? AND d.type = 'learning'
-      ORDER BY rank
-      LIMIT 3
-    `);
-    const patterns = learningStmt.all(safeQuery);
-
-    // Synthesize guidance
-    const guidance = this.synthesizeGuidance(
-      decision,
-      principles.map((p: any) => p.content),
-      patterns.map((p: any) => p.content)
-    );
+    // Delegate to canonical ConsultService
+    const { consult } = await import('./server/consult-service.js');
+    const result = await consult(decision, context, {
+      useVectorSearch: true,
+      useThaiNlp: true,
+      limit: 3
+    });
 
     // Log the consultation to database (Drizzle)
     try {
       this.db.insert(consultLog).values({
         decision,
         context: context || null,
-        principlesFound: principles.length,
-        patternsFound: patterns.length,
-        guidance,
+        principlesFound: result.principles.length,
+        patternsFound: result.patterns.length,
+        guidance: result.guidance,
         createdAt: Date.now(),
       }).run();
     } catch (e) {
@@ -1264,22 +1241,22 @@ Philosophy: "Nothing is Deleted" — All interactions logged.`,
     }
 
     // Log to console
-    console.error(`[MCP:CONSULT] "${decision}" → ${principles.length} principles, ${patterns.length} patterns`);
+    console.error(`[MCP:CONSULT] "${decision}" → ${result.principles.length} principles, ${result.patterns.length} patterns`);
 
     return {
       content: [{
         type: 'text',
         text: JSON.stringify({
-          decision,
-          principles: principles.map((p: any) => ({
+          decision: result.decision,
+          principles: result.principles.map((p: any) => ({
             content: p.content.substring(0, 300),
             source: p.source_file
           })),
-          patterns: patterns.map((p: any) => ({
+          patterns: result.patterns.map((p: any) => ({
             content: p.content.substring(0, 300),
             source: p.source_file
           })),
-          guidance
+          guidance: result.guidance
         }, null, 2)
       }]
     };

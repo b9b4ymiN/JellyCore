@@ -29,13 +29,18 @@ async function testKnowledgeGraph(): Promise<void> {
     });
 
     if (!discoverResp.ok) {
-      throw new Error(`Discovery failed: ${discoverResp.status}`);
+      throw new Error(`Discovery failed: ${discoverResp.status} ${await discoverResp.text()}`);
     }
 
     const discoverData = await discoverResp.json();
     console.log(`${colors.green}✅ Discovered relationships${colors.reset}`);
+    console.log(`   Mode: ${discoverData.mode}`);
     console.log(`   Processed: ${discoverData.processed} documents`);
-    console.log(`   Relationships: ${discoverData.relationships}\n`);
+    console.log(`   Attempted Pairs: ${discoverData.attemptedPairs}`);
+    console.log(`   Relationships: ${discoverData.relationships}`);
+    console.log(`   Skipped Invalid: ${discoverData.skippedInvalidDocuments}`);
+    console.log(`   Skipped Insufficient: ${discoverData.skippedInsufficientConcepts}`);
+    console.log(`   Duration: ${discoverData.durationMs}ms\n`);
 
     // Test 2: Get graph stats
     console.log(`${colors.yellow}Test 2: Getting graph statistics...${colors.reset}`);
@@ -51,6 +56,12 @@ async function testKnowledgeGraph(): Promise<void> {
     console.log(`   Total Concepts: ${statsData.stats.totalConcepts}`);
     console.log(`   Avg Strength: ${statsData.stats.avgStrength.toFixed(2)}`);
     console.log(`   By Type:`, statsData.stats.byType, '\n');
+
+    if (statsData.stats.totalRelationships !== discoverData.relationships) {
+      throw new Error(
+        `Persisted relationship count mismatch: discover=${discoverData.relationships} stats=${statsData.stats.totalRelationships}`,
+      );
+    }
 
     // Test 3: Get top concepts
     console.log(`${colors.yellow}Test 3: Getting top concepts...${colors.reset}`);
@@ -129,7 +140,11 @@ async function preflightChecks(): Promise<void> {
     if (!response.ok) {
       throw new Error(`Health check failed: ${response.status}`);
     }
+    const health = await response.json();
     console.log(`${colors.green}✅ Oracle API is reachable${colors.reset}\n`);
+    console.log(`   Graph Table: ${health.graph?.tableExists ? 'yes' : 'no'}`);
+    console.log(`   Graph Status: ${health.graph?.status || 'unknown'}`);
+    console.log(`   Graph Relationships: ${health.graph?.relationshipCount ?? 'unknown'}\n`);
   } catch (error) {
     console.log(`${colors.red}❌ Oracle API not reachable: ${ORACLE_API}${colors.reset}`);
     console.log(`${colors.yellow}   Make sure server is running: bun run server${colors.reset}`);

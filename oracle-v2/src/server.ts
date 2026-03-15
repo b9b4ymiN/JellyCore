@@ -24,7 +24,7 @@ import {
   closeDb,
   initLoggingTables,
 } from './server/db.js';
-import { db, ensureSchema, indexingStatus } from './db/index.js';
+import { db, ensureSchema, indexingStatus, sqlite } from './db/index.js';
 import { eq } from 'drizzle-orm';
 import { getEpisodicStore } from './memory/episodic.js';
 import { refreshAllDecayScores } from './memory/decay.js';
@@ -108,6 +108,44 @@ const RATE_LIMIT_WRITE_LIMIT = Math.max(
   Number.parseInt(process.env.ORACLE_RATE_LIMIT_WRITE_LIMIT || '30', 10) || 30,
 );
 
+function getGraphHealth(): {
+  tableExists: boolean;
+  relationshipCount: number;
+  status: 'ready' | 'empty' | 'missing_table' | 'query_error';
+} {
+  try {
+    const tableExists = sqlite
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='concept_relationships'")
+      .get();
+
+    if (!tableExists) {
+      return {
+        tableExists: false,
+        relationshipCount: 0,
+        status: 'missing_table',
+      };
+    }
+
+    const countRow = sqlite
+      .query('SELECT COUNT(*) as count FROM concept_relationships')
+      .get() as { count: number } | null;
+    const relationshipCount = countRow?.count || 0;
+
+    return {
+      tableExists: true,
+      relationshipCount,
+      status: relationshipCount > 0 ? 'ready' : 'empty',
+    };
+  } catch (error) {
+    console.warn('[Health] Graph status query failed:', error);
+    return {
+      tableExists: true,
+      relationshipCount: 0,
+      status: 'query_error',
+    };
+  }
+}
+
 const { adminAuth } = registerSecurityMiddleware(app, {
   adminAuthToken: ADMIN_AUTH_TOKEN,
   defaultCorsOrigins: [
@@ -123,7 +161,13 @@ const { adminAuth } = registerSecurityMiddleware(app, {
 });
 
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', server: 'oracle-nightly', port: PORT, oracleV2: 'connected' });
+  return c.json({
+    status: 'ok',
+    server: 'oracle-nightly',
+    port: PORT,
+    oracleV2: 'connected',
+    graph: getGraphHealth(),
+  });
 });
 
 app.get('/metrics', (c) => {

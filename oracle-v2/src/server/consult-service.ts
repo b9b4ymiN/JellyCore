@@ -131,7 +131,7 @@ function runFtsSearch(
       source: 'fts' as const
     }));
   } catch (error) {
-    console.error(`[ConsultService FTS Error] type=${docType}: ${sanitizeError(error)}`);
+    console.error(`[ConsultService FTS Error] type=${docType} query="${matchQuery.substring(0,50)}": ${sanitizeError(error)}`);
     return [];
   }
 }
@@ -256,6 +256,9 @@ export async function consult(
   }
 
   const ftsPlan = buildFtsQueryPlan(segmented);
+
+  // Debug: log query plan
+  console.log(`[ConsultService] query="${query.substring(0,50)}", strict="${ftsPlan.strictQuery.substring(0,50)}", or="${ftsPlan.orQuery?.substring(0,50)}"`);
 
   // === FTS Search ===
   let ftsPrinciples = runFtsSearch('principle', ftsPlan.strictQuery, limit);
