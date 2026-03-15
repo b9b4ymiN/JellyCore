@@ -43,13 +43,36 @@ export interface FtsQueryPlan {
   tokens: string[];
 }
 
-const FTS_RESERVED_RE = /[?*+\-()^~"':]/g;
+// FTS5 reserved chars + common punctuation that breaks parsing
+const FTS_RESERVED_RE = /[?*+\-()^~"':.\/\\!@#$%^&_=+\[\]{}|;,<>/]/g;
+
+// Max input length to prevent resource exhaustion
+const MAX_QUERY_LENGTH = 1000;
 
 function sanitizeFtsToken(token: string): string {
-  return token
+  if (!token || typeof token !== 'string') return '';
+
+  // Clamp length first
+  const clamped = token.length > MAX_QUERY_LENGTH ? token.substring(0, MAX_QUERY_LENGTH) : token;
+
+  return clamped
     .replace(FTS_RESERVED_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Validate and sanitize user input for search/consult
+ */
+export function validateInput(input: string, maxLength: number = MAX_QUERY_LENGTH): string {
+  if (!input || typeof input !== 'string') return '';
+
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return '';
+
+  return trimmed.length > maxLength
+    ? trimmed.substring(0, maxLength)
+    : trimmed;
 }
 
 /**
@@ -362,7 +385,7 @@ export async function handleSearch(
 /**
  * Normalize FTS5 rank score to 0-1 range (higher = better)
  */
-function normalizeRank(rank: number): number {
+export function normalizeRank(rank: number): number {
   // FTS5 rank is negative (more negative = better match)
   // Convert to positive 0-1 score
   return Math.min(1, Math.max(0, 1 / (1 + Math.abs(rank))));
@@ -526,131 +549,55 @@ export function synthesizeGuidance(decision: string, principles: any[], patterns
 
 /**
  * Get guidance on a decision (always hybrid: FTS + vector)
+ * @deprecated Use consult() from consult-service.ts instead
  */
 export async function handleConsult(decision: string, context: string = '') {
-  const query = context ? `${decision} ${context}` : decision;
+  // Delegate to canonical ConsultService
+  const { consult } = await import('./consult-service.js');
+  const result = await consult(decision, context, {
+    useVectorSearch: true,
+    useThaiNlp: true,
+    limit: 3
+  });
 
-  // Thai NLP preprocessing (graceful - falls back if sidecar is down)
-  const thaiNlp = getThaiNlpClient();
-  const { segmented } = await thaiNlp.preprocessQuery(query);
+  // Log the consultation - convert ConsultDocument to SearchResult format
+  const toSearchResult = (doc: any): SearchResult => ({
+    id: doc.id,
+    type: doc.type,
+    content: doc.content,
+    source_file: doc.source_file,
+    concepts: [],
+    score: doc.score,
+    source: doc.source
+  });
 
-  const ftsPlan = buildFtsQueryPlan(segmented);
-  let consultFtsQueryMode: 'strict' | 'or-fallback' = 'strict';
-
-  const runConsultFtsSearch = (docType: 'principle' | 'learning', matchQuery: string): any[] => {
-    if (!matchQuery) return [];
-
-    const stmt = sqlite.prepare(`
-      SELECT f.id, f.content, d.source_file, rank as score
-      FROM oracle_fts f
-      JOIN oracle_documents d ON f.id = d.id
-      WHERE oracle_fts MATCH ? AND d.type = ?
-      ORDER BY rank
-      LIMIT 5
-    `);
-
-    return stmt.all(matchQuery, docType).map((row: any) => ({
-      ...row,
-      score: normalizeRank(row.score),
-      source: 'fts' as const
-    }));
-  };
-
-  let ftsPrinciples = runConsultFtsSearch('principle', ftsPlan.strictQuery);
-  let ftsPatterns = runConsultFtsSearch('learning', ftsPlan.strictQuery);
-
-  if (ftsPlan.orQuery) {
-    let usedFallback = false;
-
-    if (ftsPrinciples.length === 0) {
-      const relaxedPrinciples = runConsultFtsSearch('principle', ftsPlan.orQuery);
-      if (relaxedPrinciples.length > 0) {
-        ftsPrinciples = relaxedPrinciples;
-        usedFallback = true;
-      }
-    }
-
-    if (ftsPatterns.length === 0) {
-      const relaxedPatterns = runConsultFtsSearch('learning', ftsPlan.orQuery);
-      if (relaxedPatterns.length > 0) {
-        ftsPatterns = relaxedPatterns;
-        usedFallback = true;
-      }
-    }
-
-    if (usedFallback) {
-      consultFtsQueryMode = 'or-fallback';
-    }
-  }
-
-  console.log(
-    `[Consult] FTS query mode: ${consultFtsQueryMode} (tokens=${ftsPlan.tokens.length}, principles=${ftsPrinciples.length}, patterns=${ftsPatterns.length})`,
+  logConsult(
+    result.decision,                          // Use sanitized value
+    result.context || '',                     // Use sanitized value
+    result.principles.length,
+    result.patterns.length,
+    result.guidance,
+    result.principles.map(toSearchResult),
+    result.patterns.map(toSearchResult)
   );
 
-  // Run vector search (always, not just fallback)
-  let vectorPrinciples: any[] = [];
-  let vectorPatterns: any[] = [];
-
-  try {
-    const client = getChromaClient();
-    console.log('[Consult] Hybrid search for:', query);
-
-    const vectorResults = await client.query(query, 15);
-    console.log('[Consult] Vector returned:', vectorResults.ids?.length || 0, 'results');
-
-    if (vectorResults.ids?.length > 0) {
-      for (let i = 0; i < vectorResults.ids.length; i++) {
-        const docType = vectorResults.metadatas?.[i]?.type;
-        const distance = vectorResults.distances?.[i] || 1;
-        const similarity = Math.max(0, 1 - distance / 2);
-
-        const doc = {
-          id: vectorResults.ids[i],
-          content: vectorResults.documents?.[i] || '',
-          source_file: vectorResults.metadatas?.[i]?.source_file || '',
-          score: similarity,
-          source: 'vector' as const
-        };
-
-        if (docType === 'principle' && vectorPrinciples.length < 5) {
-          vectorPrinciples.push(doc);
-        } else if (docType === 'learning' && vectorPatterns.length < 5) {
-          vectorPatterns.push(doc);
-        }
-      }
-    }
-  } catch (error) {
-    console.error('[Consult Vector Search Error]', error);
-  }
-
-  // Merge FTS and vector results (dedupe by id, boost score if in both)
-  const principlesRaw = mergeConsultResults(ftsPrinciples, vectorPrinciples, 3);
-  const patternsRaw = mergeConsultResults(ftsPatterns, vectorPatterns, 3);
-
-  console.log('[Consult] Final:', principlesRaw.length, 'principles,', patternsRaw.length, 'patterns');
-
-  const guidance = synthesizeGuidance(decision, principlesRaw, patternsRaw);
-
-  // Log the consultation with full details
-  logConsult(decision, context, principlesRaw.length, patternsRaw.length, guidance, principlesRaw, patternsRaw);
-
   return {
-    decision,
-    principles: principlesRaw.map((p: any) => ({
+    decision: result.decision,
+    principles: result.principles.map((p: any) => ({
       id: p.id,
       content: p.content.substring(0, 300),
       source_file: p.source_file,
       score: p.score,
       source: p.source
     })),
-    patterns: patternsRaw.map((p: any) => ({
+    patterns: result.patterns.map((p: any) => ({
       id: p.id,
       content: p.content.substring(0, 300),
       source_file: p.source_file,
       score: p.score,
       source: p.source
     })),
-    guidance
+    guidance: result.guidance
   };
 }
 
