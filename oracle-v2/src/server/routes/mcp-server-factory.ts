@@ -443,7 +443,7 @@ export function getToolHandlers(): Map<string, ToolHandler> {
   // oracle_consult
   handlers.set('oracle_consult', async (args) => {
     const { decision, context } = args;
-    const result = handleOracleConsult(sqlite, decision, context);
+    const result = await handleOracleConsult(sqlite, decision, context);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   });
 
