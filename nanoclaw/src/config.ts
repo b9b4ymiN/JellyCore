@@ -142,6 +142,8 @@ export const USER_PROGRESS_INTERVALS_MS = (
   .split(',')
   .map((v) => parseInt(v.trim(), 10))
   .filter((v) => Number.isFinite(v) && v > 0);
+export const PIPE_USER_MESSAGES_TO_ACTIVE_QUERY =
+  (process.env.PIPE_USER_MESSAGES_TO_ACTIVE_QUERY || 'false').toLowerCase() === 'true';
 
 // Spawn circuit breaker + docker runtime watchdog
 export const SPAWN_CIRCUIT_THRESHOLD = Math.max(

@@ -11,6 +11,7 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  PIPE_USER_MESSAGES_TO_ACTIVE_QUERY,
   POOL_ENABLED,
   RECEIPT_RECOVERY_MAX_AGE_MS,
   SESSION_MAX_AGE_MS,
@@ -1299,7 +1300,10 @@ async function checkAndProcessMessages(): Promise<void> {
         allPending.length > 0 ? allPending : groupMessages;
       const formatted = formatMessages(messagesToSend);
 
-      if (queue.sendMessage(chatJid, formatted)) {
+      const pipedToActiveContainer =
+        PIPE_USER_MESSAGES_TO_ACTIVE_QUERY && queue.sendMessage(chatJid, formatted);
+
+      if (pipedToActiveContainer) {
         logger.debug(
           { chatJid, count: messagesToSend.length },
           'Piped messages to active container',
