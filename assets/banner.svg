@@ -1,0 +1,311 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400">
+  <defs>
+    <!-- Background — deep navy, diagonal -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06101F"/>
+      <stop offset="35%" stop-color="#0B1A30"/>
+      <stop offset="65%" stop-color="#0E2240"/>
+      <stop offset="100%" stop-color="#071422"/>
+    </linearGradient>
+    <!-- Dome gradient -->
+    <linearGradient id="dome" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="40%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <!-- Glass overlay -->
+    <linearGradient id="glass" x1="30%" y1="0%" x2="70%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.38"/>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <!-- Radial inner glow -->
+    <radialGradient id="iglow" cx="50%" cy="38%" r="42%">
+      <stop offset="0%" stop-color="#BAE6FD" stop-opacity="0.65"/>
+      <stop offset="60%" stop-color="#60A5FA" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#2563EB" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Core -->
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#F0F9FF"/>
+      <stop offset="45%" stop-color="#7DD3FC"/>
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0.5"/>
+    </radialGradient>
+    <!-- Tentacle grades -->
+    <linearGradient id="t1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0.88"/>
+      <stop offset="100%" stop-color="#7DD3FC" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="t2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB" stop-opacity="0.72"/>
+      <stop offset="100%" stop-color="#BAE6FD" stop-opacity="0.06"/>
+    </linearGradient>
+    <linearGradient id="t3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1D4ED8" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#93C5FD" stop-opacity="0.04"/>
+    </linearGradient>
+    <!-- Halo behind jellyfish -->
+    <radialGradient id="halo" cx="50%" cy="48%" r="50%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#0F172A" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Title gradient -->
+    <linearGradient id="titleG" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E0F2FE"/>
+      <stop offset="50%" stop-color="#F0F9FF"/>
+      <stop offset="100%" stop-color="#BAE6FD"/>
+    </linearGradient>
+    <!-- Accent line -->
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0"/>
+      <stop offset="15%" stop-color="#38BDF8" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#7DD3FC" stop-opacity="1"/>
+      <stop offset="85%" stop-color="#38BDF8" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#3B82F6" stop-opacity="0"/>
+    </linearGradient>
+    <!-- Pill hover glow -->
+    <linearGradient id="pillBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E3A5F" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#0F2847" stop-opacity="0.40"/>
+    </linearGradient>
+    <!-- Filters -->
+    <filter id="dShadow" x="-15%" y="-10%" width="130%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="b"/>
+      <feOffset dy="5" result="o"/>
+      <feFlood flood-color="#0C1929" flood-opacity="0.40"/>
+      <feComposite in2="o" operator="in" result="s"/>
+      <feMerge><feMergeNode in="s"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="tGlow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="b"/>
+      <feFlood flood-color="#38BDF8" flood-opacity="0.18"/>
+      <feComposite in2="b" operator="in" result="g"/>
+      <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="nGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2"/>
+    </filter>
+    <filter id="coreGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="g"/>
+      <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- Noise texture (subtle) -->
+    <filter id="noise">
+      <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.03"/>
+      </feComponentTransfer>
+      <feBlend in="SourceGraphic" mode="overlay"/>
+    </filter>
+  </defs>
+
+  <!-- ══════════ BACKGROUND ══════════ -->
+  <rect width="1200" height="400" rx="16" fill="url(#bg)"/>
+
+  <!-- Subtle dot matrix -->
+  <g fill="#38BDF8" opacity="0.04">
+    <pattern id="dots" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="20" cy="20" r="0.8"/>
+    </pattern>
+    <rect width="1200" height="400" fill="url(#dots)"/>
+  </g>
+
+  <!-- Geometric accent lines — flowing curves -->
+  <g stroke="#1E40AF" stroke-width="0.6" fill="none" opacity="0.10">
+    <path d="M0 300 Q200 260,400 280 T800 260 T1200 300"/>
+    <path d="M0 320 Q200 280,400 300 T800 280 T1200 320"/>
+    <path d="M0 100 Q300 120,600 100 T1200 100"/>
+  </g>
+
+  <!-- Floating ambient particles -->
+  <g fill="#38BDF8">
+    <circle cx="60" cy="55" r="1.2" opacity="0.12"/>
+    <circle cx="180" cy="350" r="0.9" opacity="0.09"/>
+    <circle cx="520" cy="28" r="1.0" opacity="0.10"/>
+    <circle cx="680" cy="375" r="0.8" opacity="0.08"/>
+    <circle cx="870" cy="42" r="1.1" opacity="0.11"/>
+    <circle cx="980" cy="360" r="1.0" opacity="0.09"/>
+    <circle cx="1120" cy="70" r="0.9" opacity="0.10"/>
+    <circle cx="1060" cy="330" r="1.1" opacity="0.08"/>
+    <circle cx="370" cy="365" r="0.7" opacity="0.07"/>
+    <circle cx="770" cy="20" r="0.8" opacity="0.09"/>
+    <circle cx="440" cy="55" r="0.6" opacity="0.06"/>
+    <circle cx="1150" cy="200" r="0.7" opacity="0.08"/>
+  </g>
+
+  <!-- ══════════ JELLYFISH LOGO (left) ══════════ -->
+  <g transform="translate(175, 195) scale(0.62)">
+    <!-- Halo -->
+    <circle cx="0" cy="-10" r="160" fill="url(#halo)"/>
+
+    <!-- Dome -->
+    <path d="M0 -130
+             C-96 -130,-156 -60,-156 0
+             C-156 50,-116 80,-86 90
+             Q-46 102,0 104 Q46 102,86 90
+             C116 80,156 50,156 0
+             C156 -60,96 -130,0 -130Z"
+          fill="url(#dome)" filter="url(#dShadow)"/>
+
+    <!-- Glass layer -->
+    <path d="M0 -118
+             C-82 -118,-138 -52,-138 0
+             C-138 38,-112 60,-86 70
+             Q-46 82,0 84 Q46 82,86 70
+             C112 60,138 38,138 0
+             C138 -52,82 -118,0 -118Z"
+          fill="url(#glass)"/>
+
+    <!-- Inner glow -->
+    <ellipse cx="0" cy="-15" rx="110" ry="90" fill="url(#iglow)"/>
+
+    <!-- Neural net: hex ring -->
+    <g stroke="#93C5FD" stroke-width="0.8" opacity="0.30" fill="none">
+      <polygon points="0,-50 40,-28 40,18 0,40 -40,18 -40,-28"/>
+    </g>
+    <!-- Spines -->
+    <g stroke="#BAE6FD" stroke-width="0.9" opacity="0.45" fill="none">
+      <line x1="0" y1="-5" x2="0" y2="-50"/>
+      <line x1="0" y1="-5" x2="40" y2="-28"/>
+      <line x1="0" y1="-5" x2="40" y2="18"/>
+      <line x1="0" y1="-5" x2="0" y2="40"/>
+      <line x1="0" y1="-5" x2="-40" y2="18"/>
+      <line x1="0" y1="-5" x2="-40" y2="-28"/>
+    </g>
+    <!-- Outer spines -->
+    <g stroke="#7DD3FC" stroke-width="0.6" opacity="0.25" fill="none">
+      <line x1="0" y1="-50" x2="0" y2="-72"/>
+      <line x1="40" y1="-28" x2="62" y2="-42"/>
+      <line x1="40" y1="18" x2="65" y2="32"/>
+      <line x1="0" y1="40" x2="0" y2="60"/>
+      <line x1="-40" y1="18" x2="-65" y2="32"/>
+      <line x1="-40" y1="-28" x2="-62" y2="-42"/>
+    </g>
+    <!-- Core -->
+    <circle cx="0" cy="-5" r="8" fill="url(#core)" filter="url(#coreGlow)"/>
+    <circle cx="0" cy="-5" r="3.5" fill="#F0F9FF" opacity="0.95"/>
+    <!-- Ring nodes -->
+    <g>
+      <circle cx="0" cy="-50" r="3.5" fill="#E0F2FE" filter="url(#nGlow)"/>
+      <circle cx="40" cy="-28" r="3" fill="#BAE6FD" filter="url(#nGlow)"/>
+      <circle cx="40" cy="18" r="3" fill="#BAE6FD" filter="url(#nGlow)"/>
+      <circle cx="0" cy="40" r="3.5" fill="#E0F2FE" filter="url(#nGlow)"/>
+      <circle cx="-40" cy="18" r="3" fill="#BAE6FD" filter="url(#nGlow)"/>
+      <circle cx="-40" cy="-28" r="3" fill="#BAE6FD" filter="url(#nGlow)"/>
+    </g>
+    <!-- Terminal nodes -->
+    <g fill="#7DD3FC" opacity="0.45">
+      <circle cx="0" cy="-72" r="2.2"/>
+      <circle cx="62" cy="-42" r="2"/>
+      <circle cx="65" cy="32" r="2"/>
+      <circle cx="0" cy="60" r="2.2"/>
+      <circle cx="-65" cy="32" r="2"/>
+      <circle cx="-62" cy="-42" r="2"/>
+    </g>
+
+    <!-- Tentacles -->
+    <path d="M-12 104 C-16 132,-8 158,-14 184 C-18 200,-10 214,-16 232"
+          stroke="url(#t1)" stroke-width="3.6" fill="none" stroke-linecap="round"/>
+    <path d="M12 104 C16 132,8 158,14 184 C18 200,10 214,16 232"
+          stroke="url(#t1)" stroke-width="3.6" fill="none" stroke-linecap="round"/>
+    <path d="M-34 98 C-46 124,-36 148,-44 172 C-50 188,-40 202,-50 218"
+          stroke="url(#t2)" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+    <path d="M34 98 C46 124,36 148,44 172 C50 188,40 202,50 218"
+          stroke="url(#t2)" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+    <path d="M-58 90 C-74 112,-62 136,-74 158 C-82 172,-70 184,-80 200"
+          stroke="url(#t2)" stroke-width="2.2" fill="none" stroke-linecap="round"/>
+    <path d="M58 90 C74 112,62 136,74 158 C82 172,70 184,80 200"
+          stroke="url(#t2)" stroke-width="2.2" fill="none" stroke-linecap="round"/>
+    <path d="M-80 80 C-100 98,-88 120,-102 140 C-110 152,-98 164,-110 178"
+          stroke="url(#t3)" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+    <path d="M80 80 C100 98,88 120,102 140 C110 152,98 164,110 178"
+          stroke="url(#t3)" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+    <path d="M-98 68 C-118 84,-106 104,-122 122 C-130 134,-118 144,-130 158"
+          stroke="url(#t3)" stroke-width="1.1" fill="none" stroke-linecap="round" opacity="0.55"/>
+    <path d="M98 68 C118 84,106 104,122 122 C130 134,118 144,130 158"
+          stroke="url(#t3)" stroke-width="1.1" fill="none" stroke-linecap="round" opacity="0.55"/>
+
+    <!-- Data particles -->
+    <g fill="#BAE6FD">
+      <circle cx="-10" cy="148" r="1.8" opacity="0.72"/>
+      <circle cx="12" cy="160" r="1.8" opacity="0.68"/>
+      <circle cx="-40" cy="142" r="1.5" opacity="0.55"/>
+      <circle cx="42" cy="138" r="1.5" opacity="0.55"/>
+      <circle cx="-68" cy="128" r="1.2" opacity="0.40"/>
+      <circle cx="68" cy="124" r="1.2" opacity="0.40"/>
+      <circle cx="-94" cy="112" r="1.0" opacity="0.28"/>
+      <circle cx="94" cy="110" r="1.0" opacity="0.28"/>
+    </g>
+
+    <!-- Rim highlight -->
+    <path d="M-86 90 Q-46 102,0 104 Q46 102,86 90"
+          stroke="#7DD3FC" stroke-width="1" fill="none" opacity="0.30" stroke-linecap="round"/>
+  </g>
+
+  <!-- ══════════ TYPOGRAPHY (right) ══════════ -->
+  <!-- Wordmark -->
+  <text x="390" y="160" font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif"
+        font-size="78" letter-spacing="2" fill="url(#titleG)" filter="url(#tGlow)">
+    <tspan font-weight="250">Jelly</tspan><tspan font-weight="600">Core</tspan>
+  </text>
+
+  <!-- Accent separator -->
+  <rect x="392" y="176" width="380" height="1.5" rx="0.75" fill="url(#accent)"/>
+
+  <!-- Tagline -->
+  <text x="394" y="208" font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif"
+        font-size="15" font-weight="400" letter-spacing="5.5" fill="#64748B">
+    SELF-HOSTED AI PLATFORM
+  </text>
+
+  <!-- ── Feature pills ── -->
+  <g font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif" font-size="11" font-weight="500" letter-spacing="1.2">
+    <!-- Row 1 -->
+    <rect x="392" y="238" width="102" height="26" rx="13" fill="url(#pillBg)" stroke="#2563EB" stroke-width="0.5" stroke-opacity="0.35"/>
+    <circle cx="407" cy="251" r="2.5" fill="#38BDF8" opacity="0.75"/>
+    <text x="416" y="255" fill="#7DD3FC">MEMORY</text>
+
+    <rect x="504" y="238" width="152" height="26" rx="13" fill="url(#pillBg)" stroke="#2563EB" stroke-width="0.5" stroke-opacity="0.35"/>
+    <circle cx="519" cy="251" r="2.5" fill="#38BDF8" opacity="0.75"/>
+    <text x="528" y="255" fill="#7DD3FC">ORCHESTRATION</text>
+
+    <rect x="666" y="238" width="132" height="26" rx="13" fill="url(#pillBg)" stroke="#2563EB" stroke-width="0.5" stroke-opacity="0.35"/>
+    <circle cx="681" cy="251" r="2.5" fill="#38BDF8" opacity="0.75"/>
+    <text x="690" y="255" fill="#7DD3FC">CONTAINERS</text>
+
+    <!-- Row 2 -->
+    <rect x="392" y="274" width="150" height="26" rx="13" fill="url(#pillBg)" stroke="#2563EB" stroke-width="0.5" stroke-opacity="0.35"/>
+    <circle cx="407" cy="287" r="2.5" fill="#38BDF8" opacity="0.75"/>
+    <text x="416" y="291" fill="#7DD3FC">MULTI-CHANNEL</text>
+
+    <rect x="552" y="274" width="108" height="26" rx="13" fill="url(#pillBg)" stroke="#2563EB" stroke-width="0.5" stroke-opacity="0.35"/>
+    <circle cx="567" cy="287" r="2.5" fill="#38BDF8" opacity="0.75"/>
+    <text x="576" y="291" fill="#7DD3FC">THAI NLP</text>
+
+    <rect x="670" y="274" width="128" height="26" rx="13" fill="url(#pillBg)" stroke="#2563EB" stroke-width="0.5" stroke-opacity="0.35"/>
+    <circle cx="685" cy="287" r="2.5" fill="#38BDF8" opacity="0.75"/>
+    <text x="694" y="291" fill="#7DD3FC">ORACLE V2</text>
+  </g>
+
+  <!-- Version badge (top-right) -->
+  <g transform="translate(1090, 32)">
+    <rect width="78" height="26" rx="13" fill="#0B1A30" stroke="#2563EB" stroke-width="0.6" stroke-opacity="0.40"/>
+    <text x="39" y="17" font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif"
+          font-size="11" font-weight="600" fill="#38BDF8" text-anchor="middle" letter-spacing="1.5">v2.0</text>
+  </g>
+
+  <!-- Bottom accent line -->
+  <rect x="50" y="382" width="1100" height="1" rx="0.5" fill="url(#accent)" opacity="0.30"/>
+
+  <!-- Top-left subtle corner mark -->
+  <g stroke="#2563EB" stroke-width="0.5" opacity="0.18" fill="none">
+    <line x1="24" y1="24" x2="24" y2="50"/>
+    <line x1="24" y1="24" x2="50" y2="24"/>
+  </g>
+  <!-- Bottom-right subtle corner mark -->
+  <g stroke="#2563EB" stroke-width="0.5" opacity="0.18" fill="none">
+    <line x1="1176" y1="376" x2="1176" y2="350"/>
+    <line x1="1176" y1="376" x2="1150" y2="376"/>
+  </g>
+</svg>

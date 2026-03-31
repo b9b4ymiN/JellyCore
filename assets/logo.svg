@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Primary dome gradient — rich sky-blue -->
+    <linearGradient id="domeMain" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="40%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <!-- Glass highlight on dome -->
+    <linearGradient id="domeGlass" x1="30%" y1="0%" x2="70%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.40"/>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <!-- Inner ambient glow -->
+    <radialGradient id="innerGlow" cx="50%" cy="38%" r="42%">
+      <stop offset="0%" stop-color="#BAE6FD" stop-opacity="0.70"/>
+      <stop offset="60%" stop-color="#60A5FA" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#2563EB" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Core nucleus -->
+    <radialGradient id="coreNucleus" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#F0F9FF"/>
+      <stop offset="45%" stop-color="#7DD3FC"/>
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0.5"/>
+    </radialGradient>
+    <!-- Tentacle gradients (3 layers) -->
+    <linearGradient id="t1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0.92"/>
+      <stop offset="100%" stop-color="#7DD3FC" stop-opacity="0.10"/>
+    </linearGradient>
+    <linearGradient id="t2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB" stop-opacity="0.80"/>
+      <stop offset="100%" stop-color="#BAE6FD" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="t3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1D4ED8" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#93C5FD" stop-opacity="0.05"/>
+    </linearGradient>
+    <!-- Outer ambient halo -->
+    <radialGradient id="halo" cx="50%" cy="42%" r="50%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.12"/>
+      <stop offset="70%" stop-color="#1E40AF" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#0F172A" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Filters -->
+    <filter id="domeShadow" x="-15%" y="-10%" width="130%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10" result="blur"/>
+      <feOffset dy="6" result="off"/>
+      <feFlood flood-color="#0C1929" flood-opacity="0.35"/>
+      <feComposite in2="off" operator="in" result="shadow"/>
+      <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="g"/>
+      <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="nodeGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.5"/>
+    </filter>
+  </defs>
+
+  <!-- Ambient halo behind jellyfish -->
+  <circle cx="256" cy="230" r="220" fill="url(#halo)"/>
+
+  <!-- ═══════════ DOME ═══════════ -->
+  <path d="M256 72
+           C 155 72, 88 148, 88 218
+           C 88 268, 130 298, 168 310
+           Q 210 322, 256 324
+           Q 302 322, 344 310
+           C 382 298, 424 268, 424 218
+           C 424 148, 357 72, 256 72Z"
+        fill="url(#domeMain)" filter="url(#domeShadow)"/>
+
+  <!-- Glass highlight layer — left-biased specular -->
+  <path d="M256 82
+           C 168 82, 108 150, 108 218
+           C 108 254, 135 278, 168 288
+           Q 210 300, 256 302
+           Q 302 300, 344 288
+           C 377 278, 404 254, 404 218
+           C 404 150, 344 82, 256 82Z"
+        fill="url(#domeGlass)"/>
+
+  <!-- Inner ambient glow -->
+  <ellipse cx="256" cy="200" rx="130" ry="110" fill="url(#innerGlow)"/>
+
+  <!-- ═══════════ NEURAL NETWORK ═══════════ -->
+  <!-- Connection ring — outer hexagonal web -->
+  <g stroke="#93C5FD" stroke-width="0.9" opacity="0.35" fill="none">
+    <polygon points="256,120 302,145 302,195 256,220 210,195 210,145"/>
+  </g>
+
+  <!-- Radial connection spines from center -->
+  <g stroke="#BAE6FD" stroke-width="1.0" opacity="0.50" fill="none">
+    <line x1="256" y1="170" x2="256" y2="120"/>
+    <line x1="256" y1="170" x2="302" y2="145"/>
+    <line x1="256" y1="170" x2="302" y2="195"/>
+    <line x1="256" y1="170" x2="256" y2="220"/>
+    <line x1="256" y1="170" x2="210" y2="195"/>
+    <line x1="256" y1="170" x2="210" y2="145"/>
+  </g>
+
+  <!-- Outer extension spines -->
+  <g stroke="#7DD3FC" stroke-width="0.7" opacity="0.30" fill="none">
+    <line x1="256" y1="120" x2="256" y2="100"/>
+    <line x1="302" y1="145" x2="330" y2="130"/>
+    <line x1="302" y1="195" x2="340" y2="212"/>
+    <line x1="256" y1="220" x2="256" y2="245"/>
+    <line x1="210" y1="195" x2="172" y2="212"/>
+    <line x1="210" y1="145" x2="182" y2="130"/>
+  </g>
+
+  <!-- Central nucleus -->
+  <circle cx="256" cy="170" r="10" fill="url(#coreNucleus)" filter="url(#glow)"/>
+  <circle cx="256" cy="170" r="5" fill="#F0F9FF" opacity="0.95"/>
+
+  <!-- Hex-ring nodes (bright dots at vertices) -->
+  <g>
+    <circle cx="256" cy="120" r="4.5" fill="#E0F2FE" filter="url(#nodeGlow)"/>
+    <circle cx="302" cy="145" r="4" fill="#BAE6FD" filter="url(#nodeGlow)"/>
+    <circle cx="302" cy="195" r="4" fill="#BAE6FD" filter="url(#nodeGlow)"/>
+    <circle cx="256" cy="220" r="4.5" fill="#E0F2FE" filter="url(#nodeGlow)"/>
+    <circle cx="210" cy="195" r="4" fill="#BAE6FD" filter="url(#nodeGlow)"/>
+    <circle cx="210" cy="145" r="4" fill="#BAE6FD" filter="url(#nodeGlow)"/>
+  </g>
+
+  <!-- Terminal nodes -->
+  <g fill="#7DD3FC" opacity="0.55">
+    <circle cx="256" cy="100" r="3"/>
+    <circle cx="330" cy="130" r="2.8"/>
+    <circle cx="340" cy="212" r="2.8"/>
+    <circle cx="256" cy="245" r="3"/>
+    <circle cx="172" cy="212" r="2.8"/>
+    <circle cx="182" cy="130" r="2.8"/>
+  </g>
+
+  <!-- Cross-links (secondary web) -->
+  <g stroke="#60A5FA" stroke-width="0.5" opacity="0.22" fill="none">
+    <line x1="256" y1="120" x2="302" y2="145"/>
+    <line x1="302" y1="145" x2="302" y2="195"/>
+    <line x1="302" y1="195" x2="256" y2="220"/>
+    <line x1="256" y1="220" x2="210" y2="195"/>
+    <line x1="210" y1="195" x2="210" y2="145"/>
+    <line x1="210" y1="145" x2="256" y2="120"/>
+  </g>
+
+  <!-- ═══════════ TENTACLES ═══════════ -->
+  <!-- Center pair -->
+  <path d="M244 324 C240 358,248 388,240 420 C236 438,242 455,236 470"
+        stroke="url(#t1)" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+  <path d="M268 324 C272 358,264 388,272 420 C276 438,270 455,276 470"
+        stroke="url(#t1)" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+
+  <!-- Inner pair -->
+  <path d="M222 318 C212 350,220 380,210 410 C204 430,214 448,206 462"
+        stroke="url(#t2)" stroke-width="3.8" fill="none" stroke-linecap="round"/>
+  <path d="M290 318 C300 350,292 380,302 410 C308 430,298 448,306 462"
+        stroke="url(#t2)" stroke-width="3.8" fill="none" stroke-linecap="round"/>
+
+  <!-- Mid pair -->
+  <path d="M198 308 C182 338,194 365,180 392 C172 410,185 428,172 448"
+        stroke="url(#t2)" stroke-width="3.0" fill="none" stroke-linecap="round"/>
+  <path d="M314 308 C330 338,318 365,332 392 C340 410,327 428,340 448"
+        stroke="url(#t2)" stroke-width="3.0" fill="none" stroke-linecap="round"/>
+
+  <!-- Outer pair -->
+  <path d="M176 296 C156 322,168 348,150 374 C140 392,155 408,140 430"
+        stroke="url(#t3)" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+  <path d="M336 296 C356 322,344 348,362 374 C372 392,357 408,372 430"
+        stroke="url(#t3)" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+
+  <!-- Far-outer (whisper) pair -->
+  <path d="M160 288 C136 308,148 332,128 356 C118 372,132 386,118 406"
+        stroke="url(#t3)" stroke-width="1.6" fill="none" stroke-linecap="round" opacity="0.6"/>
+  <path d="M352 288 C376 308,364 332,384 356 C394 372,380 386,394 406"
+        stroke="url(#t3)" stroke-width="1.6" fill="none" stroke-linecap="round" opacity="0.6"/>
+
+  <!-- Data-flow particles on tentacles -->
+  <g fill="#BAE6FD">
+    <circle cx="242" cy="370" r="2.2" opacity="0.80"/>
+    <circle cx="270" cy="385" r="2.2" opacity="0.75"/>
+    <circle cx="214" cy="375" r="1.8" opacity="0.65"/>
+    <circle cx="298" cy="368" r="1.8" opacity="0.65"/>
+    <circle cx="186" cy="358" r="1.5" opacity="0.50"/>
+    <circle cx="326" cy="352" r="1.5" opacity="0.50"/>
+    <circle cx="155" cy="348" r="1.2" opacity="0.38"/>
+    <circle cx="358" cy="342" r="1.2" opacity="0.38"/>
+    <circle cx="133" cy="334" r="1.0" opacity="0.25"/>
+    <circle cx="378" cy="330" r="1.0" opacity="0.25"/>
+  </g>
+
+  <!-- Dome bottom rim highlight -->
+  <path d="M168 310 Q 210 322, 256 324 Q 302 322, 344 310"
+        stroke="#7DD3FC" stroke-width="1.2" fill="none" opacity="0.35" stroke-linecap="round"/>
+</svg>
